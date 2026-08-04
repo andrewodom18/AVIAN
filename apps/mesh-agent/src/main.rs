@@ -11,6 +11,10 @@ use tokio::sync::mpsc;
 use tokio::time::{self, Duration, MissedTickBehavior};
 use vehicle_adapters::{spawn_mavlink_source, MavlinkSourceConfig, MavlinkTelemetryEvent};
 
+mod membership;
+
+use membership::load_membership;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MavlinkStack {
     #[value(name = "ardupilot")]
@@ -59,6 +63,10 @@ struct Args {
     #[arg(long)]
     peer: Vec<PeerDescriptor>,
 
+    /// Shared versioned aircraft membership manifest; replaces --peer.
+    #[arg(long, conflicts_with = "peer")]
+    membership_file: Option<PathBuf>,
+
     /// Hard limit on direct PEAT neighbors; prevents accidental full meshes.
     #[arg(long, default_value_t = DEFAULT_MAX_NEIGHBORS)]
     max_mesh_peers: usize,
@@ -90,8 +98,10 @@ async fn main() -> anyhow::Result<()> {
     if !args.telemetry_hz.is_finite() || !(0.1..=20.0).contains(&args.telemetry_hz) {
         anyhow::bail!("--telemetry-hz must be between 0.1 and 20.0");
     }
-    if !(1..=DEFAULT_MAX_NEIGHBORS).contains(&args.max_mesh_peers) {
-        anyhow::bail!("--max-mesh-peers must be between 1 and {DEFAULT_MAX_NEIGHBORS}");
+    if !(2..=DEFAULT_MAX_NEIGHBORS).contains(&args.max_mesh_peers)
+        || !args.max_mesh_peers.is_multiple_of(2)
+    {
+        anyhow::bail!("--max-mesh-peers must be one of 2, 4, 6, or {DEFAULT_MAX_NEIGHBORS}");
     }
     if args.peer.len() > args.max_mesh_peers {
         anyhow::bail!(
@@ -119,6 +129,23 @@ async fn main() -> anyhow::Result<()> {
     let local_peer = node
         .peer_descriptor()
         .context("reading local PEAT address")?;
+    let peers = if let Some(path) = &args.membership_file {
+        let selection = load_membership(
+            path,
+            &args.formation_id,
+            &args.name,
+            &node.endpoint_id_hex(),
+            args.max_mesh_peers,
+        )?;
+        println!(
+            "Membership generation {} selected {} direct PEAT neighbors",
+            selection.generation,
+            selection.peers.len()
+        );
+        selection.peers
+    } else {
+        args.peer.clone()
+    };
 
     println!("AVIAN node '{}' is ready", node.name());
     println!("Endpoint: {}", node.endpoint_id_hex());
@@ -148,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             _ = peer_retry.tick() => {
-                connect_unavailable_peers(&node, &args.peer).await;
+                connect_unavailable_peers(&node, &peers).await;
             }
             event = async {
                 mavlink_receiver

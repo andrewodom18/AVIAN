@@ -13,6 +13,8 @@ are not required for continued operation.
 - Betaflight: mesh telemetry and emergency control only.
 - Leaderless, bounded-degree topology planning for 5-200 aircraft with no
   all-to-all peer requirement.
+- Versioned membership manifests from which every aircraft independently
+  selects its bounded PEAT neighbors.
 - Automatic multi-link selection with redundant emergency delivery.
 - Signed, expiring, replay-resistant emergency commands.
 - A system ceiling of 25,000 ft MSL (7,620 m), with MSL, AGL, and
@@ -64,3 +66,5 @@ The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
 The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
+The [membership guide](docs/membership.md) shows how a formation is provisioned
+without selecting a leader.

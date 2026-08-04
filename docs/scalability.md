@@ -41,13 +41,14 @@ convergence time, airtime, packet loss, memory, CPU, and recovery under motion.
 
 ## Membership and failure behavior
 
-No member has permanent leadership or unique state. A signed membership view
-will supply stable node identities and reachable addresses. When membership
+No member has permanent leadership or unique state. A versioned, locally
+provisioned membership manifest supplies stable node identities and reachable
+addresses. Every aircraft validates that its locally derived PEAT identity
+matches its entry, then computes its neighbors independently. When membership
 changes, each node can recompute the overlay locally. PEAT carries durable
 state across the surviving graph and reconciles it after partitions.
 
-The present `mesh-agent` accepts static bootstrap peers and rejects more than
-eight. Loading a shared membership manifest, live discovery, and topology
-reconciliation are the next implementation steps; until then, the scale
-planner is a tested library contract rather than a complete 200-aircraft
-deployment mechanism.
+The present `mesh-agent` can load the manifest at startup or accept static
+bootstrap peers, and it rejects more than eight direct neighbors. Live
+discovery, signed manifest distribution, generation reconciliation, and
+in-flight topology changes remain future work.

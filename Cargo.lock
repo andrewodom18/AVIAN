@@ -2563,6 +2563,8 @@ dependencies = [
  "clap",
  "mesh-core",
  "mesh-peat",
+ "serde",
+ "serde_json",
  "tokio",
  "vehicle-adapters",
 ]
