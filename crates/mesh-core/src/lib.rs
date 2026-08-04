@@ -5,6 +5,7 @@ mod command;
 mod link;
 mod message;
 mod node;
+mod relay;
 mod topology;
 
 pub use altitude::{Altitude, AltitudeError, SYSTEM_MAX_MSL_FT, SYSTEM_MAX_MSL_M};
@@ -17,6 +18,11 @@ pub use message::{
     Telemetry,
 };
 pub use node::{Capability, FlightStack, NodeId, NodeProfile, NodeRole, ProfileError};
+pub use relay::{
+    AssignmentPool, GeoPoint, MissionAllocation, OperatorTaskGroup, RelayAllocationMode,
+    RelayCandidate, RelayCorridorRequest, RelayFeasibility, RelayPlan, RelayPlanError,
+    RelayPlanner, RelayPolicy, RelayStation,
+};
 pub use topology::{
     TopologyError, TopologyPlan, TopologyPlanner, DEFAULT_MAX_NEIGHBORS, MAX_SUPPORTED_SWARM_SIZE,
     MIN_SUPPORTED_SWARM_SIZE,

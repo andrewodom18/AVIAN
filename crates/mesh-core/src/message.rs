@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{Altitude, EmergencyCommand, NodeId, NodeProfile};
+use crate::{Altitude, EmergencyCommand, MissionAllocation, NodeId, NodeProfile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +121,7 @@ pub enum MeshPayload {
     NodeAdvertisement(NodeProfile),
     Telemetry(Telemetry),
     Mission(MissionState),
+    MissionAllocation(MissionAllocation),
     EmergencyCommand(EmergencyCommand),
     EmergencyAck(EmergencyAck),
 }
