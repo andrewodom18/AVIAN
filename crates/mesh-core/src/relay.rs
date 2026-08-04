@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::{NodeId, MAX_SUPPORTED_SWARM_SIZE, MIN_SUPPORTED_SWARM_SIZE, SYSTEM_MAX_MSL_M};
 
@@ -41,6 +42,7 @@ impl GeoPoint {
             shortest_longitude_delta(self.longitude_deg, other.longitude_deg).to_radians();
         let haversine = (latitude_delta / 2.0).sin().powi(2)
             + latitude_1.cos() * latitude_2.cos() * (longitude_delta / 2.0).sin().powi(2);
+        let haversine = haversine.clamp(0.0, 1.0);
         let surface_distance =
             2.0 * EARTH_RADIUS_M * haversine.sqrt().atan2((1.0 - haversine).sqrt());
         surface_distance.hypot(other.msl_m - self.msl_m)
@@ -428,15 +430,22 @@ pub struct OperatorTaskGroup {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MissionAllocation {
+    pub mission_id: Uuid,
+    pub generation: u64,
     pub relay_plan: RelayPlan,
     pub task_groups: Vec<OperatorTaskGroup>,
 }
 
 impl MissionAllocation {
     pub fn new(
+        mission_id: Uuid,
+        generation: u64,
         relay_plan: RelayPlan,
         task_groups: Vec<OperatorTaskGroup>,
     ) -> Result<Self, RelayPlanError> {
+        if generation == 0 {
+            return Err(RelayPlanError::InvalidMissionGeneration);
+        }
         let relay_members: BTreeSet<NodeId> = relay_plan.relay_members.iter().cloned().collect();
         let mission_members: BTreeSet<NodeId> =
             relay_plan.mission_members.iter().cloned().collect();
@@ -463,6 +472,8 @@ impl MissionAllocation {
             }
         }
         Ok(Self {
+            mission_id,
+            generation,
             relay_plan,
             task_groups,
         })
@@ -508,6 +519,8 @@ pub enum RelayPlanError {
     MemberOutsideGroupPool(NodeId),
     #[error("aircraft {0} is assigned to more than one operator group")]
     MemberAssignedTwice(NodeId),
+    #[error("mission allocation generation must be positive")]
+    InvalidMissionGeneration,
 }
 
 #[cfg(test)]
@@ -609,6 +622,8 @@ mod tests {
         let mission_1 = plan.mission_members[0].clone();
         let mission_2 = plan.mission_members[1].clone();
         let allocation = MissionAllocation::new(
+            Uuid::from_u128(42),
+            1,
             plan,
             vec![
                 OperatorTaskGroup {
@@ -637,6 +652,8 @@ mod tests {
             .unwrap();
         let member = plan.mission_members[0].clone();
         let result = MissionAllocation::new(
+            Uuid::from_u128(42),
+            1,
             plan,
             vec![
                 OperatorTaskGroup {

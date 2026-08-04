@@ -40,6 +40,7 @@ radio-specific metrics are not implemented yet.
 | `vehicle-adapters` | Hardware-neutral ArduPilot, PX4, and Betaflight adapter contract |
 | `mesh-sim` | Deterministic failure and recovery simulation |
 | `mesh-agent` | Onboard companion-service entry point |
+| `mission-planner` | ARC UI JSON engine for relay corridors, overrides, and task groups |
 
 ## Run
 
@@ -68,3 +69,5 @@ The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
 The [membership guide](docs/membership.md) shows how a formation is provisioned
 without selecting a leader.
+The [ARC UI relay-planning guide](docs/arc-ui-relay-planning.md) defines
+automatic relay reservation, manual overrides, and individual/group tasks.

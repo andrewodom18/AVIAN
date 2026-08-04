@@ -1,0 +1,77 @@
+{
+  "mission_id": "00000000-0000-0000-0000-000000000042",
+  "generation": 1,
+  "corridor": {
+    "base": {
+      "latitude_deg": 34.0,
+      "longitude_deg": -117.0,
+      "msl_m": 500.0
+    },
+    "objective_entry": {
+      "latitude_deg": 34.0,
+      "longitude_deg": -116.9976,
+      "msl_m": 500.0
+    },
+    "candidates": [
+      {
+        "node_id": "aircraft-001",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.9,
+        "mission_utility": 0.5
+      },
+      {
+        "node_id": "aircraft-002",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.88,
+        "mission_utility": 0.4
+      },
+      {
+        "node_id": "aircraft-003",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.85,
+        "mission_utility": 0.6
+      },
+      {
+        "node_id": "aircraft-004",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.82,
+        "mission_utility": 0.3
+      },
+      {
+        "node_id": "aircraft-005",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.75,
+        "mission_utility": 0.9
+      }
+    ],
+    "policy": {
+      "nominal_reliable_range_m": 120.0,
+      "safety_margin_ratio": 0.15,
+      "desired_relays_per_station": 2
+    },
+    "allocation": {
+      "mode": "automatic"
+    }
+  },
+  "relay_count_previews": [
+    {
+      "relay_count": 2,
+      "station_count": null
+    },
+    {
+      "relay_count": 4,
+      "station_count": null
+    }
+  ],
+  "task_groups": []
+}

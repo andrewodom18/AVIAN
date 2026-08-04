@@ -2640,6 +2640,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mission-planner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mesh-core",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "moka"
 version = "0.12.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

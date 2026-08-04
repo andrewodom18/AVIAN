@@ -46,6 +46,19 @@ Betaflight v0.1 actions are limited to GPS Rescue, return-to-launch mapped to
 GPS Rescue, and disarm after the adapter reports a landed state. Raw stick
 control is not a mesh command.
 
+## Mission allocation
+
+A mission allocation contains a mission UUID, positive generation, relay
+corridor assessment, exact relay and mission pools, and optional operator task
+groups. Relay plans include station positions, range utilization, local
+failure tolerance, reserved relay count, remaining payload capacity,
+feasibility, and warnings.
+
+Task groups target either relay members or remaining mission members. A member
+can have only one group instruction in a generation. A one-member group is an
+individual assignment. A new allocation or in-flight reallocation increments
+the generation rather than silently rewriting an active plan.
+
 ## Delivery classes
 
 | Class | Durable | Reliable | Redundancy | Lifetime |

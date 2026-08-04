@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/mesh-agent",
+    "apps/mission-planner",
     "crates/mesh-core",
     "crates/mesh-peat",
     "crates/mesh-sim",

@@ -108,6 +108,19 @@ identity, and select only its planned neighbors. Live distribution and
 reconciliation of membership generations is a later milestone. See
 [the scalability contract](scalability.md).
 
+## Mission relay corridors
+
+Before a beyond-direct-link mission, ARC UI can submit base/objective geometry,
+the available aircraft inventory, radio assumptions, and an automatic or
+manual relay allocation. AVIAN returns redundant relay stations, exact
+reserved members, remaining payload capacity, hop utilization, failure
+tolerance, and warnings. Accepted plans are versioned mission allocations;
+roles describe work for that mission and do not create permanent authority.
+
+The current corridor is a straight geodesic path. Terrain-aware routing, live
+link feedback, and automatic in-flight relay replacement remain later stages.
+See [the ARC UI relay-planning guide](arc-ui-relay-planning.md).
+
 ## Flight-controller telemetry boundary
 
 ArduPilot and PX4 are decoded through the MAVLink common dialect. AVIAN locks
