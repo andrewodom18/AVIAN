@@ -2,7 +2,9 @@
 
 mod mavlink_adapter;
 
-pub use mavlink_adapter::MavlinkTelemetryAccumulator;
+pub use mavlink_adapter::{
+    spawn_mavlink_source, MavlinkSourceConfig, MavlinkTelemetryAccumulator, MavlinkTelemetryEvent,
+};
 
 use async_trait::async_trait;
 use mesh_core::{
@@ -146,6 +148,10 @@ pub enum AdapterError {
     },
     #[error("MAVLink global position contains invalid latitude or longitude")]
     InvalidMavlinkPosition,
+    #[error("MAVLink event channel capacity must be greater than zero")]
+    InvalidChannelCapacity,
+    #[error("vehicle adapter runtime error: {0}")]
+    Runtime(String),
     #[error(transparent)]
     Altitude(#[from] mesh_core::AltitudeError),
 }

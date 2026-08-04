@@ -1,8 +1,127 @@
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use mavlink::dialects::common::{MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavState};
-use mavlink::MavHeader;
+use mavlink::{MavConnection, MavHeader};
 use mesh_core::{Altitude, FlightStack, NodeId, Telemetry};
+use tokio::sync::mpsc;
 
 use crate::AdapterError;
+
+#[derive(Debug, Clone)]
+pub struct MavlinkSourceConfig {
+    pub address: String,
+    pub source: NodeId,
+    pub expected_stack: FlightStack,
+    pub reconnect_delay: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MavlinkTelemetryEvent {
+    Connected,
+    Telemetry(Telemetry),
+    ConnectionLost(String),
+    Rejected(String),
+}
+
+/// Starts rust-mavlink's blocking transport on a dedicated OS thread. The
+/// bounded channel applies backpressure instead of allowing telemetry to grow
+/// without limit when mesh publication is busy.
+pub fn spawn_mavlink_source(
+    config: MavlinkSourceConfig,
+    channel_capacity: usize,
+) -> Result<mpsc::Receiver<MavlinkTelemetryEvent>, AdapterError> {
+    if channel_capacity == 0 {
+        return Err(AdapterError::InvalidChannelCapacity);
+    }
+    let (sender, receiver) = mpsc::channel(channel_capacity);
+    thread::Builder::new()
+        .name("avian-mavlink".to_owned())
+        .spawn(move || run_mavlink_source(config, sender))
+        .map_err(|error| AdapterError::Runtime(error.to_string()))?;
+    Ok(receiver)
+}
+
+fn run_mavlink_source(config: MavlinkSourceConfig, sender: mpsc::Sender<MavlinkTelemetryEvent>) {
+    loop {
+        let connection = match mavlink::connect::<MavMessage>(&config.address) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if !send_event(
+                    &sender,
+                    MavlinkTelemetryEvent::ConnectionLost(error.to_string()),
+                ) {
+                    return;
+                }
+                thread::sleep(config.reconnect_delay);
+                continue;
+            }
+        };
+        if !send_event(&sender, MavlinkTelemetryEvent::Connected) {
+            return;
+        }
+        if !receive_connection(&config, &connection, &sender) {
+            return;
+        }
+        thread::sleep(config.reconnect_delay);
+    }
+}
+
+fn receive_connection(
+    config: &MavlinkSourceConfig,
+    connection: &dyn MavConnection<MavMessage>,
+    sender: &mpsc::Sender<MavlinkTelemetryEvent>,
+) -> bool {
+    let mut accumulator =
+        match MavlinkTelemetryAccumulator::new(config.source.clone(), config.expected_stack) {
+            Ok(accumulator) => accumulator,
+            Err(error) => {
+                send_event(sender, MavlinkTelemetryEvent::Rejected(error.to_string()));
+                return false;
+            }
+        };
+    loop {
+        let (header, message) = match connection.recv() {
+            Ok(value) => value,
+            Err(error) => {
+                return send_event(
+                    sender,
+                    MavlinkTelemetryEvent::ConnectionLost(error.to_string()),
+                );
+            }
+        };
+        match accumulator.ingest(header, &message, unix_time_ms()) {
+            Ok(Some(telemetry)) => {
+                if !send_event(sender, MavlinkTelemetryEvent::Telemetry(telemetry)) {
+                    return false;
+                }
+            }
+            Ok(None) => {}
+            Err(error @ AdapterError::UnexpectedFlightStack { .. }) => {
+                send_event(sender, MavlinkTelemetryEvent::Rejected(error.to_string()));
+                return false;
+            }
+            Err(error) => {
+                if !send_event(sender, MavlinkTelemetryEvent::Rejected(error.to_string())) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+fn send_event(sender: &mpsc::Sender<MavlinkTelemetryEvent>, event: MavlinkTelemetryEvent) -> bool {
+    sender.blocking_send(event).is_ok()
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct HeartbeatState {
@@ -373,5 +492,19 @@ mod tests {
                 reported: FlightStack::ArduPilot,
             })
         );
+    }
+
+    #[test]
+    fn rejects_zero_capacity_event_channel() {
+        let result = spawn_mavlink_source(
+            MavlinkSourceConfig {
+                address: "udpin:127.0.0.1:14550".to_owned(),
+                source: NodeId::from("px4-1"),
+                expected_stack: FlightStack::Px4,
+                reconnect_delay: Duration::from_secs(1),
+            },
+            0,
+        );
+        assert!(matches!(result, Err(AdapterError::InvalidChannelCapacity)));
     }
 }

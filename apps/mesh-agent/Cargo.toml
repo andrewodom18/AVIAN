@@ -8,8 +8,13 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+mesh-core = { path = "../../crates/mesh-core" }
 mesh-peat = { path = "../../crates/mesh-peat" }
 tokio.workspace = true
+vehicle-adapters = { path = "../../crates/vehicle-adapters" }
+
+[features]
+direct-serial = ["vehicle-adapters/direct-serial"]
 
 [lints]
 workspace = true

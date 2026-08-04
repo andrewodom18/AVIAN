@@ -2561,8 +2561,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mesh-core",
  "mesh-peat",
  "tokio",
+ "vehicle-adapters",
 ]
 
 [[package]]

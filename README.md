@@ -20,8 +20,10 @@ are not required for continued operation.
 
 The implementation now includes both the deterministic simulator and a real
 PEAT Automerge/Iroh peer with formation authentication, stable identity,
-persistent state, and static peer bootstrap. It does not yet drive physical
-flight controllers or radios.
+persistent state, and static peer bootstrap. `mesh-agent` can ingest live
+ArduPilot/PX4 MAVLink telemetry over UDP or TCP; direct serial is an optional
+build feature. Emergency flight-controller output and radio-specific metrics
+are not implemented yet.
 
 ## Workspace
 
@@ -53,3 +55,4 @@ docker run --rm -v "$PWD:/work" -w /work rust:1.91-bookworm cargo run -p mesh-si
 See [the architecture](docs/architecture.md) and
 [message contract](docs/message-contract.md) for the current design boundary.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
+The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
