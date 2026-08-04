@@ -414,10 +414,10 @@ fn sample_telemetry(source: NodeId, timestamp_ms: u64) -> Result<Telemetry, Simu
         altitude: Altitude::new(2_000.0, 500.0, 450.0)?,
         velocity_ned_mps: [10.0, 0.0, 0.0],
         attitude_rpy_deg: [0.0, 0.0, 90.0],
-        battery_remaining: 0.75,
-        control_link_quality: 0.8,
+        battery_remaining: Some(0.75),
+        control_link_quality: Some(0.8),
         armed: true,
-        landed: false,
+        landed: Some(false),
         failsafe: false,
     })
 }

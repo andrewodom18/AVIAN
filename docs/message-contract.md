@@ -21,6 +21,12 @@ The minimal common telemetry record contains:
 Telemetry is latest-value data. Old telemetry must not be replayed after a
 partition heals.
 
+AGL is optional because MAVLink `GLOBAL_POSITION_INT.relative_alt` is relative
+to home, not terrain. AVIAN never copies relative altitude into AGL when no
+terrain or range estimate exists. Battery, receiver-link quality, and landed
+state are also optional instead of inventing healthy defaults for unknown
+MAVLink values.
+
 ## Emergency command
 
 An emergency command contains:

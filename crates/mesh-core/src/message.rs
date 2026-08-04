@@ -79,10 +79,13 @@ pub struct Telemetry {
     pub altitude: Altitude,
     pub velocity_ned_mps: [f32; 3],
     pub attitude_rpy_deg: [f32; 3],
-    pub battery_remaining: f32,
-    pub control_link_quality: f32,
+    /// Normalized range 0.0-1.0, or `None` when the controller reports unknown.
+    pub battery_remaining: Option<f32>,
+    /// Normalized range 0.0-1.0, or `None` when receiver RSSI is unavailable.
+    pub control_link_quality: Option<f32>,
     pub armed: bool,
-    pub landed: bool,
+    /// `None` until the controller explicitly reports landed state.
+    pub landed: Option<bool>,
     pub failsafe: bool,
 }
 

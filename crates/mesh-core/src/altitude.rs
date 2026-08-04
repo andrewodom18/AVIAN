@@ -11,17 +11,32 @@ pub const SYSTEM_MAX_MSL_M: f64 = 7_620.0;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Altitude {
     pub msl_m: f64,
-    pub agl_m: f64,
+    /// Height above terrain when the vehicle has a terrain or range estimate.
+    /// This remains `None` when only MSL and relative-to-launch are known.
+    pub agl_m: Option<f64>,
     pub above_launch_m: f64,
 }
 
 impl Altitude {
     pub fn new(msl_m: f64, agl_m: f64, above_launch_m: f64) -> Result<Self, AltitudeError> {
-        if !msl_m.is_finite() || !agl_m.is_finite() || !above_launch_m.is_finite() {
+        Self::with_optional_agl(msl_m, Some(agl_m), above_launch_m)
+    }
+
+    pub fn with_optional_agl(
+        msl_m: f64,
+        agl_m: Option<f64>,
+        above_launch_m: f64,
+    ) -> Result<Self, AltitudeError> {
+        if !msl_m.is_finite()
+            || agl_m.is_some_and(|value| !value.is_finite())
+            || !above_launch_m.is_finite()
+        {
             return Err(AltitudeError::NonFinite);
         }
-        if agl_m < 0.0 {
-            return Err(AltitudeError::NegativeAgl(agl_m));
+        if let Some(agl_m) = agl_m {
+            if agl_m < 0.0 {
+                return Err(AltitudeError::NegativeAgl(agl_m));
+            }
         }
         if msl_m > SYSTEM_MAX_MSL_M {
             return Err(AltitudeError::AboveSystemCeiling(msl_m));
@@ -60,5 +75,12 @@ mod tests {
             Altitude::new(SYSTEM_MAX_MSL_M + 0.1, 100.0, 100.0),
             Err(AltitudeError::AboveSystemCeiling(SYSTEM_MAX_MSL_M + 0.1))
         );
+    }
+
+    #[test]
+    fn preserves_unknown_agl_instead_of_using_relative_altitude() {
+        let altitude = Altitude::with_optional_agl(2_000.0, None, 450.0).unwrap();
+        assert_eq!(altitude.agl_m, None);
+        assert_eq!(altitude.above_launch_m, 450.0);
     }
 }

@@ -80,7 +80,11 @@ impl VehicleAdapter for SimulatedVehicleAdapter {
         let native_action = match (stack, action) {
             (FlightStack::Betaflight, EmergencyAction::GpsRescue)
             | (FlightStack::Betaflight, EmergencyAction::ReturnToLaunch) => "gps_rescue",
-            (FlightStack::Betaflight, EmergencyAction::Disarm) if telemetry.landed => "disarm",
+            (FlightStack::Betaflight, EmergencyAction::Disarm)
+                if telemetry.landed == Some(true) =>
+            {
+                "disarm"
+            }
             (FlightStack::Betaflight, EmergencyAction::Disarm) => {
                 return Err(AdapterError::UnsafeAirborneDisarm)
             }
@@ -93,7 +97,7 @@ impl VehicleAdapter for SimulatedVehicleAdapter {
             }
             (FlightStack::ArduPilot | FlightStack::Px4, EmergencyAction::Land) => "land",
             (FlightStack::ArduPilot | FlightStack::Px4, EmergencyAction::Disarm)
-                if telemetry.landed =>
+                if telemetry.landed == Some(true) =>
             {
                 "disarm"
             }
@@ -146,10 +150,10 @@ mod tests {
             altitude: Altitude::new(100.0, 50.0, 50.0).unwrap(),
             velocity_ned_mps: [0.0; 3],
             attitude_rpy_deg: [0.0; 3],
-            battery_remaining: 0.8,
-            control_link_quality: 0.9,
+            battery_remaining: Some(0.8),
+            control_link_quality: Some(0.9),
             armed: !landed,
-            landed,
+            landed: Some(landed),
             failsafe: false,
         }
     }
