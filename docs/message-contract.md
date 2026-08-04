@@ -52,7 +52,7 @@ A mission allocation contains a mission UUID, positive generation, relay
 corridor assessment, exact relay and mission pools, and optional operator task
 groups. Relay plans include station positions, range utilization, local
 failure tolerance, reserved relay count, remaining payload capacity,
-feasibility, and warnings.
+feasibility, range evidence, activation readiness, and warnings.
 
 Task groups target either relay members or remaining mission members. A member
 can have only one group instruction in a generation. A one-member group is an

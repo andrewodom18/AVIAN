@@ -7,6 +7,119 @@ use uuid::Uuid;
 use crate::{NodeId, MAX_SUPPORTED_SWARM_SIZE, MIN_SUPPORTED_SWARM_SIZE, SYSTEM_MAX_MSL_M};
 
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
+const FREE_SPACE_PATH_LOSS_CONSTANT_DB: f64 = 32.44;
+
+/// Native transmit power published for the StreamCaster LITE 5200 (SL5200).
+/// AVIAN does not add a beamforming credit here; that belongs in a measured
+/// antenna and installation model for the actual aircraft.
+pub const SILVUS_SL5200_NATIVE_TX_POWER_DBM: f64 = 33.0;
+/// Published SL5200 receive sensitivity at 5 MHz channel bandwidth.
+pub const SILVUS_SL5200_5_MHZ_SENSITIVITY_DBM: f64 = -101.0;
+/// Published SL5200 receive sensitivity at optional 1.25 MHz bandwidth.
+pub const SILVUS_SL5200_1_25_MHZ_SENSITIVITY_DBM: f64 = -107.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RadioLinkBudget {
+    pub frequency_mhz: f64,
+    pub transmitter_power_dbm: f64,
+    pub transmitter_antenna_gain_dbi: f64,
+    pub receiver_antenna_gain_dbi: f64,
+    pub receiver_sensitivity_dbm: f64,
+    /// Margin reserved for fading, maneuvering, and unmodeled variation.
+    pub fade_margin_db: f64,
+    /// Known feeder, installation, terrain, and obstruction losses.
+    pub additional_path_loss_db: f64,
+}
+
+impl RadioLinkBudget {
+    /// A starting profile from published SL5200 5 MHz RF parameters. The
+    /// caller must supply the configured frequency and measured losses.
+    pub fn silvus_sl5200_5_mhz(frequency_mhz: f64, fade_margin_db: f64) -> Self {
+        Self {
+            frequency_mhz,
+            transmitter_power_dbm: SILVUS_SL5200_NATIVE_TX_POWER_DBM,
+            transmitter_antenna_gain_dbi: 0.0,
+            receiver_antenna_gain_dbi: 0.0,
+            receiver_sensitivity_dbm: SILVUS_SL5200_5_MHZ_SENSITIVITY_DBM,
+            fade_margin_db,
+            additional_path_loss_db: 0.0,
+        }
+    }
+
+    pub fn max_free_space_range_m(self) -> Result<f64, RelayPlanError> {
+        let values = [
+            self.frequency_mhz,
+            self.transmitter_power_dbm,
+            self.transmitter_antenna_gain_dbi,
+            self.receiver_antenna_gain_dbi,
+            self.receiver_sensitivity_dbm,
+            self.fade_margin_db,
+            self.additional_path_loss_db,
+        ];
+        if values.iter().any(|value| !value.is_finite())
+            || self.frequency_mhz <= 0.0
+            || self.fade_margin_db < 0.0
+            || self.additional_path_loss_db < 0.0
+        {
+            return Err(RelayPlanError::InvalidLinkBudget);
+        }
+        let maximum_path_loss_db = self.transmitter_power_dbm
+            + self.transmitter_antenna_gain_dbi
+            + self.receiver_antenna_gain_dbi
+            - self.receiver_sensitivity_dbm
+            - self.fade_margin_db
+            - self.additional_path_loss_db;
+        let range_km = 10_f64.powf(
+            (maximum_path_loss_db
+                - FREE_SPACE_PATH_LOSS_CONSTANT_DB
+                - 20.0 * self.frequency_mhz.log10())
+                / 20.0,
+        );
+        let range_m = range_km * 1_000.0;
+        if !range_m.is_finite() || range_m <= 0.0 {
+            return Err(RelayPlanError::InvalidLinkBudget);
+        }
+        Ok(range_m)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeEvidence {
+    FieldCalibrated,
+    FreeSpaceModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RelayRangeModel {
+    /// Mission-safe range established from current radio/airframe testing for
+    /// the intended bandwidth, altitude, and terrain class.
+    FieldCalibrated { usable_segment_m: f64 },
+    /// A first-pass path-loss calculation. It must be calibrated against live
+    /// measurements and terrain before a mission is activated.
+    FreeSpaceLinkBudget { budget: RadioLinkBudget },
+}
+
+impl RelayRangeModel {
+    fn usable_segment_m(&self) -> Result<f64, RelayPlanError> {
+        let value = match self {
+            Self::FieldCalibrated { usable_segment_m } => *usable_segment_m,
+            Self::FreeSpaceLinkBudget { budget } => budget.max_free_space_range_m()?,
+        };
+        if !value.is_finite() || value <= 0.0 {
+            return Err(RelayPlanError::InvalidUsableRange);
+        }
+        Ok(value)
+    }
+
+    fn evidence(&self) -> RangeEvidence {
+        match self {
+            Self::FieldCalibrated { .. } => RangeEvidence::FieldCalibrated,
+            Self::FreeSpaceLinkBudget { .. } => RangeEvidence::FreeSpaceModel,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GeoPoint {
@@ -76,29 +189,19 @@ pub struct RelayCandidate {
     pub mission_utility: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayPolicy {
-    /// Modeled or measured reliable range before AVIAN's safety derating.
-    pub nominal_reliable_range_m: f64,
-    /// Fraction of nominal range held back for motion, terrain, and RF variation.
-    pub safety_margin_ratio: f32,
+    pub range: RelayRangeModel,
     /// Desired aircraft at each relay station. Two tolerates one local loss.
     pub desired_relays_per_station: usize,
 }
 
 impl RelayPolicy {
-    pub fn usable_segment_m(self) -> Result<f64, RelayPlanError> {
-        if !self.nominal_reliable_range_m.is_finite() || self.nominal_reliable_range_m <= 0.0 {
-            return Err(RelayPlanError::InvalidNominalRange);
-        }
-        if !self.safety_margin_ratio.is_finite() || !(0.0..0.9).contains(&self.safety_margin_ratio)
-        {
-            return Err(RelayPlanError::InvalidSafetyMargin);
-        }
+    pub fn usable_segment_m(&self) -> Result<f64, RelayPlanError> {
         if self.desired_relays_per_station == 0 {
             return Err(RelayPlanError::InvalidStationRedundancy);
         }
-        Ok(self.nominal_reliable_range_m * (1.0 - f64::from(self.safety_margin_ratio)))
+        self.range.usable_segment_m()
     }
 }
 
@@ -146,6 +249,10 @@ pub struct RelayStation {
 pub struct RelayPlan {
     pub route_distance_m: f64,
     pub usable_segment_m: f64,
+    pub range_evidence: RangeEvidence,
+    /// `false` when the plan is based only on a free-space model, even if its
+    /// geometry and redundancy are otherwise healthy.
+    pub activation_ready: bool,
     pub recommended_station_count: usize,
     pub recommended_relay_count: usize,
     pub reserved_relay_count: usize,
@@ -178,6 +285,7 @@ impl RelayPlanner {
         validate_candidates(&request.candidates)?;
 
         let usable_segment_m = request.policy.usable_segment_m()?;
+        let range_evidence = request.policy.range.evidence();
         let route_distance_m = base.distance_to(objective);
         let required_link_count = (route_distance_m / usable_segment_m).ceil().max(1.0) as usize;
         let recommended_station_count = required_link_count.saturating_sub(1);
@@ -256,10 +364,19 @@ impl RelayPlanner {
                 minimum_relays_per_station, request.policy.desired_relays_per_station
             ));
         }
+        if range_evidence == RangeEvidence::FreeSpaceModel {
+            warnings.push(
+                "This relay count uses a free-space link budget only. Calibrate it against current radio, antenna, altitude, terrain, and link measurements before mission activation."
+                    .into(),
+            );
+        }
 
         Ok(RelayPlan {
             route_distance_m,
             usable_segment_m,
+            range_evidence,
+            activation_ready: feasibility == RelayFeasibility::Healthy
+                && range_evidence == RangeEvidence::FieldCalibrated,
             recommended_station_count,
             recommended_relay_count,
             reserved_relay_count: relay_members.len(),
@@ -488,10 +605,12 @@ pub enum RelayPlanError {
     InvalidCoordinate,
     #[error("relay altitude {0} m MSL exceeds the 7,620 m system ceiling")]
     AboveSystemCeiling(f64),
-    #[error("nominal reliable radio range must be finite and positive")]
-    InvalidNominalRange,
-    #[error("radio safety margin must be finite and in [0.0, 0.9)")]
-    InvalidSafetyMargin,
+    #[error("field-calibrated usable radio range must be finite and positive")]
+    InvalidUsableRange,
+    #[error(
+        "radio link-budget inputs must be finite, with positive frequency and non-negative losses"
+    )]
+    InvalidLinkBudget,
     #[error("desired relays per station must be at least one")]
     InvalidStationRedundancy,
     #[error("duplicate relay candidate {0}")]
@@ -540,7 +659,7 @@ mod tests {
             .collect()
     }
 
-    fn one_mile_request(allocation: RelayAllocationMode) -> RelayCorridorRequest {
+    fn synthetic_one_mile_request(allocation: RelayAllocationMode) -> RelayCorridorRequest {
         RelayCorridorRequest {
             base: GeoPoint {
                 latitude_deg: 0.0,
@@ -554,8 +673,9 @@ mod tests {
             },
             candidates: candidates(50),
             policy: RelayPolicy {
-                nominal_reliable_range_m: 160.0,
-                safety_margin_ratio: 0.15,
+                range: RelayRangeModel::FieldCalibrated {
+                    usable_segment_m: 136.0,
+                },
                 desired_relays_per_station: 2,
             },
             allocation,
@@ -563,9 +683,9 @@ mod tests {
     }
 
     #[test]
-    fn fifty_aircraft_one_mile_reserves_twenty_two_relays() {
+    fn synthetic_calibration_produces_expected_relay_reservation() {
         let plan = RelayPlanner
-            .plan(&one_mile_request(RelayAllocationMode::Automatic))
+            .plan(&synthetic_one_mile_request(RelayAllocationMode::Automatic))
             .unwrap();
 
         assert_eq!(plan.recommended_station_count, 11);
@@ -574,25 +694,31 @@ mod tests {
         assert_eq!(plan.mission_drones_remaining, 28);
         assert_eq!(plan.minimum_station_failure_tolerance, 1);
         assert_eq!(plan.feasibility, RelayFeasibility::Healthy);
+        assert_eq!(plan.range_evidence, RangeEvidence::FieldCalibrated);
+        assert!(plan.activation_ready);
     }
 
     #[test]
     fn decreasing_chain_reports_redundancy_and_coverage_impact() {
         let degraded = RelayPlanner
-            .plan(&one_mile_request(RelayAllocationMode::RelayCount {
-                relay_count: 20,
-                station_count: None,
-            }))
+            .plan(&synthetic_one_mile_request(
+                RelayAllocationMode::RelayCount {
+                    relay_count: 20,
+                    station_count: None,
+                },
+            ))
             .unwrap();
         assert_eq!(degraded.feasibility, RelayFeasibility::Degraded);
         assert_eq!(degraded.mission_drones_remaining, 30);
         assert_eq!(degraded.minimum_relays_per_station, 1);
 
         let infeasible = RelayPlanner
-            .plan(&one_mile_request(RelayAllocationMode::RelayCount {
-                relay_count: 10,
-                station_count: None,
-            }))
+            .plan(&synthetic_one_mile_request(
+                RelayAllocationMode::RelayCount {
+                    relay_count: 10,
+                    station_count: None,
+                },
+            ))
             .unwrap();
         assert_eq!(infeasible.feasibility, RelayFeasibility::Infeasible);
         assert!(infeasible.range_utilization > 1.0);
@@ -601,10 +727,12 @@ mod tests {
     #[test]
     fn increasing_chain_can_shorten_hops() {
         let plan = RelayPlanner
-            .plan(&one_mile_request(RelayAllocationMode::RelayCount {
-                relay_count: 24,
-                station_count: Some(12),
-            }))
+            .plan(&synthetic_one_mile_request(
+                RelayAllocationMode::RelayCount {
+                    relay_count: 24,
+                    station_count: Some(12),
+                },
+            ))
             .unwrap();
 
         assert_eq!(plan.feasibility, RelayFeasibility::Healthy);
@@ -616,7 +744,7 @@ mod tests {
     #[test]
     fn operator_can_assign_individuals_and_groups_without_crossing_pools() {
         let plan = RelayPlanner
-            .plan(&one_mile_request(RelayAllocationMode::Automatic))
+            .plan(&synthetic_one_mile_request(RelayAllocationMode::Automatic))
             .unwrap();
         let relay = plan.relay_members[0].clone();
         let mission_1 = plan.mission_members[0].clone();
@@ -648,7 +776,7 @@ mod tests {
     #[test]
     fn duplicate_group_assignment_is_rejected() {
         let plan = RelayPlanner
-            .plan(&one_mile_request(RelayAllocationMode::Automatic))
+            .plan(&synthetic_one_mile_request(RelayAllocationMode::Automatic))
             .unwrap();
         let member = plan.mission_members[0].clone();
         let result = MissionAllocation::new(
@@ -672,5 +800,22 @@ mod tests {
         );
 
         assert_eq!(result, Err(RelayPlanError::MemberAssignedTwice(member)));
+    }
+
+    #[test]
+    fn sl5200_free_space_budget_requires_calibration_before_activation() {
+        let budget = RadioLinkBudget::silvus_sl5200_5_mhz(2_350.0, 20.0);
+        let free_space_range_m = budget.max_free_space_range_m().unwrap();
+        assert!((4_500.0..=5_500.0).contains(&free_space_range_m));
+
+        let mut request = synthetic_one_mile_request(RelayAllocationMode::Automatic);
+        request.policy.range = RelayRangeModel::FreeSpaceLinkBudget { budget };
+        let plan = RelayPlanner.plan(&request).unwrap();
+        assert_eq!(plan.range_evidence, RangeEvidence::FreeSpaceModel);
+        assert!(!plan.activation_ready);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("free-space link budget")));
     }
 }

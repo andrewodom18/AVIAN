@@ -63,6 +63,23 @@ antenna placement, radio power/thermal limits, energy cost, usable interfaces,
 and a platform-specific ceiling. The lower of the platform ceiling and 25,000
 ft MSL applies.
 
+## Range calibration for relay planning
+
+Do not use a single published “radio range” to space the swarm. The SL5200
+datasheet specifies parameters such as 2 W native power, -101 dBm sensitivity
+at 5 MHz, -107 dBm at optional 1.25 MHz, selectable bandwidth, and several
+frequency bands. Those values are inputs to a link budget, but they do not
+capture the installed antennas, selected center frequency, vehicle attitude,
+terrain, clutter, interference, traffic demand, or required availability.
+[SL5200 OEM datasheet](https://silvustechnologies.com/wp-content/uploads/2026/02/StreamCaster-LITE-5200-SL5200-OEM-Module-Datasheet.pdf)
+
+AVIAN separates a free-space model from a `field_calibrated` usable segment
+range. The free-space calculation is useful for early capacity planning, but
+its relay plan is not activation-ready. ARC UI must obtain a calibration from
+measurements for the particular radio/antenna/airframe and current environment
+before it presents a chain as mission-ready. The relay planner returns this
+distinction as `range_evidence` and `activation_ready`.
+
 ## Vendor telemetry boundary
 
 AVIAN currently recognizes `silvus` as a transport type and can give PEAT

@@ -9,7 +9,7 @@
     },
     "objective_entry": {
       "latitude_deg": 34.0,
-      "longitude_deg": -116.9976,
+      "longitude_deg": -116.935,
       "msl_m": 500.0
     },
     "candidates": [
@@ -55,8 +55,18 @@
       }
     ],
     "policy": {
-      "nominal_reliable_range_m": 120.0,
-      "safety_margin_ratio": 0.15,
+      "range": {
+        "source": "free_space_link_budget",
+        "budget": {
+          "frequency_mhz": 2350.0,
+          "transmitter_power_dbm": 33.0,
+          "transmitter_antenna_gain_dbi": 0.0,
+          "receiver_antenna_gain_dbi": 0.0,
+          "receiver_sensitivity_dbm": -101.0,
+          "fade_margin_db": 20.0,
+          "additional_path_loss_db": 0.0
+        }
+      },
       "desired_relays_per_station": 2
     },
     "allocation": {
@@ -66,11 +76,11 @@
   "relay_count_previews": [
     {
       "relay_count": 2,
-      "station_count": null
+      "station_count": 1
     },
     {
       "relay_count": 4,
-      "station_count": null
+      "station_count": 2
     }
   ],
   "task_groups": []
