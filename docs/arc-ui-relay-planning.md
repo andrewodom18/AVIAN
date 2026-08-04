@@ -228,6 +228,11 @@ healthy states are not repeatedly written. Record IDs include the publishing
 node, so redundant peers can report the same deterministic conclusion without
 creating a "mother" drone. `--relay-evaluation-ms` changes the cadence.
 
+Radio adapters feed the loop through the agent's optional local
+`--relay-observation-listen 127.0.0.1:9100` UDP listener. The normalized
+bidirectional observation schema is in
+[`relay-link-observation.sample.json`](../examples/relay-link-observation.sample.json).
+
 ## Current boundary
 
 Pre-mission allocation and the deterministic in-flight decision core are

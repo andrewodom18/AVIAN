@@ -52,6 +52,22 @@ pub struct RelayLinkObservation {
     pub link_margin_db: Option<f32>,
 }
 
+impl RelayLinkObservation {
+    /// Validates the fields a local radio collector can check before it sends
+    /// an observation into AVIAN. Membership and timestamp freshness are
+    /// verified later against the current in-flight mission snapshot.
+    pub fn is_well_formed(&self) -> bool {
+        self.first != self.second
+            && self.sample_window_ms > 0
+            && self.metrics.is_valid()
+            && self.geometry.is_valid()
+            && self
+                .received_power_dbm
+                .is_none_or(|value| value.is_finite())
+            && self.link_margin_db.is_none_or(|value| value.is_finite())
+    }
+}
+
 /// Mission-specific acceptance criteria for live radio observations. These
 /// values are deliberately supplied by ARC/calibration rather than hidden as
 /// generic radio defaults.
@@ -557,19 +573,10 @@ fn validate_request(request: &InFlightRelayRequest) -> Result<(), RelayRuntimeEr
         .chain(std::iter::once(request.anchor.node_id.clone()))
         .collect();
     for observation in &request.observations {
-        if observation.first == observation.second
+        if !observation.is_well_formed()
             || !known_nodes.contains(&observation.first)
             || !known_nodes.contains(&observation.second)
             || observation.observed_at_ms > request.observed_at_ms
-            || observation.sample_window_ms == 0
-            || !observation.metrics.is_valid()
-            || !observation.geometry.is_valid()
-            || observation
-                .received_power_dbm
-                .is_some_and(|value| !value.is_finite())
-            || observation
-                .link_margin_db
-                .is_some_and(|value| !value.is_finite())
         {
             return Err(RelayRuntimeError::InvalidLinkObservation {
                 first: observation.first.clone(),

@@ -104,6 +104,26 @@ loss, goodput, signal quality, stability, energy cost, line-of-sight, and
 Fresnel-clearance model. Until then, the integration stays standards-based and
 does not invent proprietary endpoints.
 
+The companion is ready for that adapter now. A collector running on the same
+Linux computer sends one normalized `RelayLinkObservation` JSON datagram to
+the agent's local UDP listener; the agent validates it and publishes it as
+latest-value PEAT telemetry. Bind the listener to loopback unless the collector
+is isolated in a controlled local network namespace:
+
+```sh
+cargo run -p mesh-agent -- \
+  --name aircraft-017 \
+  --formation-key-file ./formation.key \
+  --relay-observation-listen 127.0.0.1:9100
+```
+
+The collector must provide a rolling **bidirectional** observation rather than
+one directional RSSI sample. Its required JSON shape is shown in
+[`relay-link-observation.sample.json`](../examples/relay-link-observation.sample.json).
+AVIAN checks endpoint shape, sample window, finite metrics, and geometry at
+ingress; mission evaluation then checks membership, freshness, and the
+mission-specific health policy.
+
 ## Remaining handoff work
 
 The current retry loop can reconnect a peer using any advertised address.

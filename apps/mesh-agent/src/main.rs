@@ -7,9 +7,11 @@ use clap::{Parser, ValueEnum};
 use mesh_core::DEFAULT_MAX_NEIGHBORS;
 use mesh_core::{
     DeliveryClass, FlightStack, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
-    RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot, Telemetry,
+    RelayLinkObservation, RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot,
+    Telemetry,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration, MissedTickBehavior};
 use vehicle_adapters::{spawn_mavlink_source, MavlinkSourceConfig, MavlinkTelemetryEvent};
@@ -102,6 +104,12 @@ struct Args {
     /// Milliseconds between in-flight relay evaluations.
     #[arg(long, default_value_t = 1_000, requires = "relay_runtime_config")]
     relay_evaluation_ms: u64,
+
+    /// Local UDP listener for normalized relay-link observation JSON from a
+    /// radio collector. Bind this to loopback unless the collector is on a
+    /// separately controlled local network namespace.
+    #[arg(long)]
+    relay_observation_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -194,6 +202,15 @@ async fn main() -> anyhow::Result<()> {
     })
     .await
     .context("starting AVIAN PEAT node")?;
+    let relay_observation_socket = if let Some(address) = args.relay_observation_listen {
+        Some(
+            UdpSocket::bind(address)
+                .await
+                .with_context(|| format!("binding relay observation listener on {address}"))?,
+        )
+    } else {
+        None
+    };
     let local_peer = node
         .peer_descriptor()
         .context("reading local PEAT address")?;
@@ -227,6 +244,14 @@ async fn main() -> anyhow::Result<()> {
         "Peer spec: {}@{local_addresses}",
         local_peer.endpoint_id_hex
     );
+    if let Some(socket) = &relay_observation_socket {
+        println!(
+            "Relay observation listener: {}",
+            socket
+                .local_addr()
+                .context("reading relay observation listener address")?
+        );
+    }
 
     println!("Mesh service running; press Ctrl-C to stop");
     let mut peer_retry = time::interval(Duration::from_secs(args.peer_retry_seconds.max(1)));
@@ -238,6 +263,8 @@ async fn main() -> anyhow::Result<()> {
     let mut mavlink_receiver = start_mavlink(&args, node_id.clone())?;
     let mut latest_telemetry: Option<Telemetry> = None;
     let mut telemetry_sequence = 0_u64;
+    let mut relay_observation_sequence = 0_u64;
+    let mut relay_observation_buffer = vec![0_u8; 65_535];
     loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c() => {
@@ -287,6 +314,26 @@ async fn main() -> anyhow::Result<()> {
             _ = relay_evaluation.tick(), if relay_runtime.is_some() => {
                 if let Some(runtime) = relay_runtime.as_mut() {
                     evaluate_relay_runtime(&node, &node_id, runtime).await;
+                }
+            }
+            received = async {
+                relay_observation_socket
+                    .as_ref()
+                    .expect("guarded relay observation listener")
+                    .recv_from(&mut relay_observation_buffer)
+                    .await
+            }, if relay_observation_socket.is_some() => {
+                match received {
+                    Ok((length, _)) => {
+                        relay_observation_sequence = relay_observation_sequence.saturating_add(1);
+                        ingest_relay_observation(
+                            &node,
+                            &node_id,
+                            relay_observation_sequence,
+                            &relay_observation_buffer[..length],
+                        ).await;
+                    }
+                    Err(error) => eprintln!("Relay observation listener failed: {error}"),
                 }
             }
         }
@@ -350,6 +397,52 @@ async fn publish_telemetry(node: &PeatNode, node_id: &NodeId, sequence: u64, tel
     if let Err(error) = node.put(node_id.as_str(), &record).await {
         eprintln!("Telemetry publication failed: {error}");
     }
+}
+
+async fn ingest_relay_observation(
+    node: &PeatNode,
+    node_id: &NodeId,
+    sequence: u64,
+    encoded: &[u8],
+) {
+    let observation = match decode_relay_observation(encoded) {
+        Ok(observation) => observation,
+        Err(error) => {
+            eprintln!("Relay observation rejected: {error}");
+            return;
+        }
+    };
+    let record = match AvianRecord::new(
+        node_id.clone(),
+        sequence,
+        DeliveryClass::Telemetry,
+        unix_time_ms(),
+        MeshPayload::RelayLinkObservation(observation.clone()),
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("Relay observation record rejected: {error}");
+            return;
+        }
+    };
+    let (first, second) = if observation.first <= observation.second {
+        (&observation.first, &observation.second)
+    } else {
+        (&observation.second, &observation.first)
+    };
+    let record_id = format!("relay-link/{first}/{second}/{:?}", observation.transport);
+    if let Err(error) = node.put(&record_id, &record).await {
+        eprintln!("Relay observation publication failed: {error}");
+    }
+}
+
+fn decode_relay_observation(encoded: &[u8]) -> Result<RelayLinkObservation, String> {
+    let observation: RelayLinkObservation =
+        serde_json::from_slice(encoded).map_err(|error| format!("invalid JSON: {error}"))?;
+    if !observation.is_well_formed() {
+        return Err("malformed metric or endpoint fields".to_owned());
+    }
+    Ok(observation)
 }
 
 async fn evaluate_relay_runtime(
@@ -492,5 +585,37 @@ mod tests {
         let runtime = RelayRuntimeState::new(configuration);
         assert_eq!(runtime.current_generation, 4);
         assert!(runtime.current_relay_members.is_empty());
+    }
+
+    #[test]
+    fn relay_observation_ingress_rejects_invalid_radio_data() {
+        let valid = r#"{
+            "first":"aircraft-a",
+            "second":"aircraft-b",
+            "transport":"silvus",
+            "observed_at_ms":1000,
+            "sample_window_ms":500,
+            "bidirectional":true,
+            "available":true,
+            "metrics":{
+                "latency_ms":20.0,
+                "loss_ratio":0.01,
+                "goodput_bps":1000000.0,
+                "signal_quality":0.9,
+                "stability":0.9,
+                "energy_cost":0.2
+            },
+            "geometry":{
+                "distance_m":100.0,
+                "line_of_sight":true,
+                "fresnel_clearance_ratio":0.9
+            },
+            "received_power_dbm":-65.0,
+            "link_margin_db":20.0
+        }"#;
+        assert!(decode_relay_observation(valid.as_bytes()).is_ok());
+
+        let malformed = valid.replace("\"sample_window_ms\":500", "\"sample_window_ms\":0");
+        assert!(decode_relay_observation(malformed.as_bytes()).is_err());
     }
 }

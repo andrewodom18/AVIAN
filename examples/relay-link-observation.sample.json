@@ -1,0 +1,24 @@
+{
+  "first": "relay-a",
+  "second": "relay-b",
+  "transport": "silvus",
+  "observed_at_ms": 10000,
+  "sample_window_ms": 1000,
+  "bidirectional": true,
+  "available": true,
+  "metrics": {
+    "latency_ms": 20.0,
+    "loss_ratio": 0.01,
+    "goodput_bps": 2000000.0,
+    "signal_quality": 0.9,
+    "stability": 0.9,
+    "energy_cost": 0.3
+  },
+  "geometry": {
+    "distance_m": 110.0,
+    "line_of_sight": true,
+    "fresnel_clearance_ratio": 0.9
+  },
+  "received_power_dbm": -65.0,
+  "link_margin_db": 25.0
+}
