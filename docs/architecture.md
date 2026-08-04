@@ -112,8 +112,10 @@ reconciliation of membership generations is a later milestone. See
 
 Before a beyond-direct-link mission, ARC UI can submit base/objective geometry,
 the available aircraft inventory, radio assumptions, and an automatic or
-manual relay allocation. AVIAN returns redundant relay stations, exact
-reserved members, remaining payload capacity, hop utilization, failure
+manual relay allocation. Automatic coverage is either `minimum` (one relay
+broadcaster at each required station) or `maximum` (an active broadcaster and
+a Bluetooth-coordinated receiving standby at every station). AVIAN returns
+exact reserved members, remaining payload capacity, hop utilization, failure
 tolerance, and warnings. Accepted plans are versioned mission allocations;
 roles describe work for that mission and do not create permanent authority.
 

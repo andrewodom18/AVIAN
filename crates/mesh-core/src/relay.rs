@@ -192,16 +192,44 @@ pub struct RelayCandidate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayPolicy {
     pub range: RelayRangeModel,
-    /// Desired aircraft at each relay station. Two tolerates one local loss.
-    pub desired_relays_per_station: usize,
+    /// Automatic relay-reservation strategy selected for this mission.
+    pub coverage: RelayCoverage,
 }
 
 impl RelayPolicy {
     pub fn usable_segment_m(&self) -> Result<f64, RelayPlanError> {
-        if self.desired_relays_per_station == 0 {
-            return Err(RelayPlanError::InvalidStationRedundancy);
-        }
         self.range.usable_segment_m()
+    }
+
+    fn relays_per_station(&self) -> usize {
+        self.coverage.relays_per_station()
+    }
+}
+
+/// The two automatic chain-coverage choices exposed to ARC UI.
+///
+/// Manual relay-count and relay-member allocation can still intentionally
+/// create a degraded or more heavily staffed station. Automatic allocation is
+/// always exactly one aircraft per station for `Minimum` or an active/standby
+/// pair for `Maximum`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayCoverage {
+    /// The smallest measured, healthy chain: one transmitting aircraft at
+    /// each required relay station.
+    Minimum,
+    /// Two aircraft at every relay station. Both are assigned to receive
+    /// traffic; exactly one is the active radio broadcaster and the other is
+    /// its Bluetooth-coordinated standby.
+    Maximum,
+}
+
+impl RelayCoverage {
+    fn relays_per_station(self) -> usize {
+        match self {
+            Self::Minimum => 1,
+            Self::Maximum => 2,
+        }
     }
 }
 
@@ -243,6 +271,26 @@ pub struct RelayStation {
     pub station_index: usize,
     pub position: GeoPoint,
     pub members: Vec<NodeId>,
+    /// Exactly one member transmits relay traffic at a time. In maximum
+    /// coverage the other member is an already-receiving Bluetooth-linked
+    /// standby, so its companion can assume broadcast duty after the local
+    /// handover policy detects an active-peer failure.
+    pub transmission: RelayStationTransmission,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayStationTransmission {
+    pub active_broadcaster: NodeId,
+    /// Empty for a minimum-coverage station. Maximum-coverage automatic
+    /// stations contain one member here; manual overrides may contain more.
+    pub standby_receivers: Vec<NodeId>,
+    pub peer_coordination: Option<RelayPeerCoordination>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayPeerCoordination {
+    Bluetooth,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,6 +298,8 @@ pub struct RelayPlan {
     pub route_distance_m: f64,
     pub usable_segment_m: f64,
     pub range_evidence: RangeEvidence,
+    /// The automatic coverage policy used to compute the recommendation.
+    pub coverage: RelayCoverage,
     /// `false` when the plan is based only on a free-space model, even if its
     /// geometry and redundancy are otherwise healthy.
     pub activation_ready: bool,
@@ -290,7 +340,7 @@ impl RelayPlanner {
         let required_link_count = (route_distance_m / usable_segment_m).ceil().max(1.0) as usize;
         let recommended_station_count = required_link_count.saturating_sub(1);
         let recommended_relay_count =
-            recommended_station_count.saturating_mul(request.policy.desired_relays_per_station);
+            recommended_station_count.saturating_mul(request.policy.relays_per_station());
 
         let eligible = ranked_eligible_candidates(&request.candidates);
         let (relay_members, manual_station_count) = select_relay_members(
@@ -304,7 +354,13 @@ impl RelayPlanner {
             recommended_station_count,
             manual_station_count,
         )?;
-        let stations = build_stations(base, objective, station_count, &relay_members);
+        let stations = build_stations(
+            base,
+            objective,
+            station_count,
+            &relay_members,
+            request.policy.coverage,
+        );
         let max_planned_segment_m = route_distance_m / (station_count + 1) as f64;
         let range_utilization = (max_planned_segment_m / usable_segment_m) as f32;
         let minimum_relays_per_station = stations
@@ -314,8 +370,8 @@ impl RelayPlanner {
             .unwrap_or(0);
         let minimum_station_failure_tolerance = minimum_relays_per_station.saturating_sub(1);
         let coverage_ok = max_planned_segment_m <= usable_segment_m * (1.0 + f64::EPSILON);
-        let redundancy_ok = station_count == 0
-            || minimum_relays_per_station >= request.policy.desired_relays_per_station;
+        let redundancy_ok =
+            station_count == 0 || minimum_relays_per_station >= request.policy.relays_per_station();
         let feasibility = if !coverage_ok {
             RelayFeasibility::Infeasible
         } else if !redundancy_ok || relay_members.len() < recommended_relay_count {
@@ -361,7 +417,8 @@ impl RelayPlanner {
         if station_count > 0 && !redundancy_ok {
             warnings.push(format!(
                 "At least one relay station has {} aircraft; {} are desired.",
-                minimum_relays_per_station, request.policy.desired_relays_per_station
+                minimum_relays_per_station,
+                request.policy.relays_per_station()
             ));
         }
         if range_evidence == RangeEvidence::FreeSpaceModel {
@@ -375,6 +432,7 @@ impl RelayPlanner {
             route_distance_m,
             usable_segment_m,
             range_evidence,
+            coverage: request.policy.coverage,
             activation_ready: feasibility == RelayFeasibility::Healthy
                 && range_evidence == RangeEvidence::FieldCalibrated,
             recommended_station_count,
@@ -511,6 +569,7 @@ fn build_stations(
     objective: GeoPoint,
     station_count: usize,
     relay_members: &[NodeId],
+    coverage: RelayCoverage,
 ) -> Vec<RelayStation> {
     if station_count == 0 {
         return Vec::new();
@@ -522,10 +581,26 @@ fn build_stations(
     members
         .into_iter()
         .enumerate()
-        .map(|(index, members)| RelayStation {
-            station_index: index,
-            position: base.interpolate(objective, (index + 1) as f64 / (station_count + 1) as f64),
-            members,
+        .map(|(index, members)| {
+            let active_broadcaster = members
+                .first()
+                .cloned()
+                .expect("every relay station has at least one assigned member");
+            let standby_receivers: Vec<NodeId> = members.iter().skip(1).cloned().collect();
+            let peer_coordination = (coverage == RelayCoverage::Maximum
+                && !standby_receivers.is_empty())
+            .then_some(RelayPeerCoordination::Bluetooth);
+            RelayStation {
+                station_index: index,
+                position: base
+                    .interpolate(objective, (index + 1) as f64 / (station_count + 1) as f64),
+                members,
+                transmission: RelayStationTransmission {
+                    active_broadcaster,
+                    standby_receivers,
+                    peer_coordination,
+                },
+            }
         })
         .collect()
 }
@@ -676,7 +751,7 @@ mod tests {
                 range: RelayRangeModel::FieldCalibrated {
                     usable_segment_m: 136.0,
                 },
-                desired_relays_per_station: 2,
+                coverage: RelayCoverage::Maximum,
             },
             allocation,
         }
@@ -693,9 +768,35 @@ mod tests {
         assert_eq!(plan.reserved_relay_count, 22);
         assert_eq!(plan.mission_drones_remaining, 28);
         assert_eq!(plan.minimum_station_failure_tolerance, 1);
+        assert_eq!(plan.coverage, RelayCoverage::Maximum);
+        assert!(plan.stations.iter().all(|station| {
+            station.transmission.peer_coordination == Some(RelayPeerCoordination::Bluetooth)
+                && station.transmission.standby_receivers.len() == 1
+                && station.transmission.active_broadcaster == station.members[0]
+        }));
         assert_eq!(plan.feasibility, RelayFeasibility::Healthy);
         assert_eq!(plan.range_evidence, RangeEvidence::FieldCalibrated);
         assert!(plan.activation_ready);
+    }
+
+    #[test]
+    fn minimum_coverage_reserves_one_broadcaster_per_station() {
+        let mut request = synthetic_one_mile_request(RelayAllocationMode::Automatic);
+        request.policy.coverage = RelayCoverage::Minimum;
+
+        let plan = RelayPlanner.plan(&request).unwrap();
+
+        assert_eq!(plan.recommended_station_count, 11);
+        assert_eq!(plan.recommended_relay_count, 11);
+        assert_eq!(plan.reserved_relay_count, 11);
+        assert_eq!(plan.mission_drones_remaining, 39);
+        assert_eq!(plan.minimum_station_failure_tolerance, 0);
+        assert!(plan.stations.iter().all(|station| {
+            station.members.len() == 1
+                && station.transmission.standby_receivers.is_empty()
+                && station.transmission.peer_coordination.is_none()
+                && station.transmission.active_broadcaster == station.members[0]
+        }));
     }
 
     #[test]

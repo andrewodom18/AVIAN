@@ -55,12 +55,28 @@ margin across altitude, range, terrain/obstruction, and motion bins. ARC UI
 uses the lowest range that meets the mission delivery target for the current
 bin, then retains additional margin before making a `field_calibrated` plan.
 
-## Why relay stations are redundant
+## Automatic coverage profiles
 
-A single-file chain fails when any middle aircraft is lost. AVIAN instead
-plans relay stations. The default policy requests two aircraft per station, so
-one aircraft can fail at a station without immediately removing that part of
-the corridor. Deployments can request a different redundancy level.
+ARC UI exposes exactly two automatic relay choices through
+`policy.coverage`:
+
+| Profile | Reservation | Station behavior | Capacity effect |
+| --- | --- | --- | --- |
+| `minimum` | One aircraft per measured-required station | That aircraft is the station's sole relay broadcaster. | Preserves the most aircraft for mission tasks. |
+| `maximum` | Two aircraft per measured-required station | Both are assigned to receive relay traffic. One is the active broadcaster; the other is a Bluetooth-coordinated receiving standby. | Reserves twice as many relay aircraft, but tolerates one station-member failure after handover. |
+
+The pre-mission response names the active broadcaster, standby receiver(s),
+and `peer_coordination` for every station. Automatic `maximum` creates an
+exact pair at every station; a manual relay-count or member override can
+still deliberately create an incomplete or extra-staffed station, which ARC
+UI reports as `degraded` when it falls below the selected profile.
+
+Only the active member broadcasts relay traffic. A standby keeps receiving
+the relevant traffic and maintains a local Bluetooth peer connection, so it
+has the information needed to assume broadcast duty when the active peer is
+declared failed. The local handover policy and radio-adapter actuation are
+specified separately from coverage planning; the planner never asks both
+members to broadcast the same relay role simultaneously.
 
 The planner ranks eligible aircraft by:
 
@@ -78,21 +94,22 @@ The `allocation` object supports three modes:
 
 | Mode | Result |
 | --- | --- |
-| `automatic` | AVIAN selects the recommended relay count and members |
+| `automatic` | AVIAN selects the exact one-per-station or active/standby-pair reservation defined by `policy.coverage` |
 | `relay_count` | Operator sets the number of relays and optionally the number of stations |
 | `relay_members` | Operator selects exact aircraft and optionally the number of stations |
 
 If a lower relay count can still span the corridor but leaves some stations
-with fewer aircraft than requested, the result is `degraded`. If the resulting
-hops exceed the usable range, it is `infeasible`. Increasing the station count
-can shorten hops; adding aircraft without adding stations increases local
-redundancy or supplies hot spares.
+with fewer aircraft than the selected profile, the result is `degraded`. If
+the resulting hops exceed the usable range, it is `infeasible`. Increasing the
+station count can shorten hops; adding aircraft without adding stations adds
+receiving standbys but never adds a second broadcaster to a station.
 
 ARC UI can send several `relay_count_previews` in one request. The response
 contains the full impact of each choice, allowing a slider or stepper to show
 the communications and mission-capacity tradeoff before the operator accepts
-it. An invalid preview is returned with an error without discarding the main
-proposal.
+it. ARC should first present the two automatic profile results, then use these
+previews only for a deliberate manual change. An invalid preview is returned
+with an error without discarding the main proposal.
 
 ## In-mission chain discovery and regrouping
 
@@ -153,9 +170,10 @@ With that deliberately supplied input, the planner shows:
 
 | Operator choice | Stations | Payload aircraft left | Result |
 | ---: | ---: | ---: | --- |
+| Minimum (11 relays) | 11 | 39 | Healthy: one broadcaster per station, no local standby |
+| Maximum (22 relays) | 11 | 28 | Healthy: active/standby Bluetooth pair at every station |
 | 10 relays | 10 | 40 | Infeasible: about 146 m per hop |
-| 20 relays | 11 | 30 | Degraded: coverage works, but two stations have only one aircraft |
-| 22 relays | 11 | 28 | Healthy: two aircraft at every station |
+| 20 relays | 11 | 30 | Degraded for `maximum`: two stations have only one aircraft |
 | 24 relays, 12 stations | 12 | 26 | Healthy: shorter hops of about 124 m |
 
 Real mission values come from the range source described above. ARC UI must

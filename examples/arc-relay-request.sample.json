@@ -67,7 +67,7 @@
           "additional_path_loss_db": 0.0
         }
       },
-      "desired_relays_per_station": 2
+      "coverage": "maximum"
     },
     "allocation": {
       "mode": "automatic"

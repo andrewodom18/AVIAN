@@ -159,7 +159,9 @@ fn plan_request(request: ArcPlanningRequest) -> anyhow::Result<ArcPlanningRespon
 
 #[cfg(test)]
 mod tests {
-    use mesh_core::{GeoPoint, RelayCandidate, RelayFeasibility, RelayPolicy, RelayRangeModel};
+    use mesh_core::{
+        GeoPoint, RelayCandidate, RelayCoverage, RelayFeasibility, RelayPolicy, RelayRangeModel,
+    };
 
     use super::*;
 
@@ -192,7 +194,7 @@ mod tests {
                     range: RelayRangeModel::FieldCalibrated {
                         usable_segment_m: 136.0,
                     },
-                    desired_relays_per_station: 2,
+                    coverage: RelayCoverage::Maximum,
                 },
                 allocation: RelayAllocationMode::Automatic,
             },

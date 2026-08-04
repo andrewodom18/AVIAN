@@ -60,9 +60,13 @@ control is not a mesh command.
 
 A mission allocation contains a mission UUID, positive generation, relay
 corridor assessment, exact relay and mission pools, and optional operator task
-groups. Relay plans include station positions, range utilization, local
-failure tolerance, reserved relay count, remaining payload capacity,
-feasibility, range evidence, activation readiness, and warnings.
+groups. Relay plans include the selected automatic coverage profile, station
+positions, range utilization, local failure tolerance, reserved relay count,
+remaining payload capacity, feasibility, range evidence, activation readiness,
+and warnings. Every station explicitly identifies one active broadcaster and
+its receiving standbys. `maximum` automatic coverage uses a
+Bluetooth-coordinated active/standby pair; the pair must not broadcast the
+same relay role simultaneously.
 
 Task groups target either relay members or remaining mission members. A member
 can have only one group instruction in a generation. A one-member group is an

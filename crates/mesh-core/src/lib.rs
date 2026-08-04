@@ -21,10 +21,10 @@ pub use message::{
 pub use node::{Capability, FlightStack, NodeId, NodeProfile, NodeRole, ProfileError};
 pub use relay::{
     AssignmentPool, GeoPoint, MissionAllocation, OperatorTaskGroup, RadioLinkBudget, RangeEvidence,
-    RelayAllocationMode, RelayCandidate, RelayCorridorRequest, RelayFeasibility, RelayPlan,
-    RelayPlanError, RelayPlanner, RelayPolicy, RelayRangeModel, RelayStation,
-    SILVUS_SL5200_1_25_MHZ_SENSITIVITY_DBM, SILVUS_SL5200_5_MHZ_SENSITIVITY_DBM,
-    SILVUS_SL5200_NATIVE_TX_POWER_DBM,
+    RelayAllocationMode, RelayCandidate, RelayCorridorRequest, RelayCoverage, RelayFeasibility,
+    RelayPeerCoordination, RelayPlan, RelayPlanError, RelayPlanner, RelayPolicy, RelayRangeModel,
+    RelayStation, RelayStationTransmission, SILVUS_SL5200_1_25_MHZ_SENSITIVITY_DBM,
+    SILVUS_SL5200_5_MHZ_SENSITIVITY_DBM, SILVUS_SL5200_NATIVE_TX_POWER_DBM,
 };
 pub use relay_runtime::{
     InFlightRelayDecision, InFlightRelayPlanner, InFlightRelayRequest, LiveRelayCandidate,
