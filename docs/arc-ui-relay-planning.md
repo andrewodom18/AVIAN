@@ -74,9 +74,21 @@ UI reports as `degraded` when it falls below the selected profile.
 Only the active member broadcasts relay traffic. A standby keeps receiving
 the relevant traffic and maintains a local Bluetooth peer connection, so it
 has the information needed to assume broadcast duty when the active peer is
-declared failed. The local handover policy and radio-adapter actuation are
-specified separately from coverage planning; the planner never asks both
-members to broadcast the same relay role simultaneously.
+declared failed. `maximum` therefore requires an explicit
+`paired_handover.max_bluetooth_heartbeat_age_ms`; a plan without it is
+rejected. The designated standby switches to broadcast-and-receive only after
+its matching active-peer heartbeat has aged beyond that value. The active and
+all additional manually assigned standbys remain receive-capable, but only
+the designated pair can automatically change broadcast ownership. The planner
+never asks both members to broadcast the same relay role simultaneously.
+
+The heartbeat deadline must be calibrated for the actual Bluetooth companion
+link and mission latency objective; the sample's 1,500 ms is illustrative,
+not a universal recommendation. A local radio adapter applies the resulting
+`broadcast_and_receive`, `receive_only`, or
+`takeover_broadcast_and_receive` action. Hardware transmit interlocks and
+the adapter-specific controller are still required before physical radio
+actuation.
 
 The planner ranks eligible aircraft by:
 

@@ -67,7 +67,10 @@
           "additional_path_loss_db": 0.0
         }
       },
-      "coverage": "maximum"
+      "coverage": "maximum",
+      "paired_handover": {
+        "max_bluetooth_heartbeat_age_ms": 1500
+      }
     },
     "allocation": {
       "mode": "automatic"

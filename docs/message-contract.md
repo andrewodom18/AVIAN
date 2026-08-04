@@ -66,7 +66,10 @@ remaining payload capacity, feasibility, range evidence, activation readiness,
 and warnings. Every station explicitly identifies one active broadcaster and
 its receiving standbys. `maximum` automatic coverage uses a
 Bluetooth-coordinated active/standby pair; the pair must not broadcast the
-same relay role simultaneously.
+same relay role simultaneously. Maximum coverage also carries an explicit
+maximum Bluetooth heartbeat age. A matching current heartbeat keeps the
+standby receive-only; a stale or missing heartbeat causes its local action to
+become `takeover_broadcast_and_receive`.
 
 Task groups target either relay members or remaining mission members. A member
 can have only one group instruction in a generation. A one-member group is an

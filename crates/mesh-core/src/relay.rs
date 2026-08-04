@@ -194,6 +194,10 @@ pub struct RelayPolicy {
     pub range: RelayRangeModel,
     /// Automatic relay-reservation strategy selected for this mission.
     pub coverage: RelayCoverage,
+    /// Required for maximum coverage. This is explicit because a Bluetooth
+    /// heartbeat deadline must fit the actual companion, radio, and mission
+    /// latency target; AVIAN does not invent a universal failover timer.
+    pub paired_handover: Option<RelayPairHandoverPolicy>,
 }
 
 impl RelayPolicy {
@@ -203,6 +207,18 @@ impl RelayPolicy {
 
     fn relays_per_station(&self) -> usize {
         self.coverage.relays_per_station()
+    }
+
+    fn validate_handover(&self) -> Result<(), RelayPlanError> {
+        if self.coverage == RelayCoverage::Maximum {
+            let policy = self
+                .paired_handover
+                .ok_or(RelayPlanError::MissingPairHandoverPolicy)?;
+            if policy.max_bluetooth_heartbeat_age_ms == 0 {
+                return Err(RelayPlanError::InvalidPairHandoverPolicy);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -231,6 +247,14 @@ impl RelayCoverage {
             Self::Maximum => 2,
         }
     }
+}
+
+/// Explicit local failover timing for a maximum-coverage station pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayPairHandoverPolicy {
+    /// The receiving standby takes over only after it has not received a
+    /// matching Bluetooth heartbeat from the active broadcaster for this long.
+    pub max_bluetooth_heartbeat_age_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +317,87 @@ pub enum RelayPeerCoordination {
     Bluetooth,
 }
 
+/// A heartbeat delivered locally over the Bluetooth link from an active relay
+/// broadcaster to its designated receiving standby.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayPairHeartbeat {
+    pub station_index: usize,
+    pub active_broadcaster: NodeId,
+    pub standby_receiver: NodeId,
+    pub observed_at_ms: u64,
+}
+
+/// The local radio mode a paired-station companion must apply. The adapter
+/// retains receive capability in every assigned mode; it enables relay
+/// broadcast on exactly one member at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayPairBroadcastAction {
+    /// The planned primary is the active relay broadcaster and also receives.
+    BroadcastAndReceive,
+    /// A planned standby is receiving but must keep its relay transmitter
+    /// disabled while the active peer's Bluetooth heartbeat is fresh.
+    ReceiveOnly,
+    /// The designated standby has not observed a fresh active-peer heartbeat
+    /// and should locally enable relay broadcast while retaining receive.
+    TakeoverBroadcastAndReceive,
+    /// This aircraft is not assigned to the station.
+    Unassigned,
+}
+
+impl RelayStationTransmission {
+    /// Determines local broadcast ownership for a planned station. Only the
+    /// first standby is a failover peer; manually added extra standbys remain
+    /// receive-only until a later mission reconfiguration assigns their role.
+    pub fn broadcast_action(
+        &self,
+        station_index: usize,
+        local_node_id: &NodeId,
+        now_ms: u64,
+        handover: RelayPairHandoverPolicy,
+        latest_heartbeat: Option<&RelayPairHeartbeat>,
+    ) -> Result<RelayPairBroadcastAction, RelayPairHandoverError> {
+        if local_node_id == &self.active_broadcaster {
+            return Ok(RelayPairBroadcastAction::BroadcastAndReceive);
+        }
+        let Some(designated_standby) = self.standby_receivers.first() else {
+            return Ok(RelayPairBroadcastAction::Unassigned);
+        };
+        if local_node_id != designated_standby {
+            return Ok(if self.standby_receivers.contains(local_node_id) {
+                RelayPairBroadcastAction::ReceiveOnly
+            } else {
+                RelayPairBroadcastAction::Unassigned
+            });
+        }
+        let heartbeat_is_fresh = match latest_heartbeat {
+            Some(heartbeat) => {
+                if heartbeat.station_index != station_index
+                    || heartbeat.active_broadcaster != self.active_broadcaster
+                    || heartbeat.standby_receiver != *designated_standby
+                    || heartbeat.observed_at_ms > now_ms
+                {
+                    return Err(RelayPairHandoverError::MismatchedHeartbeat);
+                }
+                now_ms.saturating_sub(heartbeat.observed_at_ms)
+                    <= handover.max_bluetooth_heartbeat_age_ms
+            }
+            None => false,
+        };
+        Ok(if heartbeat_is_fresh {
+            RelayPairBroadcastAction::ReceiveOnly
+        } else {
+            RelayPairBroadcastAction::TakeoverBroadcastAndReceive
+        })
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RelayPairHandoverError {
+    #[error("Bluetooth heartbeat does not match the assigned relay pair")]
+    MismatchedHeartbeat,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayPlan {
     pub route_distance_m: f64,
@@ -300,6 +405,9 @@ pub struct RelayPlan {
     pub range_evidence: RangeEvidence,
     /// The automatic coverage policy used to compute the recommendation.
     pub coverage: RelayCoverage,
+    /// The explicit local active/standby failover policy for `maximum`
+    /// coverage. It is absent for `minimum` coverage.
+    pub paired_handover: Option<RelayPairHandoverPolicy>,
     /// `false` when the plan is based only on a free-space model, even if its
     /// geometry and redundancy are otherwise healthy.
     pub activation_ready: bool,
@@ -333,6 +441,7 @@ impl RelayPlanner {
             ));
         }
         validate_candidates(&request.candidates)?;
+        request.policy.validate_handover()?;
 
         let usable_segment_m = request.policy.usable_segment_m()?;
         let range_evidence = request.policy.range.evidence();
@@ -433,6 +542,7 @@ impl RelayPlanner {
             usable_segment_m,
             range_evidence,
             coverage: request.policy.coverage,
+            paired_handover: request.policy.paired_handover,
             activation_ready: feasibility == RelayFeasibility::Healthy
                 && range_evidence == RangeEvidence::FieldCalibrated,
             recommended_station_count,
@@ -688,6 +798,10 @@ pub enum RelayPlanError {
     InvalidLinkBudget,
     #[error("desired relays per station must be at least one")]
     InvalidStationRedundancy,
+    #[error("maximum relay coverage requires an explicit Bluetooth pair handover policy")]
+    MissingPairHandoverPolicy,
+    #[error("Bluetooth pair heartbeat age must be greater than zero")]
+    InvalidPairHandoverPolicy,
     #[error("duplicate relay candidate {0}")]
     DuplicateCandidate(NodeId),
     #[error("candidate {0} has a score outside 0.0-1.0")]
@@ -752,6 +866,9 @@ mod tests {
                     usable_segment_m: 136.0,
                 },
                 coverage: RelayCoverage::Maximum,
+                paired_handover: Some(RelayPairHandoverPolicy {
+                    max_bluetooth_heartbeat_age_ms: 1_500,
+                }),
             },
             allocation,
         }
@@ -769,6 +886,12 @@ mod tests {
         assert_eq!(plan.mission_drones_remaining, 28);
         assert_eq!(plan.minimum_station_failure_tolerance, 1);
         assert_eq!(plan.coverage, RelayCoverage::Maximum);
+        assert_eq!(
+            plan.paired_handover,
+            Some(RelayPairHandoverPolicy {
+                max_bluetooth_heartbeat_age_ms: 1_500,
+            })
+        );
         assert!(plan.stations.iter().all(|station| {
             station.transmission.peer_coordination == Some(RelayPeerCoordination::Bluetooth)
                 && station.transmission.standby_receivers.len() == 1
@@ -783,6 +906,7 @@ mod tests {
     fn minimum_coverage_reserves_one_broadcaster_per_station() {
         let mut request = synthetic_one_mile_request(RelayAllocationMode::Automatic);
         request.policy.coverage = RelayCoverage::Minimum;
+        request.policy.paired_handover = None;
 
         let plan = RelayPlanner.plan(&request).unwrap();
 
@@ -797,6 +921,68 @@ mod tests {
                 && station.transmission.peer_coordination.is_none()
                 && station.transmission.active_broadcaster == station.members[0]
         }));
+    }
+
+    #[test]
+    fn paired_station_uses_bluetooth_heartbeat_for_single_broadcaster_takeover() {
+        let plan = RelayPlanner
+            .plan(&synthetic_one_mile_request(RelayAllocationMode::Automatic))
+            .unwrap();
+        let station = &plan.stations[0];
+        let policy = plan.paired_handover.unwrap();
+        let active = station.transmission.active_broadcaster.clone();
+        let standby = station.transmission.standby_receivers[0].clone();
+        let heartbeat = RelayPairHeartbeat {
+            station_index: station.station_index,
+            active_broadcaster: active.clone(),
+            standby_receiver: standby.clone(),
+            observed_at_ms: 10_000,
+        };
+
+        assert_eq!(
+            station
+                .transmission
+                .broadcast_action(station.station_index, &active, 12_000, policy, None)
+                .unwrap(),
+            RelayPairBroadcastAction::BroadcastAndReceive
+        );
+        assert_eq!(
+            station
+                .transmission
+                .broadcast_action(
+                    station.station_index,
+                    &standby,
+                    11_000,
+                    policy,
+                    Some(&heartbeat)
+                )
+                .unwrap(),
+            RelayPairBroadcastAction::ReceiveOnly
+        );
+        assert_eq!(
+            station
+                .transmission
+                .broadcast_action(
+                    station.station_index,
+                    &standby,
+                    12_000,
+                    policy,
+                    Some(&heartbeat)
+                )
+                .unwrap(),
+            RelayPairBroadcastAction::TakeoverBroadcastAndReceive
+        );
+    }
+
+    #[test]
+    fn maximum_coverage_requires_an_explicit_bluetooth_handover_policy() {
+        let mut request = synthetic_one_mile_request(RelayAllocationMode::Automatic);
+        request.policy.paired_handover = None;
+
+        assert_eq!(
+            RelayPlanner.plan(&request),
+            Err(RelayPlanError::MissingPairHandoverPolicy)
+        );
     }
 
     #[test]

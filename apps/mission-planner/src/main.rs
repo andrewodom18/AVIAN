@@ -160,7 +160,8 @@ fn plan_request(request: ArcPlanningRequest) -> anyhow::Result<ArcPlanningRespon
 #[cfg(test)]
 mod tests {
     use mesh_core::{
-        GeoPoint, RelayCandidate, RelayCoverage, RelayFeasibility, RelayPolicy, RelayRangeModel,
+        GeoPoint, RelayCandidate, RelayCoverage, RelayFeasibility, RelayPairHandoverPolicy,
+        RelayPolicy, RelayRangeModel,
     };
 
     use super::*;
@@ -195,6 +196,9 @@ mod tests {
                         usable_segment_m: 136.0,
                     },
                     coverage: RelayCoverage::Maximum,
+                    paired_handover: Some(RelayPairHandoverPolicy {
+                        max_bluetooth_heartbeat_age_ms: 1_500,
+                    }),
                 },
                 allocation: RelayAllocationMode::Automatic,
             },
