@@ -78,6 +78,17 @@ hysteresis, path changes, and per-message redundancy because those are
 application-specific decisions. PEAT synchronization is independent of any
 ground or cloud peer.
 
+## Flight-controller telemetry boundary
+
+ArduPilot and PX4 are decoded through the MAVLink common dialect. AVIAN locks
+an adapter to the system ID of the first matching flight-controller heartbeat,
+then combines `GLOBAL_POSITION_INT`, `ATTITUDE`, `ALTITUDE`, `SYS_STATUS`,
+`RC_CHANNELS`/`RADIO_STATUS`, and `EXTENDED_SYS_STATE` into one normalized
+record. Messages from other MAVLink systems on the same network are ignored.
+
+`relative_alt` remains above-home altitude; it is never treated as AGL.
+Unknown protocol sentinel values remain absent in AVIAN telemetry.
+
 ## Failure model
 
 The first simulation validates:

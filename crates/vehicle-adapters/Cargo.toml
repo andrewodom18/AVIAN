@@ -8,8 +8,12 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 mesh-core = { path = "../mesh-core" }
+mavlink.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[features]
+direct-serial = ["mavlink/transport-direct-serial"]
 
 [lints]
 workspace = true

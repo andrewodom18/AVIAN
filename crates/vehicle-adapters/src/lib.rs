@@ -1,5 +1,9 @@
 //! Flight-controller boundary for MAVLink and MSP implementations.
 
+mod mavlink_adapter;
+
+pub use mavlink_adapter::MavlinkTelemetryAccumulator;
+
 use async_trait::async_trait;
 use mesh_core::{
     EmergencyAction, FlightStack, NodeProfile, ProfileError, Telemetry, SYSTEM_MAX_MSL_M,
@@ -133,6 +137,17 @@ pub enum AdapterError {
     },
     #[error("mesh disarm is rejected until the vehicle reports landed")]
     UnsafeAirborneDisarm,
+    #[error("{0:?} does not use the MAVLink adapter")]
+    UnsupportedMavlinkStack(FlightStack),
+    #[error("expected {expected:?} but MAVLink heartbeat reported {reported:?}")]
+    UnexpectedFlightStack {
+        expected: FlightStack,
+        reported: FlightStack,
+    },
+    #[error("MAVLink global position contains invalid latitude or longitude")]
+    InvalidMavlinkPosition,
+    #[error(transparent)]
+    Altitude(#[from] mesh_core::AltitudeError),
 }
 
 #[cfg(test)]
