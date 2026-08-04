@@ -126,6 +126,12 @@ than guessing an unobserved hop. Terrain-aware routing, radio-statistics
 collection, and physical station-hold/backfill execution remain integration
 stages. See [the ARC UI relay-planning guide](arc-ui-relay-planning.md).
 
+The onboard `mesh-agent` can evaluate a shared runtime configuration at a
+bounded cadence. It reads latest telemetry and link observations from PEAT,
+rebuilds the dynamic candidate inventory, and publishes state-changing relay
+decisions under its own record ID. The configuration does not create a leader;
+other companions evaluate the same policy and records independently.
+
 ## Flight-controller telemetry boundary
 
 ArduPilot and PX4 are decoded through the MAVLink common dialect. AVIAN locks

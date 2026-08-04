@@ -29,7 +29,8 @@ pub use relay::{
 pub use relay_runtime::{
     InFlightRelayDecision, InFlightRelayPlanner, InFlightRelayRequest, LiveRelayCandidate,
     RelayAnchor, RelayChainHop, RelayChainRoute, RelayHealthPolicy, RelayLinkObservation,
-    RelayRoleGroup, RelayRuntimeAction, RelayRuntimeError, RuntimeRelayAllocationMode,
+    RelayRoleGroup, RelayRuntimeAction, RelayRuntimeConfigError, RelayRuntimeConfiguration,
+    RelayRuntimeError, RelayRuntimeSnapshot, RuntimeRelayAllocationMode,
 };
 pub use topology::{
     TopologyError, TopologyPlan, TopologyPlanner, DEFAULT_MAX_NEIGHBORS, MAX_SUPPORTED_SWARM_SIZE,

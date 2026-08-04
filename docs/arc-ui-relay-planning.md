@@ -198,6 +198,36 @@ two mission members. It returns `form_relay_chain` and a new generation with
 two relay aircraft. Replace the sample observations with current measurements;
 they are illustrative input only.
 
+## Onboard evaluation
+
+ARC UI distributes one durable `RelayRuntimeConfiguration` for the accepted
+mission generation. It contains the anchor, mission members, candidate
+eligibility/suitability, health policy, allocation control, maximum position
+age, and any relay members already committed by the pre-mission plan. It does
+not contain live positions or radio values.
+
+Each Linux companion combines that shared policy with synchronized AVIAN
+telemetry and `RelayLinkObservation` records. A missing telemetry record is an
+input error; a stale position keeps the aircraft in the inventory but marks it
+unavailable for relay selection. This prevents a crashed or stale aircraft
+from being silently chosen as a repeater.
+
+`mesh-agent` enables the loop with a local copy of the shared configuration:
+
+```sh
+cargo run -p mesh-agent -- \
+  --name aircraft-017 \
+  --formation-key-file ./formation.key \
+  --relay-runtime-config ./examples/relay-runtime-config.sample.json
+```
+
+The agent evaluates the common snapshot once per second by default. It emits a
+mission-class `RelayReconfiguration` only when a relay group must form or
+release, or when it needs to report discovery/manual-action status; unchanged
+healthy states are not repeatedly written. Record IDs include the publishing
+node, so redundant peers can report the same deterministic conclusion without
+creating a "mother" drone. `--relay-evaluation-ms` changes the cadence.
+
 ## Current boundary
 
 Pre-mission allocation and the deterministic in-flight decision core are

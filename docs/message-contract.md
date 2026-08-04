@@ -87,6 +87,15 @@ includes the currently committed relay members, so an unchanged chain is not
 republished and recovered direct links explicitly release relay aircraft in a
 new generation.
 
+## Relay runtime configuration
+
+A relay runtime configuration is a durable mission record supplied by ARC UI.
+It holds the initial accepted generation and relay set, anchor, required
+mission members, candidate role/suitability inventory, health policy, manual
+control, and maximum position age. It holds no dynamic vehicle position or
+radio measurement: companions construct their own live request from this
+policy plus synchronized telemetry and relay-link observations.
+
 ## Delivery classes
 
 | Class | Durable | Reliable | Redundancy | Lifetime |

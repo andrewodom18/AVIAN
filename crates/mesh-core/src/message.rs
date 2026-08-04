@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     Altitude, EmergencyCommand, InFlightRelayDecision, MissionAllocation, NodeId, NodeProfile,
-    RelayLinkObservation,
+    RelayLinkObservation, RelayRuntimeConfiguration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -128,6 +128,9 @@ pub enum MeshPayload {
     RelayLinkObservation(RelayLinkObservation),
     Mission(MissionState),
     MissionAllocation(MissionAllocation),
+    /// Durable ARC-supplied policy used by companions to rebuild an in-flight
+    /// request from synchronized telemetry and radio observations.
+    RelayRuntimeConfiguration(RelayRuntimeConfiguration),
     RelayReconfiguration(InFlightRelayDecision),
     EmergencyCommand(EmergencyCommand),
     EmergencyAck(EmergencyAck),

@@ -5,7 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use mesh_core::DEFAULT_MAX_NEIGHBORS;
-use mesh_core::{DeliveryClass, FlightStack, MeshPayload, NodeId, Telemetry};
+use mesh_core::{
+    DeliveryClass, FlightStack, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
+    RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot, Telemetry,
+};
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration, MissedTickBehavior};
@@ -90,6 +93,62 @@ struct Args {
     /// Seconds before reconnecting a lost MAVLink transport.
     #[arg(long, default_value_t = 2)]
     mavlink_retry_seconds: u64,
+
+    /// Shared ARC runtime relay configuration. When set, this companion reads
+    /// synchronized telemetry/link observations and publishes relay decisions.
+    #[arg(long)]
+    relay_runtime_config: Option<PathBuf>,
+
+    /// Milliseconds between in-flight relay evaluations.
+    #[arg(long, default_value_t = 1_000, requires = "relay_runtime_config")]
+    relay_evaluation_ms: u64,
+}
+
+#[derive(Debug)]
+struct RelayRuntimeState {
+    configuration: RelayRuntimeConfiguration,
+    current_generation: u64,
+    current_relay_members: Vec<NodeId>,
+    sequence: u64,
+    last_published: Option<RelayDecisionKey>,
+    last_error: Option<String>,
+}
+
+impl RelayRuntimeState {
+    fn new(configuration: RelayRuntimeConfiguration) -> Self {
+        let current_relay_members = configuration.current_relay_members.clone();
+        Self {
+            current_generation: configuration.generation,
+            configuration,
+            current_relay_members,
+            sequence: 0,
+            last_published: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelayDecisionKey {
+    action: RelayRuntimeAction,
+    proposed_generation: u64,
+    relay_members: Vec<NodeId>,
+    disconnected_mission_members: Vec<NodeId>,
+}
+
+impl From<&InFlightRelayDecision> for RelayDecisionKey {
+    fn from(decision: &InFlightRelayDecision) -> Self {
+        Self {
+            action: decision.action,
+            proposed_generation: decision.proposed_generation,
+            relay_members: decision
+                .relay_group
+                .as_ref()
+                .map(|group| group.members.clone())
+                .unwrap_or_default(),
+            disconnected_mission_members: decision.disconnected_mission_members.clone(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -97,6 +156,9 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if !args.telemetry_hz.is_finite() || !(0.1..=20.0).contains(&args.telemetry_hz) {
         anyhow::bail!("--telemetry-hz must be between 0.1 and 20.0");
+    }
+    if args.relay_runtime_config.is_some() && args.relay_evaluation_ms == 0 {
+        anyhow::bail!("--relay-evaluation-ms must be greater than zero");
     }
     if !(2..=DEFAULT_MAX_NEIGHBORS).contains(&args.max_mesh_peers)
         || !args.max_mesh_peers.is_multiple_of(2)
@@ -111,6 +173,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let node_id = NodeId::from(args.name.clone());
+    let mut relay_runtime = args
+        .relay_runtime_config
+        .as_deref()
+        .map(load_relay_runtime_configuration)
+        .transpose()?
+        .map(RelayRuntimeState::new);
     let formation_key = std::fs::read_to_string(&args.formation_key_file).with_context(|| {
         format!(
             "reading formation key from {}",
@@ -165,6 +233,8 @@ async fn main() -> anyhow::Result<()> {
     peer_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut telemetry_publish = time::interval(Duration::from_secs_f64(1.0 / args.telemetry_hz));
     telemetry_publish.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut relay_evaluation = time::interval(Duration::from_millis(args.relay_evaluation_ms));
+    relay_evaluation.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut mavlink_receiver = start_mavlink(&args, node_id.clone())?;
     let mut latest_telemetry: Option<Telemetry> = None;
     let mut telemetry_sequence = 0_u64;
@@ -214,10 +284,33 @@ async fn main() -> anyhow::Result<()> {
                     ).await;
                 }
             }
+            _ = relay_evaluation.tick(), if relay_runtime.is_some() => {
+                if let Some(runtime) = relay_runtime.as_mut() {
+                    evaluate_relay_runtime(&node, &node_id, runtime).await;
+                }
+            }
         }
     }
     node.shutdown().await.context("stopping AVIAN node")?;
     Ok(())
+}
+
+fn load_relay_runtime_configuration(
+    path: &std::path::Path,
+) -> anyhow::Result<RelayRuntimeConfiguration> {
+    let encoded = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "reading relay runtime configuration from {}",
+            path.display()
+        )
+    })?;
+    let configuration: RelayRuntimeConfiguration = serde_json::from_str(&encoded)
+        .with_context(|| format!("decoding relay runtime configuration {}", path.display()))?;
+    anyhow::ensure!(
+        configuration.generation > 0,
+        "relay runtime configuration generation must be positive"
+    );
+    Ok(configuration)
 }
 
 fn start_mavlink(
@@ -259,6 +352,108 @@ async fn publish_telemetry(node: &PeatNode, node_id: &NodeId, sequence: u64, tel
     }
 }
 
+async fn evaluate_relay_runtime(
+    node: &PeatNode,
+    node_id: &NodeId,
+    runtime: &mut RelayRuntimeState,
+) {
+    let records = match node.scan(DeliveryClass::Telemetry).await {
+        Ok(records) => records,
+        Err(error) => {
+            report_relay_runtime_error(runtime, format!("scanning live relay inputs: {error}"));
+            return;
+        }
+    };
+    let mut telemetry = Vec::new();
+    let mut observations = Vec::new();
+    for (_, record) in records {
+        match record.payload {
+            MeshPayload::Telemetry(value) => telemetry.push(value),
+            MeshPayload::RelayLinkObservation(value) => observations.push(value),
+            _ => {}
+        }
+    }
+    let snapshot = RelayRuntimeSnapshot {
+        observed_at_ms: unix_time_ms(),
+        current_generation: runtime.current_generation,
+        current_relay_members: runtime.current_relay_members.clone(),
+        telemetry,
+        observations,
+    };
+    let request = match runtime.configuration.build_request(&snapshot) {
+        Ok(request) => request,
+        Err(error) => {
+            report_relay_runtime_error(runtime, format!("building live relay snapshot: {error}"));
+            return;
+        }
+    };
+    let decision = match InFlightRelayPlanner.decide(&request) {
+        Ok(decision) => decision,
+        Err(error) => {
+            report_relay_runtime_error(runtime, format!("evaluating live relay snapshot: {error}"));
+            return;
+        }
+    };
+    runtime.last_error = None;
+    let key = RelayDecisionKey::from(&decision);
+    if matches!(
+        decision.action,
+        RelayRuntimeAction::MaintainDirect | RelayRuntimeAction::MaintainRelayChain
+    ) || runtime.last_published.as_ref() == Some(&key)
+    {
+        return;
+    }
+
+    runtime.sequence = runtime.sequence.saturating_add(1);
+    let record = match AvianRecord::new(
+        node_id.clone(),
+        runtime.sequence,
+        DeliveryClass::Mission,
+        unix_time_ms(),
+        MeshPayload::RelayReconfiguration(decision.clone()),
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            report_relay_runtime_error(runtime, format!("creating relay decision record: {error}"));
+            return;
+        }
+    };
+    let record_id = format!(
+        "relay/{}/{}/{}",
+        runtime.configuration.mission_id, decision.proposed_generation, node_id
+    );
+    if let Err(error) = node.put(&record_id, &record).await {
+        report_relay_runtime_error(runtime, format!("publishing relay decision: {error}"));
+        return;
+    }
+    runtime.last_published = Some(key);
+    match decision.action {
+        RelayRuntimeAction::FormRelayChain => {
+            runtime.current_generation = decision.proposed_generation;
+            runtime.current_relay_members = decision
+                .relay_group
+                .as_ref()
+                .map(|group| group.members.clone())
+                .unwrap_or_default();
+        }
+        RelayRuntimeAction::ReleaseRelayChain => {
+            runtime.current_generation = decision.proposed_generation;
+            runtime.current_relay_members.clear();
+        }
+        RelayRuntimeAction::MaintainDirect
+        | RelayRuntimeAction::MaintainRelayChain
+        | RelayRuntimeAction::BeginRangeDiscovery
+        | RelayRuntimeAction::OperatorActionRequired => {}
+    }
+}
+
+fn report_relay_runtime_error(runtime: &mut RelayRuntimeState, detail: String) {
+    if runtime.last_error.as_ref() != Some(&detail) {
+        eprintln!("Relay runtime: {detail}");
+    }
+    runtime.last_error = Some(detail);
+}
+
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -280,5 +475,22 @@ async fn connect_unavailable_peers(node: &PeatNode, peers: &[PeerDescriptor]) {
             }
             Err(error) => eprintln!("Peer {} is unavailable; will retry: {error}", peer.name),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_runtime_configuration_sample_decodes_for_the_onboard_agent() {
+        let configuration: RelayRuntimeConfiguration = serde_json::from_str(include_str!(
+            "../../../examples/relay-runtime-config.sample.json"
+        ))
+        .unwrap();
+
+        let runtime = RelayRuntimeState::new(configuration);
+        assert_eq!(runtime.current_generation, 4);
+        assert!(runtime.current_relay_members.is_empty());
     }
 }

@@ -1,0 +1,71 @@
+{
+  "mission_id": "00000000-0000-0000-0000-000000000007",
+  "generation": 4,
+  "current_relay_members": [],
+  "anchor": {
+    "node_id": "ground",
+    "position": {
+      "latitude_deg": 0.0,
+      "longitude_deg": 0.0,
+      "msl_m": 100.0
+    },
+    "agl_m": 0.0
+  },
+  "required_mission_members": ["search-1", "search-2"],
+  "candidates": [
+    {
+      "node_id": "relay-a",
+      "available": true,
+      "relay_eligible": true,
+      "mission_eligible": true,
+      "relay_suitability": 0.9,
+      "mission_utility": 0.2
+    },
+    {
+      "node_id": "relay-b",
+      "available": true,
+      "relay_eligible": true,
+      "mission_eligible": true,
+      "relay_suitability": 0.85,
+      "mission_utility": 0.3
+    },
+    {
+      "node_id": "reserve",
+      "available": true,
+      "relay_eligible": true,
+      "mission_eligible": true,
+      "relay_suitability": 0.8,
+      "mission_utility": 0.4
+    },
+    {
+      "node_id": "search-1",
+      "available": true,
+      "relay_eligible": true,
+      "mission_eligible": true,
+      "relay_suitability": 0.4,
+      "mission_utility": 0.95
+    },
+    {
+      "node_id": "search-2",
+      "available": true,
+      "relay_eligible": true,
+      "mission_eligible": true,
+      "relay_suitability": 0.4,
+      "mission_utility": 0.95
+    }
+  ],
+  "health_policy": {
+    "max_observation_age_ms": 2000,
+    "max_latency_ms": 100.0,
+    "max_loss_ratio": 0.05,
+    "min_goodput_bps": 500000.0,
+    "min_signal_quality": 0.7,
+    "min_stability": 0.7,
+    "min_fresnel_clearance_ratio": 0.6,
+    "min_link_margin_db": 10.0
+  },
+  "allocation": {
+    "mode": "automatic"
+  },
+  "max_position_age_ms": 2000
+}

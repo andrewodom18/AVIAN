@@ -5,7 +5,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GeoPoint, LinkGeometry, LinkMetrics, NodeId, RelayCandidate, TransportKind,
+    GeoPoint, LinkGeometry, LinkMetrics, NodeId, RelayCandidate, Telemetry, TransportKind,
     MAX_SUPPORTED_SWARM_SIZE, MIN_SUPPORTED_SWARM_SIZE,
 };
 
@@ -75,6 +75,110 @@ pub struct RelayHealthPolicy {
 pub enum RuntimeRelayAllocationMode {
     Automatic,
     RelayMembers { members: Vec<NodeId> },
+}
+
+/// Durable mission policy distributed by ARC UI. Dynamic positions and radio
+/// observations are intentionally excluded: each companion obtains those from
+/// latest-value mesh records before it evaluates a reconfiguration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayRuntimeConfiguration {
+    pub mission_id: Uuid,
+    /// Generation of the allocation accepted when this runtime policy was
+    /// installed. The onboard state advances it only after publishing a
+    /// complete chain or release decision.
+    pub generation: u64,
+    /// Relay members committed in `generation` when the policy was installed.
+    /// This makes an ARC-approved pre-mission chain the initial runtime state
+    /// instead of forcing the companions to republish it on their first tick.
+    #[serde(default)]
+    pub current_relay_members: Vec<NodeId>,
+    pub anchor: RelayAnchor,
+    pub required_mission_members: Vec<NodeId>,
+    pub candidates: Vec<RelayCandidate>,
+    pub health_policy: RelayHealthPolicy,
+    pub allocation: RuntimeRelayAllocationMode,
+    /// Maximum age of a vehicle position before it becomes unavailable for
+    /// relay assignment. This is explicit because it depends on vehicle speed
+    /// and the mission's communication objective.
+    pub max_position_age_ms: u64,
+}
+
+/// Latest-value mesh state used with a durable runtime configuration. The
+/// current relay members come from the most recently accepted generation, not
+/// from whichever node happens to evaluate the snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayRuntimeSnapshot {
+    pub observed_at_ms: u64,
+    pub current_generation: u64,
+    pub current_relay_members: Vec<NodeId>,
+    pub telemetry: Vec<Telemetry>,
+    pub observations: Vec<RelayLinkObservation>,
+}
+
+impl RelayRuntimeConfiguration {
+    /// Builds an evaluable request from a durable mission configuration and
+    /// the latest synchronized vehicle/radio records. A relay candidate whose
+    /// last position is too old remains in the inventory but is unavailable,
+    /// so the planner can report reduced capacity rather than assuming it is
+    /// still airborne and reachable.
+    pub fn build_request(
+        &self,
+        snapshot: &RelayRuntimeSnapshot,
+    ) -> Result<InFlightRelayRequest, RelayRuntimeConfigError> {
+        if self.max_position_age_ms == 0 {
+            return Err(RelayRuntimeConfigError::InvalidPositionAge);
+        }
+        let mut latest_telemetry: BTreeMap<NodeId, &Telemetry> = BTreeMap::new();
+        for telemetry in &snapshot.telemetry {
+            if telemetry.timestamp_ms > snapshot.observed_at_ms {
+                continue;
+            }
+            let replace = latest_telemetry
+                .get(&telemetry.source)
+                .is_none_or(|existing| telemetry.timestamp_ms >= existing.timestamp_ms);
+            if replace {
+                latest_telemetry.insert(telemetry.source.clone(), telemetry);
+            }
+        }
+
+        let candidates = self
+            .candidates
+            .iter()
+            .cloned()
+            .map(|mut candidate| {
+                let telemetry = latest_telemetry.get(&candidate.node_id).ok_or_else(|| {
+                    RelayRuntimeConfigError::MissingCandidateTelemetry(candidate.node_id.clone())
+                })?;
+                let position_fresh = snapshot
+                    .observed_at_ms
+                    .saturating_sub(telemetry.timestamp_ms)
+                    <= self.max_position_age_ms;
+                candidate.available &= position_fresh;
+                Ok(LiveRelayCandidate {
+                    candidate,
+                    position: GeoPoint {
+                        latitude_deg: telemetry.latitude_deg,
+                        longitude_deg: telemetry.longitude_deg,
+                        msl_m: telemetry.altitude.msl_m,
+                    },
+                    agl_m: telemetry.altitude.agl_m,
+                })
+            })
+            .collect::<Result<Vec<_>, RelayRuntimeConfigError>>()?;
+
+        Ok(InFlightRelayRequest {
+            mission_id: self.mission_id,
+            current_generation: snapshot.current_generation,
+            observed_at_ms: snapshot.observed_at_ms,
+            anchor: self.anchor.clone(),
+            required_mission_members: self.required_mission_members.clone(),
+            current_relay_members: snapshot.current_relay_members.clone(),
+            candidates,
+            observations: snapshot.observations.clone(),
+            health_policy: self.health_policy,
+            allocation: self.allocation.clone(),
+        })
+    }
 }
 
 /// The shared input that any AVIAN companion can evaluate independently while
@@ -882,6 +986,14 @@ pub enum RelayRuntimeError {
     DecisionMismatch,
 }
 
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum RelayRuntimeConfigError {
+    #[error("maximum relay-position age must be greater than zero")]
+    InvalidPositionAge,
+    #[error("no telemetry position is available for configured candidate {0}")]
+    MissingCandidateTelemetry(NodeId),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,6 +1087,46 @@ mod tests {
         }
     }
 
+    fn configuration(request: &InFlightRelayRequest) -> RelayRuntimeConfiguration {
+        RelayRuntimeConfiguration {
+            mission_id: request.mission_id,
+            generation: request.current_generation,
+            current_relay_members: request.current_relay_members.clone(),
+            anchor: request.anchor.clone(),
+            required_mission_members: request.required_mission_members.clone(),
+            candidates: request
+                .candidates
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect(),
+            health_policy: request.health_policy,
+            allocation: request.allocation.clone(),
+            max_position_age_ms: 2_000,
+        }
+    }
+
+    fn telemetry(candidate: &LiveRelayCandidate, timestamp_ms: u64) -> Telemetry {
+        Telemetry {
+            source: candidate.candidate.node_id.clone(),
+            timestamp_ms,
+            latitude_deg: candidate.position.latitude_deg,
+            longitude_deg: candidate.position.longitude_deg,
+            altitude: crate::Altitude::with_optional_agl(
+                candidate.position.msl_m,
+                candidate.agl_m,
+                0.0,
+            )
+            .unwrap(),
+            velocity_ned_mps: [0.0; 3],
+            attitude_rpy_deg: [0.0; 3],
+            battery_remaining: Some(0.9),
+            control_link_quality: None,
+            armed: true,
+            landed: Some(false),
+            failsafe: false,
+        }
+    }
+
     #[test]
     fn live_observations_form_one_grouped_relay_chain_for_multiple_mission_members() {
         let decision = InFlightRelayPlanner
@@ -995,6 +1147,92 @@ mod tests {
             .iter()
             .all(|route| route.relay_members
                 == vec![NodeId::from("relay-a"), NodeId::from("relay-b")]));
+    }
+
+    #[test]
+    fn durable_runtime_configuration_rebuilds_a_live_request_from_mesh_state() {
+        let request = request(RuntimeRelayAllocationMode::Automatic);
+        let configuration = configuration(&request);
+        let snapshot = RelayRuntimeSnapshot {
+            observed_at_ms: request.observed_at_ms,
+            current_generation: request.current_generation,
+            current_relay_members: Vec::new(),
+            telemetry: request
+                .candidates
+                .iter()
+                .map(|candidate| telemetry(candidate, 10_000))
+                .collect(),
+            observations: request.observations.clone(),
+        };
+
+        let rebuilt = configuration.build_request(&snapshot).unwrap();
+        let decision = InFlightRelayPlanner.decide(&rebuilt).unwrap();
+
+        assert_eq!(rebuilt.candidates.len(), 5);
+        assert_eq!(decision.action, RelayRuntimeAction::FormRelayChain);
+    }
+
+    #[test]
+    fn stale_candidate_position_removes_only_that_candidate_from_relay_selection() {
+        let request = request(RuntimeRelayAllocationMode::Automatic);
+        let configuration = configuration(&request);
+        let telemetry = request
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let timestamp = if candidate.candidate.node_id == NodeId::from("reserve") {
+                    1
+                } else {
+                    10_000
+                };
+                telemetry(candidate, timestamp)
+            })
+            .collect();
+        let snapshot = RelayRuntimeSnapshot {
+            observed_at_ms: request.observed_at_ms,
+            current_generation: request.current_generation,
+            current_relay_members: Vec::new(),
+            telemetry,
+            observations: request.observations.clone(),
+        };
+
+        let rebuilt = configuration.build_request(&snapshot).unwrap();
+        let reserve = rebuilt
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate.node_id == NodeId::from("reserve"))
+            .unwrap();
+
+        assert!(!reserve.candidate.available);
+        assert_eq!(
+            InFlightRelayPlanner.decide(&rebuilt).unwrap().action,
+            RelayRuntimeAction::FormRelayChain
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_missing_candidate_telemetry() {
+        let request = request(RuntimeRelayAllocationMode::Automatic);
+        let configuration = configuration(&request);
+        let snapshot = RelayRuntimeSnapshot {
+            observed_at_ms: request.observed_at_ms,
+            current_generation: request.current_generation,
+            current_relay_members: Vec::new(),
+            telemetry: request
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.candidate.node_id != NodeId::from("reserve"))
+                .map(|candidate| telemetry(candidate, 10_000))
+                .collect(),
+            observations: request.observations.clone(),
+        };
+
+        assert_eq!(
+            configuration.build_request(&snapshot),
+            Err(RelayRuntimeConfigError::MissingCandidateTelemetry(
+                NodeId::from("reserve")
+            ))
+        );
     }
 
     #[test]

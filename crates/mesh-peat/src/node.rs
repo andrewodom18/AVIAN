@@ -86,6 +86,10 @@ fn payload_matches_class(payload: &MeshPayload, class: DeliveryClass) -> bool {
             | (MeshPayload::EmergencyAck(_), DeliveryClass::Acknowledgement)
             | (MeshPayload::Mission(_), DeliveryClass::Mission)
             | (MeshPayload::MissionAllocation(_), DeliveryClass::Mission)
+            | (
+                MeshPayload::RelayRuntimeConfiguration(_),
+                DeliveryClass::Mission
+            )
             | (MeshPayload::RelayReconfiguration(_), DeliveryClass::Mission)
             | (MeshPayload::NodeAdvertisement(_), DeliveryClass::Mission)
             | (MeshPayload::Telemetry(_), DeliveryClass::Telemetry)

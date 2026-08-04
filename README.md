@@ -33,6 +33,11 @@ PEAT peer can have multiple underlay addresses for reconnection across Silvus,
 Wi-Fi, cellular, or other paths. Emergency flight-controller output and live
 radio-specific metrics are not implemented yet.
 
+When supplied a shared relay-runtime configuration, `mesh-agent` also combines
+mesh telemetry and relay-link observations into leaderless in-flight chain
+decisions. See the [ARC relay-planning guide](docs/arc-ui-relay-planning.md)
+and [runtime configuration sample](examples/relay-runtime-config.sample.json).
+
 ## Workspace
 
 | Package | Responsibility |
