@@ -1,0 +1,477 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use base64::{engine::general_purpose::STANDARD, Engine};
+use mesh_core::{DeliveryClass, DeliveryPolicy, MeshPayload, NodeId};
+use peat_mesh::network::iroh_transport::derive_iroh_node_secret;
+use peat_mesh::storage::SyncTransport;
+use peat_mesh::sync::{
+    AutomergeBackend, AutomergeBackendConfig, BackendConfig, DataSyncBackend, Document, Query,
+    SyncEngine, TransportConfig,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+pub const AVIAN_SCHEMA_VERSION: u16 = 1;
+
+const COMMANDS_COLLECTION: &str = "commands";
+const MISSIONS_COLLECTION: &str = "missions";
+const TELEMETRY_COLLECTION: &str = "telemetry";
+const BULK_COLLECTION: &str = "bulk";
+const RECORD_FIELD: &str = "record";
+
+/// Versioned application record stored in PEAT. The envelope keeps transport
+/// and persistence metadata outside the payload's domain schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AvianRecord {
+    pub schema_version: u16,
+    pub source: NodeId,
+    pub sequence: u64,
+    pub class: DeliveryClass,
+    pub published_at_ms: u64,
+    pub expires_at_ms: Option<u64>,
+    pub payload: MeshPayload,
+}
+
+impl AvianRecord {
+    pub fn new(
+        source: NodeId,
+        sequence: u64,
+        class: DeliveryClass,
+        published_at_ms: u64,
+        payload: MeshPayload,
+    ) -> Result<Self, PeatNodeError> {
+        if !payload_matches_class(&payload, class) {
+            return Err(PeatNodeError::PayloadClassMismatch);
+        }
+        let expires_at_ms = DeliveryPolicy::for_class(class)
+            .ttl_ms
+            .map(|ttl| published_at_ms.saturating_add(ttl));
+        Ok(Self {
+            schema_version: AVIAN_SCHEMA_VERSION,
+            source,
+            sequence,
+            class,
+            published_at_ms,
+            expires_at_ms,
+            payload,
+        })
+    }
+
+    pub fn is_expired_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms
+            .is_some_and(|expires_at| expires_at <= now_ms)
+    }
+
+    fn validate(&self) -> Result<(), PeatNodeError> {
+        if self.schema_version != AVIAN_SCHEMA_VERSION {
+            return Err(PeatNodeError::UnsupportedSchema(self.schema_version));
+        }
+        if !payload_matches_class(&self.payload, self.class) {
+            return Err(PeatNodeError::PayloadClassMismatch);
+        }
+        Ok(())
+    }
+}
+
+fn payload_matches_class(payload: &MeshPayload, class: DeliveryClass) -> bool {
+    matches!(
+        (payload, class),
+        (MeshPayload::EmergencyCommand(_), DeliveryClass::Emergency)
+            | (MeshPayload::EmergencyAck(_), DeliveryClass::Acknowledgement)
+            | (MeshPayload::Mission(_), DeliveryClass::Mission)
+            | (MeshPayload::NodeAdvertisement(_), DeliveryClass::Mission)
+            | (MeshPayload::Telemetry(_), DeliveryClass::Telemetry)
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct PeatNodeConfig {
+    pub name: String,
+    pub formation_id: String,
+    pub base64_shared_key: String,
+    pub bind_address: SocketAddr,
+    pub storage_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDescriptor {
+    pub name: String,
+    pub endpoint_id_hex: String,
+    pub address: SocketAddr,
+}
+
+impl PeerDescriptor {
+    pub fn new(
+        name: impl Into<String>,
+        endpoint_id_hex: impl Into<String>,
+        address: SocketAddr,
+    ) -> Result<Self, PeatNodeError> {
+        let endpoint_id_hex = endpoint_id_hex.into();
+        validate_endpoint_id(&endpoint_id_hex)?;
+        Ok(Self {
+            name: name.into(),
+            endpoint_id_hex,
+            address,
+        })
+    }
+}
+
+impl FromStr for PeerDescriptor {
+    type Err = PeatNodeError;
+
+    /// Parses `ENDPOINT_ID_HEX@IP:PORT`.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (endpoint_id_hex, address) = value
+            .split_once('@')
+            .ok_or_else(|| PeatNodeError::InvalidPeerSpec(value.to_owned()))?;
+        validate_endpoint_id(endpoint_id_hex)?;
+        let address = address
+            .parse()
+            .map_err(|_| PeatNodeError::InvalidPeerSpec(value.to_owned()))?;
+        let short_length = endpoint_id_hex.len().min(12);
+        Self::new(
+            format!("peer-{}", &endpoint_id_hex[..short_length]),
+            endpoint_id_hex,
+            address,
+        )
+    }
+}
+
+/// A runnable AVIAN node backed by PEAT's persistent Automerge sync engine and
+/// formation-authenticated Iroh QUIC transport. Hosted relays remain disabled.
+pub struct PeatNode {
+    name: String,
+    backend: Arc<AutomergeBackend>,
+}
+
+impl PeatNode {
+    pub async fn start(config: PeatNodeConfig) -> Result<Self, PeatNodeError> {
+        if config.name.trim().is_empty() {
+            return Err(PeatNodeError::EmptyNodeName);
+        }
+        if config.formation_id.trim().is_empty() {
+            return Err(PeatNodeError::EmptyFormationId);
+        }
+
+        let formation_secret = normalized_formation_secret(&config.base64_shared_key)?;
+        let identity_secret = derive_iroh_node_secret(&formation_secret, &config.name);
+
+        let mut peat_config = AutomergeBackendConfig::default();
+        peat_config.data_dir = config.storage_path.clone();
+        peat_config.formation_id = config.formation_id;
+        peat_config.base64_shared_key = config.base64_shared_key;
+        peat_config.iroh_bind_addr = Some(config.bind_address);
+        peat_config.iroh_secret_key = Some(identity_secret);
+
+        let backend = AutomergeBackend::with_iroh(peat_config).await?;
+        backend
+            .initialize(BackendConfig {
+                app_id: "avian".to_owned(),
+                persistence_dir: config.storage_path,
+                shared_key: None,
+                transport: TransportConfig::default(),
+                extra: HashMap::new(),
+            })
+            .await?;
+        backend.start_sync().await?;
+
+        Ok(Self {
+            name: config.name,
+            backend,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn endpoint_id_hex(&self) -> String {
+        self.backend.blob_store().endpoint().id().to_string()
+    }
+
+    pub fn peer_descriptor(&self) -> Result<PeerDescriptor, PeatNodeError> {
+        let address = self
+            .backend
+            .blob_store()
+            .bound_addr_string()
+            .ok_or(PeatNodeError::NoBoundAddress)?
+            .parse()
+            .map_err(|_| PeatNodeError::NoBoundAddress)?;
+        PeerDescriptor::new(self.name.clone(), self.endpoint_id_hex(), address)
+    }
+
+    /// Returns true when this side establishes the connection. PEAT may return
+    /// false when deterministic tie-breaking assigns initiation to the peer.
+    pub async fn connect(&self, peer: &PeerDescriptor) -> Result<bool, PeatNodeError> {
+        Ok(self
+            .backend
+            .connect_to_peer(&peer.endpoint_id_hex, &[peer.address.to_string()])
+            .await?)
+    }
+
+    pub fn peer_count(&self) -> usize {
+        self.backend.transport().connected_peers().len()
+    }
+
+    pub fn is_peer_connected(&self, peer: &PeerDescriptor) -> bool {
+        self.backend
+            .transport()
+            .connected_peers()
+            .iter()
+            .any(|endpoint_id| endpoint_id.to_string() == peer.endpoint_id_hex)
+    }
+
+    pub async fn put(&self, record_id: &str, record: &AvianRecord) -> Result<(), PeatNodeError> {
+        validate_record_id(record_id)?;
+        record.validate()?;
+        let mut fields = HashMap::new();
+        fields.insert(RECORD_FIELD.to_owned(), serde_json::to_value(record)?);
+        self.backend
+            .document_store()
+            .upsert(
+                collection_for(record.class),
+                Document::with_id(record_id, fields),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get(
+        &self,
+        class: DeliveryClass,
+        record_id: &str,
+    ) -> Result<Option<AvianRecord>, PeatNodeError> {
+        validate_record_id(record_id)?;
+        let Some(document) = self
+            .backend
+            .document_store()
+            .get(collection_for(class), &record_id.to_owned())
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record_from_document(document, class)?))
+    }
+
+    pub async fn scan(
+        &self,
+        class: DeliveryClass,
+    ) -> Result<Vec<(String, AvianRecord)>, PeatNodeError> {
+        self.backend
+            .document_store()
+            .query(collection_for(class), &Query::All)
+            .await?
+            .into_iter()
+            .map(|document| {
+                let record_id = document.id.clone().ok_or(PeatNodeError::MissingRecordId)?;
+                let record = record_from_document(document, class)?;
+                Ok((record_id, record))
+            })
+            .collect()
+    }
+
+    pub async fn sync_now(&self) -> Result<(), PeatNodeError> {
+        self.backend.force_sync().await?;
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<(), PeatNodeError> {
+        self.backend.shutdown().await?;
+        Ok(())
+    }
+}
+
+fn collection_for(class: DeliveryClass) -> &'static str {
+    match class {
+        DeliveryClass::Emergency | DeliveryClass::Acknowledgement => COMMANDS_COLLECTION,
+        DeliveryClass::Mission => MISSIONS_COLLECTION,
+        DeliveryClass::Telemetry => TELEMETRY_COLLECTION,
+        DeliveryClass::Bulk => BULK_COLLECTION,
+    }
+}
+
+fn record_from_document(
+    document: Document,
+    expected_class: DeliveryClass,
+) -> Result<AvianRecord, PeatNodeError> {
+    let value = document
+        .fields
+        .get(RECORD_FIELD)
+        .ok_or(PeatNodeError::MissingRecordField)?;
+    let record: AvianRecord = serde_json::from_value(value.clone())?;
+    record.validate()?;
+    if record.class != expected_class {
+        return Err(PeatNodeError::PayloadClassMismatch);
+    }
+    Ok(record)
+}
+
+fn normalized_formation_secret(value: &str) -> Result<[u8; 32], PeatNodeError> {
+    let decoded = STANDARD
+        .decode(value.trim())
+        .map_err(|_| PeatNodeError::InvalidFormationSecret)?;
+    if decoded.is_empty() {
+        return Err(PeatNodeError::InvalidFormationSecret);
+    }
+    if decoded.len() == 32 {
+        return decoded
+            .try_into()
+            .map_err(|_| PeatNodeError::InvalidFormationSecret);
+    }
+    Ok(Sha256::digest(decoded).into())
+}
+
+fn validate_endpoint_id(value: &str) -> Result<(), PeatNodeError> {
+    let decoded = hex::decode(value).map_err(|_| PeatNodeError::InvalidEndpointId)?;
+    if decoded.len() != 32 {
+        return Err(PeatNodeError::InvalidEndpointId);
+    }
+    Ok(())
+}
+
+fn validate_record_id(value: &str) -> Result<(), PeatNodeError> {
+    if value.is_empty() || value.len() > 256 || value.contains('\0') {
+        return Err(PeatNodeError::InvalidRecordId);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+pub enum PeatNodeError {
+    #[error("node name cannot be empty")]
+    EmptyNodeName,
+    #[error("formation ID cannot be empty")]
+    EmptyFormationId,
+    #[error("formation secret must be non-empty standard base64")]
+    InvalidFormationSecret,
+    #[error("invalid PEAT endpoint ID")]
+    InvalidEndpointId,
+    #[error("invalid peer specification {0:?}; expected ENDPOINT_ID_HEX@IP:PORT")]
+    InvalidPeerSpec(String),
+    #[error("PEAT transport did not expose an IP bind address")]
+    NoBoundAddress,
+    #[error("record ID must contain 1-256 non-NUL characters")]
+    InvalidRecordId,
+    #[error("a PEAT document is missing its record ID")]
+    MissingRecordId,
+    #[error("a PEAT document is missing its AVIAN record field")]
+    MissingRecordField,
+    #[error("payload type does not match its delivery class")]
+    PayloadClassMismatch,
+    #[error("unsupported AVIAN record schema version {0}")]
+    UnsupportedSchema(u16),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Peat(#[from] anyhow::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use mesh_core::{MissionState, MissionStatus};
+    use peat_mesh::security::FormationKey;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn mission_record() -> AvianRecord {
+        AvianRecord::new(
+            NodeId::from("node-a"),
+            1,
+            DeliveryClass::Mission,
+            1_000,
+            MeshPayload::Mission(MissionState {
+                mission_id: Uuid::from_u128(42),
+                objective: "prove PEAT convergence".to_owned(),
+                generation: 1,
+                status: MissionStatus::Active,
+            }),
+        )
+        .unwrap()
+    }
+
+    fn node_config(name: &str, storage: &TempDir, shared_key: &str) -> PeatNodeConfig {
+        PeatNodeConfig {
+            name: name.to_owned(),
+            formation_id: "avian-test".to_owned(),
+            base64_shared_key: shared_key.to_owned(),
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            storage_path: storage.path().to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn record_rejects_mismatched_delivery_class() {
+        let result = AvianRecord::new(
+            NodeId::from("node-a"),
+            1,
+            DeliveryClass::Telemetry,
+            1_000,
+            mission_record().payload,
+        );
+        assert!(matches!(result, Err(PeatNodeError::PayloadClassMismatch)));
+    }
+
+    #[test]
+    fn peer_descriptor_parser_rejects_short_ids() {
+        assert!(matches!(
+            "abcd@127.0.0.1:9000".parse::<PeerDescriptor>(),
+            Err(PeatNodeError::InvalidEndpointId)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_nodes_converge_over_real_peat_iroh() {
+        let storage_a = TempDir::new().unwrap();
+        let storage_b = TempDir::new().unwrap();
+        let shared_key = FormationKey::generate_secret();
+        let node_a = PeatNode::start(node_config("avian-test/node-a", &storage_a, &shared_key))
+            .await
+            .unwrap();
+        let node_b = PeatNode::start(node_config("avian-test/node-b", &storage_b, &shared_key))
+            .await
+            .unwrap();
+
+        assert!(node_a
+            .connect(&node_b.peer_descriptor().unwrap())
+            .await
+            .unwrap());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if node_a.peer_count() > 0 || node_b.peer_count() > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("PEAT peers should connect");
+
+        let record = mission_record();
+        node_a.put("current", &record).await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(record) = node_b.get(DeliveryClass::Mission, "current").await.unwrap() {
+                    break record;
+                }
+                node_a.sync_now().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("mission record should converge");
+
+        assert_eq!(received, record);
+        node_a.shutdown().await.unwrap();
+        node_b.shutdown().await.unwrap();
+    }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "mesh-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+mesh-core = { path = "../mesh-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+vehicle-adapters = { path = "../vehicle-adapters" }
+
+[lints]
+workspace = true

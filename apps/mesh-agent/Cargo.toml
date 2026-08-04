@@ -1,0 +1,15 @@
+[package]
+name = "mesh-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mesh-peat = { path = "../../crates/mesh-peat" }
+tokio.workspace = true
+
+[lints]
+workspace = true
