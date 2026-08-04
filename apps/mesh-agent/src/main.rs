@@ -55,7 +55,7 @@ struct Args {
     #[arg(long)]
     formation_key_file: PathBuf,
 
-    /// Static peer as ENDPOINT_ID_HEX@IP:PORT. Repeat for multiple peers.
+    /// Static peer as ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]. Repeat per peer.
     #[arg(long)]
     peer: Vec<PeerDescriptor>,
 
@@ -122,9 +122,15 @@ async fn main() -> anyhow::Result<()> {
 
     println!("AVIAN node '{}' is ready", node.name());
     println!("Endpoint: {}", node.endpoint_id_hex());
+    let local_addresses = local_peer
+        .addresses()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     println!(
-        "Peer spec: {}@{}",
-        local_peer.endpoint_id_hex, local_peer.address
+        "Peer spec: {}@{local_addresses}",
+        local_peer.endpoint_id_hex
     );
 
     println!("Mesh service running; press Ctrl-C to stop");

@@ -23,6 +23,7 @@ const MISSIONS_COLLECTION: &str = "missions";
 const TELEMETRY_COLLECTION: &str = "telemetry";
 const BULK_COLLECTION: &str = "bulk";
 const RECORD_FIELD: &str = "record";
+const MAX_PEER_ADDRESSES: usize = 8;
 
 /// Versioned application record stored in PEAT. The envelope keeps transport
 /// and persistence metadata outside the payload's domain schema.
@@ -102,7 +103,9 @@ pub struct PeatNodeConfig {
 pub struct PeerDescriptor {
     pub name: String,
     pub endpoint_id_hex: String,
-    pub address: SocketAddr,
+    /// Ordered reachable addresses. Put the preferred underlay first; PEAT is
+    /// given the complete set when it connects or reconnects.
+    addresses: Vec<SocketAddr>,
 }
 
 impl PeerDescriptor {
@@ -111,33 +114,61 @@ impl PeerDescriptor {
         endpoint_id_hex: impl Into<String>,
         address: SocketAddr,
     ) -> Result<Self, PeatNodeError> {
+        Self::with_addresses(name, endpoint_id_hex, vec![address])
+    }
+
+    pub fn with_addresses(
+        name: impl Into<String>,
+        endpoint_id_hex: impl Into<String>,
+        addresses: Vec<SocketAddr>,
+    ) -> Result<Self, PeatNodeError> {
         let endpoint_id_hex = endpoint_id_hex.into();
         validate_endpoint_id(&endpoint_id_hex)?;
+        let mut unique_addresses = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            if !unique_addresses.contains(&address) {
+                unique_addresses.push(address);
+            }
+        }
+        if unique_addresses.is_empty() || unique_addresses.len() > MAX_PEER_ADDRESSES {
+            return Err(PeatNodeError::InvalidPeerAddressCount(
+                unique_addresses.len(),
+            ));
+        }
         Ok(Self {
             name: name.into(),
             endpoint_id_hex,
-            address,
+            addresses: unique_addresses,
         })
+    }
+
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.addresses
     }
 }
 
 impl FromStr for PeerDescriptor {
     type Err = PeatNodeError;
 
-    /// Parses `ENDPOINT_ID_HEX@IP:PORT`.
+    /// Parses `ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]`.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (endpoint_id_hex, address) = value
+        let (endpoint_id_hex, addresses) = value
             .split_once('@')
             .ok_or_else(|| PeatNodeError::InvalidPeerSpec(value.to_owned()))?;
         validate_endpoint_id(endpoint_id_hex)?;
-        let address = address
-            .parse()
-            .map_err(|_| PeatNodeError::InvalidPeerSpec(value.to_owned()))?;
+        let addresses = addresses
+            .split(',')
+            .map(|address| {
+                address
+                    .parse()
+                    .map_err(|_| PeatNodeError::InvalidPeerSpec(value.to_owned()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let short_length = endpoint_id_hex.len().min(12);
-        Self::new(
+        Self::with_addresses(
             format!("peer-{}", &endpoint_id_hex[..short_length]),
             endpoint_id_hex,
-            address,
+            addresses,
         )
     }
 }
@@ -208,9 +239,10 @@ impl PeatNode {
     /// Returns true when this side establishes the connection. PEAT may return
     /// false when deterministic tie-breaking assigns initiation to the peer.
     pub async fn connect(&self, peer: &PeerDescriptor) -> Result<bool, PeatNodeError> {
+        let addresses: Vec<String> = peer.addresses().iter().map(ToString::to_string).collect();
         Ok(self
             .backend
-            .connect_to_peer(&peer.endpoint_id_hex, &[peer.address.to_string()])
+            .connect_to_peer(&peer.endpoint_id_hex, &addresses)
             .await?)
     }
 
@@ -351,8 +383,10 @@ pub enum PeatNodeError {
     InvalidFormationSecret,
     #[error("invalid PEAT endpoint ID")]
     InvalidEndpointId,
-    #[error("invalid peer specification {0:?}; expected ENDPOINT_ID_HEX@IP:PORT")]
+    #[error("invalid peer specification {0:?}; expected ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]")]
     InvalidPeerSpec(String),
+    #[error("a peer must have between 1 and 8 unique addresses, got {0}")]
+    InvalidPeerAddressCount(usize),
     #[error("PEAT transport did not expose an IP bind address")]
     NoBoundAddress,
     #[error("record ID must contain 1-256 non-NUL characters")]
@@ -428,6 +462,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn peer_descriptor_preserves_multiple_underlay_addresses() {
+        let endpoint_id = "01".repeat(32);
+        let descriptor = format!("{endpoint_id}@10.10.0.2:9000,172.20.0.2:9000")
+            .parse::<PeerDescriptor>()
+            .unwrap();
+
+        assert_eq!(descriptor.endpoint_id_hex, endpoint_id);
+        assert_eq!(
+            descriptor.addresses(),
+            vec![
+                "10.10.0.2:9000".parse().unwrap(),
+                "172.20.0.2:9000".parse().unwrap()
+            ]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_nodes_converge_over_real_peat_iroh() {
         let storage_a = TempDir::new().unwrap();
@@ -440,10 +491,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(node_a
-            .connect(&node_b.peer_descriptor().unwrap())
-            .await
-            .unwrap());
+        let node_b_descriptor = node_b.peer_descriptor().unwrap();
+        let mut addresses = vec!["127.0.0.1:1".parse().unwrap()];
+        addresses.extend_from_slice(node_b_descriptor.addresses());
+        let node_b_peer = PeerDescriptor::with_addresses(
+            node_b_descriptor.name,
+            node_b_descriptor.endpoint_id_hex,
+            addresses,
+        )
+        .unwrap();
+        assert!(node_a.connect(&node_b_peer).await.unwrap());
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if node_a.peer_count() > 0 || node_b.peer_count() > 0 {

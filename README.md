@@ -24,8 +24,10 @@ The implementation now includes both the deterministic simulator and a real
 PEAT Automerge/Iroh peer with formation authentication, stable identity,
 persistent state, and static peer bootstrap. `mesh-agent` can ingest live
 ArduPilot/PX4 MAVLink telemetry over UDP or TCP; direct serial is an optional
-build feature. Emergency flight-controller output and radio-specific metrics
-are not implemented yet.
+build feature. Silvus StreamCaster is modeled as an IP MANET underlay, and each
+PEAT peer can have multiple underlay addresses for reconnection across Silvus,
+Wi-Fi, cellular, or other paths. Emergency flight-controller output and live
+radio-specific metrics are not implemented yet.
 
 ## Workspace
 
@@ -60,3 +62,5 @@ The [scalability contract](docs/scalability.md) describes the 5-200 aircraft
 overlay and what remains to validate on real radios.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
+The [Silvus integration guide](docs/silvus.md) defines the current radio
+boundary and multi-underlay peer format.

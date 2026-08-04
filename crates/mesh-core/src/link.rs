@@ -16,6 +16,7 @@ impl From<&str> for LinkId {
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
     Ethernet,
+    Silvus,
     Wifi,
     Cellular,
     SubGhz,
@@ -191,10 +192,15 @@ fn metrics_valid(metrics: &LinkMetrics) -> bool {
 mod tests {
     use super::*;
 
-    fn candidate(id: &str, latency_ms: f32, loss_ratio: f32) -> LinkCandidate {
+    fn candidate(
+        id: &str,
+        transport: TransportKind,
+        latency_ms: f32,
+        loss_ratio: f32,
+    ) -> LinkCandidate {
         LinkCandidate {
             id: LinkId::from(id),
-            transport: TransportKind::Wifi,
+            transport,
             available: true,
             metrics: LinkMetrics {
                 latency_ms,
@@ -215,29 +221,29 @@ mod tests {
     #[test]
     fn emergency_routes_use_two_available_paths() {
         let candidates = vec![
-            candidate("wifi", 30.0, 0.01),
-            candidate("cellular", 80.0, 0.03),
-            candidate("sub-ghz", 500.0, 0.10),
+            candidate("silvus", TransportKind::Silvus, 30.0, 0.01),
+            candidate("cellular", TransportKind::Cellular, 80.0, 0.03),
+            candidate("sub-ghz", TransportKind::SubGhz, 500.0, 0.10),
         ];
         let plan = LinkOrchestrator::default()
             .select(&candidates, DeliveryClass::Emergency, None)
             .unwrap();
 
-        assert_eq!(plan.primary, LinkId::from("wifi"));
+        assert_eq!(plan.primary, LinkId::from("silvus"));
         assert_eq!(plan.redundant.len(), 1);
         assert_eq!(plan.redundant[0], LinkId::from("cellular"));
     }
 
     #[test]
     fn unavailable_primary_is_replaced() {
-        let mut wifi = candidate("wifi", 30.0, 0.01);
-        wifi.available = false;
-        let cellular = candidate("cellular", 80.0, 0.03);
+        let mut silvus = candidate("silvus", TransportKind::Silvus, 30.0, 0.01);
+        silvus.available = false;
+        let cellular = candidate("cellular", TransportKind::Cellular, 80.0, 0.03);
         let plan = LinkOrchestrator::default()
             .select(
-                &[wifi, cellular],
+                &[silvus, cellular],
                 DeliveryClass::Telemetry,
-                Some(&LinkId::from("wifi")),
+                Some(&LinkId::from("silvus")),
             )
             .unwrap();
 

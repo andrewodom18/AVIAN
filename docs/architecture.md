@@ -12,9 +12,9 @@ flowchart LR
     VA <--> MA["Rust mesh agent"]
     MA <--> PEAT["PEAT synchronized state"]
     MA <--> LO["Link orchestrator"]
-    LO <--> R1["IP / Wi-Fi"]
-    LO <--> R2["Cellular"]
-    LO <--> R3["Sub-GHz / other radios"]
+    LO <--> R1["Silvus StreamCaster MANET"]
+    LO <--> R2["Wi-Fi / Cellular"]
+    LO <--> R3["Satellite / Sub-GHz / other IP paths"]
     MA <--> PS["Payload service\nvision or sensors"]
 ```
 
@@ -71,12 +71,28 @@ collection and therefore inherits its LatestOnly synchronization mode;
 commands retain full history. Peers authenticate with a shared formation key,
 and each endpoint identity is stable across restarts because it is derived
 from the formation secret and unique node name. Public Iroh relays are
-disabled; initial peers are currently supplied as endpoint/address pairs.
+disabled; initial peers are currently supplied as endpoint/address lists.
+One PEAT identity can have several ordered IP addresses, allowing reconnects
+over different radio underlays without changing AVIAN identity.
 
 The UAV link orchestrator remains responsible for altitude-aware scoring,
 hysteresis, path changes, and per-message redundancy because those are
 application-specific decisions. PEAT synchronization is independent of any
 ground or cloud peer.
+
+## Silvus boundary
+
+AVIAN treats a Silvus StreamCaster network as an IP MANET underlay. Silvus
+handles RF neighbor formation and packet routing; AVIAN/PEAT handles vehicle
+identity, application state, delivery semantics, and the bounded logical
+overlay. This avoids stacking a 200-node AVIAN full mesh on top of a radio
+mesh that already routes packets.
+
+Silvus is a preferred path, not a required dependency. A peer descriptor may
+carry a Silvus address followed by Wi-Fi, cellular, or other reachable
+addresses. PEAT receives the complete list whenever the agent connects or
+reconnects. Live vendor radio statistics and score-driven make-before-break
+handoff remain future work. See [the Silvus integration guide](silvus.md).
 
 ## Swarm topology
 

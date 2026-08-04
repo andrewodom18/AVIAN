@@ -47,7 +47,7 @@ pub fn requirements_for(class: DeliveryClass, message_size: usize) -> MessageReq
 /// them to interfaces at deployment time.
 pub fn uav_pace_config() -> TransportManagerConfig {
     let policy = TransportPolicy::new("avian-default")
-        .primary(vec!["quic-wifi", "quic-ethernet"])
+        .primary(vec!["quic-silvus", "quic-wifi", "quic-ethernet"])
         .alternate(vec!["quic-cellular", "quic-satellite"])
         .contingency(vec!["sub-ghz-data"])
         .emergency(vec!["ble-local"]);
@@ -82,5 +82,6 @@ mod tests {
         let policy = config.default_policy.expect("PACE policy");
         assert_eq!(policy.name, "avian-default");
         assert!(policy.ordered().all(|id| !id.as_str().contains("cloud")));
+        assert!(policy.ordered().any(|id| id.as_str() == "quic-silvus"));
     }
 }
