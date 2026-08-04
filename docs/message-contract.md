@@ -82,7 +82,10 @@ the supplied health policy.
 Only a complete observed chain uses a higher proposed generation. When no
 fresh bidirectional path meets the policy, automatic mode reports
 `begin_range_discovery`; a manual relay list instead reports
-`operator_action_required` and is never silently expanded.
+`operator_action_required` and is never silently expanded. The live request
+includes the currently committed relay members, so an unchanged chain is not
+republished and recovered direct links explicitly release relay aircraft in a
+new generation.
 
 ## Delivery classes
 

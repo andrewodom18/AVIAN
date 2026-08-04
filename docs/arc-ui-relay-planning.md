@@ -123,10 +123,17 @@ number of payload aircraft affected. Every decision includes
 `form_relay_chain` reserves aircraft, so partial discovery paths do not
 silently reduce mission capacity.
 
+The runtime request also carries `current_relay_members`. That makes the
+decision stateful without assigning a coordinator: unchanged chains are
+maintained instead of republished on every evaluation, while recovered direct
+links produce an explicit `release_relay_chain` update.
+
 | Runtime outcome | Meaning |
 | --- | --- |
 | `maintain_direct` | All required mission members currently have healthy direct anchor links. |
+| `maintain_relay_chain` | The currently committed relay group still matches the observed routes, so no new generation is published. |
 | `form_relay_chain` | Live observations show a complete multi-hop path. The result reserves its exact relay group and proposes the next mission generation. |
+| `release_relay_chain` | Healthy direct paths returned, so the prior relay group is released in the next generation and mission capacity increases. |
 | `begin_range_discovery` | A current path is missing and automatic allocation is enabled. AVIAN nominates available relay candidates for a measured probing workflow; it does **not** invent a chain from an untested distance. |
 | `operator_action_required` | The exact manual group cannot form all required paths. AVIAN reports the affected mission members and leaves unlisted aircraft untouched. |
 

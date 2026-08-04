@@ -89,6 +89,12 @@ pub struct InFlightRelayRequest {
     /// Active mission members that must each have a current route to the
     /// anchor. They are not permitted as hidden intermediate relays.
     pub required_mission_members: Vec<NodeId>,
+    /// Relay members committed by the currently accepted mission generation.
+    /// Supplying this prevents a healthy chain from being republished every
+    /// evaluation and lets AVIAN explicitly release relays when direct
+    /// connectivity returns.
+    #[serde(default)]
+    pub current_relay_members: Vec<NodeId>,
     pub candidates: Vec<LiveRelayCandidate>,
     pub observations: Vec<RelayLinkObservation>,
     pub health_policy: RelayHealthPolicy,
@@ -100,8 +106,13 @@ pub struct InFlightRelayRequest {
 pub enum RelayRuntimeAction {
     /// Every required mission member has a currently healthy direct link.
     MaintainDirect,
+    /// The currently committed relay group still matches the observed paths.
+    MaintainRelayChain,
     /// Observed paths require one or more aircraft to be reserved as relays.
     FormRelayChain,
+    /// Direct connectivity returned, so the prior relay group can be released
+    /// back to the mission pool in the next generation.
+    ReleaseRelayChain,
     /// No healthy observed path exists for one or more members. In automatic
     /// mode, move only through a measured/probing workflow; do not extrapolate
     /// a free-space estimate into an unobserved chain.
@@ -219,15 +230,40 @@ impl InFlightRelayPlanner {
             serves_mission_members,
         });
 
+        let current_relays: BTreeSet<NodeId> =
+            request.current_relay_members.iter().cloned().collect();
         let (action, proposed_generation, nominated_probe_members, mut warnings) =
             if disconnected_mission_members.is_empty() {
-                if relay_members.is_empty() {
+                if relay_members == current_relays {
+                    let action = if relay_members.is_empty() {
+                        RelayRuntimeAction::MaintainDirect
+                    } else {
+                        RelayRuntimeAction::MaintainRelayChain
+                    };
                     (
-                        RelayRuntimeAction::MaintainDirect,
+                        action,
                         request.current_generation,
                         Vec::new(),
                         vec![
-                            "Every required mission member has a fresh, bidirectional direct link that meets the mission health policy."
+                            if relay_members.is_empty() {
+                                "Every required mission member has a fresh, bidirectional direct link that meets the mission health policy."
+                            } else {
+                                "The committed relay group still matches fresh, bidirectional paths that meet the mission health policy."
+                            }
+                            .to_owned(),
+                        ],
+                    )
+                } else if relay_members.is_empty() {
+                    let generation = request
+                        .current_generation
+                        .checked_add(1)
+                        .ok_or(RelayRuntimeError::GenerationExhausted)?;
+                    (
+                        RelayRuntimeAction::ReleaseRelayChain,
+                        generation,
+                        Vec::new(),
+                        vec![
+                            "Every required mission member has a healthy direct link. Release the committed relay group back to the mission pool."
                                 .to_owned(),
                         ],
                     )
@@ -280,10 +316,16 @@ impl InFlightRelayPlanner {
             ));
         }
 
-        let committed_relays = (action == RelayRuntimeAction::FormRelayChain)
-            .then_some(&relay_members)
-            .cloned()
-            .unwrap_or_default();
+        let committed_relays = match action {
+            RelayRuntimeAction::FormRelayChain | RelayRuntimeAction::MaintainRelayChain => {
+                relay_members.clone()
+            }
+            RelayRuntimeAction::ReleaseRelayChain | RelayRuntimeAction::MaintainDirect => {
+                BTreeSet::new()
+            }
+            RelayRuntimeAction::BeginRangeDiscovery
+            | RelayRuntimeAction::OperatorActionRequired => current_relays,
+        };
         let mission_drones_remaining = candidate_by_id
             .values()
             .filter(|candidate| {
@@ -381,6 +423,26 @@ fn validate_request(request: &InFlightRelayRequest) -> Result<(), RelayRuntimeEr
         };
         if !candidate.candidate.available || !candidate.candidate.mission_eligible {
             return Err(RelayRuntimeError::UnavailableMissionMember(member.clone()));
+        }
+    }
+
+    let mut current_relays = BTreeSet::new();
+    for member in &request.current_relay_members {
+        if !current_relays.insert(member.clone()) {
+            return Err(RelayRuntimeError::DuplicateCurrentRelay(member.clone()));
+        }
+        if required.contains(member) {
+            return Err(RelayRuntimeError::MissionMemberSelectedAsRelay(
+                member.clone(),
+            ));
+        }
+        let candidate = request
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate.node_id == *member)
+            .ok_or_else(|| RelayRuntimeError::UnknownCurrentRelay(member.clone()))?;
+        if !candidate.candidate.relay_eligible {
+            return Err(RelayRuntimeError::IneligibleCurrentRelay(member.clone()));
         }
     }
 
@@ -806,6 +868,12 @@ pub enum RelayRuntimeError {
     IneligibleManualRelay(NodeId),
     #[error("manual relay member {0} is duplicated")]
     DuplicateManualRelay(NodeId),
+    #[error("committed relay member {0} is not in the live inventory")]
+    UnknownCurrentRelay(NodeId),
+    #[error("committed relay member {0} is not relay-eligible")]
+    IneligibleCurrentRelay(NodeId),
+    #[error("committed relay member {0} is duplicated")]
+    DuplicateCurrentRelay(NodeId),
     #[error("required mission member {0} cannot also be a manual relay")]
     MissionMemberSelectedAsRelay(NodeId),
     #[error("mission generation cannot be incremented further")]
@@ -879,6 +947,7 @@ mod tests {
                 agl_m: Some(0.0),
             },
             required_mission_members: vec!["search-1".into(), "search-2".into()],
+            current_relay_members: Vec::new(),
             candidates: vec![
                 candidate("relay-a", 0.001),
                 candidate("relay-b", 0.002),
@@ -986,6 +1055,41 @@ mod tests {
             .routes
             .iter()
             .all(|route| route.relay_members.is_empty()));
+    }
+
+    #[test]
+    fn unchanged_observed_chain_does_not_create_a_new_generation() {
+        let first_request = request(RuntimeRelayAllocationMode::Automatic);
+        let first = InFlightRelayPlanner.decide(&first_request).unwrap();
+        let mut next_request = first_request;
+        next_request.current_generation = first.proposed_generation;
+        next_request.current_relay_members = first.relay_group.unwrap().members;
+
+        let decision = InFlightRelayPlanner.decide(&next_request).unwrap();
+
+        assert_eq!(decision.action, RelayRuntimeAction::MaintainRelayChain);
+        assert_eq!(
+            decision.proposed_generation,
+            next_request.current_generation
+        );
+        assert_eq!(decision.reserved_relay_count, 2);
+    }
+
+    #[test]
+    fn direct_recovery_releases_the_committed_relay_group() {
+        let mut request = request(RuntimeRelayAllocationMode::Automatic);
+        request.current_relay_members = vec!["relay-a".into(), "relay-b".into()];
+        request.observations = vec![
+            healthy_observation("ground", "search-1"),
+            healthy_observation("ground", "search-2"),
+        ];
+
+        let decision = InFlightRelayPlanner.decide(&request).unwrap();
+
+        assert_eq!(decision.action, RelayRuntimeAction::ReleaseRelayChain);
+        assert_eq!(decision.proposed_generation, request.current_generation + 1);
+        assert_eq!(decision.reserved_relay_count, 0);
+        assert_eq!(decision.mission_drones_remaining, 5);
     }
 
     #[test]
