@@ -27,6 +27,16 @@ terrain or range estimate exists. Battery, receiver-link quality, and landed
 state are also optional instead of inventing healthy defaults for unknown
 MAVLink values.
 
+## Swarm status summary
+
+A swarm status summary is a compact operator-facing telemetry record emitted
+by a deterministic, rotating bounded subset of membership peers. It contains
+the membership generation, configured/fresh/stale counts, and bounded lists
+of aircraft in failsafe or below the configured battery threshold. It does not
+contain a full per-aircraft position stream. The normal operator display uses
+these summaries; individual telemetry remains for mesh control and is
+source-rate-limited by the traffic policy.
+
 ## Relay link observation
 
 A relay link observation is a latest-value telemetry record for one rolling,

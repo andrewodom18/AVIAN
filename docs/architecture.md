@@ -42,7 +42,8 @@ Roles describe capabilities, not authority:
 | --- | --- |
 | Emergency command and acknowledgement | Signed, short-lived, replay-protected, sent redundantly |
 | Mission intent and detections | Durable PEAT state; reconciled after partitions |
-| Position and health telemetry | Latest-value, short-lived, rate-adjusted under congestion |
+| Position and health telemetry | Latest-value, short-lived, source-rate-limited; relay-critical and attention changes bypass routine limits |
+| Operator swarm state | Compact rotating summaries; no permanent reporting drone and no full position feed by default |
 | Images and logs | Durable, resumable, opportunistic |
 | Video | Separate streaming path; never placed in the CRDT state document |
 
@@ -79,6 +80,15 @@ The UAV link orchestrator remains responsible for altitude-aware scoring,
 hysteresis, path changes, and per-message redundancy because those are
 application-specific decisions. PEAT synchronization is independent of any
 ground or cloud peer.
+
+## Traffic control
+
+Every companion applies the shared traffic policy before it publishes routine
+telemetry or radio observations, limiting traffic independently of the active
+underlay. Failsafe and state transitions pass immediately. A rotating bounded
+set of peers publishes compact operator summaries, so the normal operator
+feed is not 200 simultaneous detailed drone streams. See [traffic
+management](traffic-management.md).
 
 ## Silvus boundary
 

@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     Altitude, EmergencyCommand, InFlightRelayDecision, MissionAllocation, NodeId, NodeProfile,
-    RelayLinkObservation, RelayRuntimeConfiguration,
+    RelayLinkObservation, RelayRuntimeConfiguration, SwarmStatusSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -123,6 +123,9 @@ pub struct EmergencyAck {
 pub enum MeshPayload {
     NodeAdvertisement(NodeProfile),
     Telemetry(Telemetry),
+    /// Compact, bounded operator-facing state from a rotating set of peers.
+    /// It deliberately does not duplicate every aircraft's position stream.
+    SwarmStatusSummary(SwarmStatusSummary),
     /// Latest rolling radio observation used to build a shared in-flight relay
     /// snapshot. The record is telemetry-class data, not a mission command.
     RelayLinkObservation(RelayLinkObservation),

@@ -7,8 +7,10 @@ use clap::{Parser, ValueEnum};
 use mesh_core::DEFAULT_MAX_NEIGHBORS;
 use mesh_core::{
     DeliveryClass, FlightStack, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
-    RelayBroadcastPair, RelayLinkObservation, RelayRuntimeAction, RelayRuntimeConfiguration,
-    RelayRuntimeSnapshot, Telemetry,
+    RelayBroadcastPair, RelayLinkObservation, RelayObservationPublication,
+    RelayObservationTrafficGovernor, RelayRuntimeAction, RelayRuntimeConfiguration,
+    RelayRuntimeSnapshot, SwarmStatusSummary, SwarmTrafficPolicy, Telemetry, TelemetryPublication,
+    TelemetryTrafficGovernor,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
@@ -89,8 +91,16 @@ struct Args {
     flight_stack: Option<MavlinkStack>,
 
     /// Maximum AVIAN telemetry publications per second from this aircraft.
+    /// The traffic policy may publish less frequently; this controls how soon
+    /// priority and attention state can be observed locally.
     #[arg(long, default_value_t = 2.0)]
     telemetry_hz: f64,
+
+    /// Optional mission traffic policy. When omitted, AVIAN uses its
+    /// conservative bounded default: 0.5 Hz routine telemetry, 2 Hz priority
+    /// telemetry, and three rotating operator-summary publishers every second.
+    #[arg(long)]
+    traffic_policy_file: Option<PathBuf>,
 
     /// Seconds before reconnecting a lost MAVLink transport.
     #[arg(long, default_value_t = 2)]
@@ -190,6 +200,22 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let node_id = NodeId::from(args.name.clone());
+    let traffic_policy = args
+        .traffic_policy_file
+        .as_deref()
+        .map(load_traffic_policy)
+        .transpose()?
+        .unwrap_or_default();
+    traffic_policy
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let telemetry_tick_ms = 1_000.0 / args.telemetry_hz;
+    if telemetry_tick_ms > traffic_policy.priority_telemetry_interval_ms as f64 {
+        anyhow::bail!(
+            "--telemetry-hz is too low for the traffic policy priority interval of {} ms",
+            traffic_policy.priority_telemetry_interval_ms
+        );
+    }
     let mut relay_runtime = args
         .relay_runtime_config
         .as_deref()
@@ -223,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
     let local_peer = node
         .peer_descriptor()
         .context("reading local PEAT address")?;
-    let peers = if let Some(path) = &args.membership_file {
+    let (peers, swarm_members, membership_generation) = if let Some(path) = &args.membership_file {
         let selection = load_membership(
             path,
             &args.formation_id,
@@ -236,9 +262,9 @@ async fn main() -> anyhow::Result<()> {
             selection.generation,
             selection.peers.len()
         );
-        selection.peers
+        (selection.peers, selection.members, selection.generation)
     } else {
-        args.peer.clone()
+        (args.peer.clone(), vec![node_id.clone()], 0)
     };
 
     println!("AVIAN node '{}' is ready", node.name());
@@ -252,6 +278,13 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "Peer spec: {}@{local_addresses}",
         local_peer.endpoint_id_hex
+    );
+    println!(
+        "Traffic policy: routine {} ms, priority {} ms, {} rotating operator summary replicas every {} ms",
+        traffic_policy.routine_telemetry_interval_ms,
+        traffic_policy.priority_telemetry_interval_ms,
+        traffic_policy.operator_summary_replicas,
+        traffic_policy.operator_summary_interval_ms,
     );
     if let Some(socket) = &relay_observation_socket {
         println!(
@@ -267,12 +300,19 @@ async fn main() -> anyhow::Result<()> {
     peer_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut telemetry_publish = time::interval(Duration::from_secs_f64(1.0 / args.telemetry_hz));
     telemetry_publish.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut operator_summary_publish = time::interval(Duration::from_millis(
+        traffic_policy.operator_summary_interval_ms,
+    ));
+    operator_summary_publish.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut relay_evaluation = time::interval(Duration::from_millis(args.relay_evaluation_ms));
     relay_evaluation.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut mavlink_receiver = start_mavlink(&args, node_id.clone())?;
     let mut latest_telemetry: Option<Telemetry> = None;
+    let mut telemetry_governor = TelemetryTrafficGovernor::default();
     let mut telemetry_sequence = 0_u64;
+    let mut operator_summary_sequence = 0_u64;
     let mut relay_observation_sequence = 0_u64;
+    let mut relay_observation_governor = RelayObservationTrafficGovernor::default();
     let mut relay_observation_buffer = vec![0_u8; 65_535];
     loop {
         tokio::select! {
@@ -311,13 +351,46 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = telemetry_publish.tick() => {
                 if let Some(telemetry) = latest_telemetry.take() {
-                    telemetry_sequence = telemetry_sequence.saturating_add(1);
-                    publish_telemetry(
-                        &node,
-                        &node_id,
-                        telemetry_sequence,
-                        telemetry,
-                    ).await;
+                    let publication = telemetry_governor.decide(
+                        traffic_policy,
+                        &telemetry,
+                        unix_time_ms(),
+                        relay_runtime
+                            .as_ref()
+                            .is_some_and(|runtime| telemetry_is_mission_critical(runtime, &node_id)),
+                    );
+                    match publication {
+                        Ok(TelemetryPublication::Suppress) => {}
+                        Ok(_) => {
+                            telemetry_sequence = telemetry_sequence.saturating_add(1);
+                            publish_telemetry(
+                                &node,
+                                &node_id,
+                                telemetry_sequence,
+                                telemetry,
+                            ).await;
+                        }
+                        Err(error) => eprintln!("Telemetry traffic policy rejected publication: {error}"),
+                    }
+                }
+            }
+            _ = operator_summary_publish.tick() => {
+                let now_ms = unix_time_ms();
+                match traffic_policy.is_summary_publisher(&swarm_members, &node_id, now_ms) {
+                    Ok(true) => {
+                        operator_summary_sequence = operator_summary_sequence.saturating_add(1);
+                        publish_operator_summary(
+                            &node,
+                            &node_id,
+                            operator_summary_sequence,
+                            &swarm_members,
+                            membership_generation,
+                            traffic_policy,
+                            now_ms,
+                        ).await;
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("Operator summary selection failed: {error}"),
                 }
             }
             _ = relay_evaluation.tick(), if relay_runtime.is_some() => {
@@ -340,6 +413,8 @@ async fn main() -> anyhow::Result<()> {
                             &node_id,
                             relay_observation_sequence,
                             &relay_observation_buffer[..length],
+                            traffic_policy,
+                            &mut relay_observation_governor,
                         ).await;
                     }
                     Err(error) => eprintln!("Relay observation listener failed: {error}"),
@@ -367,6 +442,26 @@ fn load_relay_runtime_configuration(
         "relay runtime configuration generation must be positive"
     );
     Ok(configuration)
+}
+
+fn load_traffic_policy(path: &std::path::Path) -> anyhow::Result<SwarmTrafficPolicy> {
+    let encoded = std::fs::read_to_string(path)
+        .with_context(|| format!("reading traffic policy from {}", path.display()))?;
+    let policy: SwarmTrafficPolicy = serde_json::from_str(&encoded)
+        .with_context(|| format!("decoding traffic policy {}", path.display()))?;
+    policy.validate().map_err(|error| anyhow::anyhow!(error))?;
+    Ok(policy)
+}
+
+fn telemetry_is_mission_critical(runtime: &RelayRuntimeState, node_id: &NodeId) -> bool {
+    // A configured live relay candidate needs timely mesh state for dynamic
+    // path and pairing decisions. Other aircraft use the routine source cap;
+    // they still surface any failsafe/low-battery transition immediately.
+    runtime
+        .configuration
+        .candidates
+        .iter()
+        .any(|candidate| candidate.node_id == *node_id)
 }
 
 fn start_mavlink(
@@ -408,11 +503,98 @@ async fn publish_telemetry(node: &PeatNode, node_id: &NodeId, sequence: u64, tel
     }
 }
 
+async fn publish_operator_summary(
+    node: &PeatNode,
+    node_id: &NodeId,
+    sequence: u64,
+    swarm_members: &[NodeId],
+    membership_generation: u64,
+    policy: SwarmTrafficPolicy,
+    observed_at_ms: u64,
+) {
+    let records = match node.scan(DeliveryClass::Telemetry).await {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("Operator summary scan failed: {error}");
+            return;
+        }
+    };
+    let swarm: std::collections::BTreeSet<NodeId> = swarm_members.iter().cloned().collect();
+    let mut latest = std::collections::BTreeMap::new();
+    for (_, record) in records {
+        let MeshPayload::Telemetry(telemetry) = record.payload else {
+            continue;
+        };
+        if !swarm.contains(&telemetry.source) || telemetry.timestamp_ms > observed_at_ms {
+            continue;
+        }
+        let replace = latest
+            .get(&telemetry.source)
+            .is_none_or(|current: &Telemetry| telemetry.timestamp_ms >= current.timestamp_ms);
+        if replace {
+            latest.insert(telemetry.source.clone(), telemetry);
+        }
+    }
+
+    let mut fresh_members = 0_usize;
+    let mut failsafe_members = Vec::new();
+    let mut low_battery_members = Vec::new();
+    for (member, telemetry) in latest {
+        if observed_at_ms.saturating_sub(telemetry.timestamp_ms)
+            > policy.operator_summary_max_age_ms
+        {
+            continue;
+        }
+        fresh_members = fresh_members.saturating_add(1);
+        if telemetry.failsafe {
+            failsafe_members.push(member.clone());
+        }
+        if policy.low_battery_threshold.is_some_and(|threshold| {
+            telemetry
+                .battery_remaining
+                .is_some_and(|remaining| remaining <= threshold)
+        }) {
+            low_battery_members.push(member);
+        }
+    }
+    failsafe_members.truncate(policy.max_attention_members);
+    low_battery_members.truncate(policy.max_attention_members);
+    let summary = SwarmStatusSummary {
+        publisher: node_id.clone(),
+        observed_at_ms,
+        membership_generation,
+        configured_members: swarm.len(),
+        fresh_members,
+        stale_members: swarm.len().saturating_sub(fresh_members),
+        failsafe_members,
+        low_battery_members,
+    };
+    let record = match AvianRecord::new(
+        node_id.clone(),
+        sequence,
+        DeliveryClass::Telemetry,
+        observed_at_ms,
+        MeshPayload::SwarmStatusSummary(summary),
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("Operator summary record rejected: {error}");
+            return;
+        }
+    };
+    let record_id = format!("operator-summary/{node_id}");
+    if let Err(error) = node.put(&record_id, &record).await {
+        eprintln!("Operator summary publication failed: {error}");
+    }
+}
+
 async fn ingest_relay_observation(
     node: &PeatNode,
     node_id: &NodeId,
     sequence: u64,
     encoded: &[u8],
+    traffic_policy: SwarmTrafficPolicy,
+    governor: &mut RelayObservationTrafficGovernor,
 ) {
     let observation = match decode_relay_observation(encoded) {
         Ok(observation) => observation,
@@ -421,6 +603,14 @@ async fn ingest_relay_observation(
             return;
         }
     };
+    match governor.decide(traffic_policy, &observation, unix_time_ms()) {
+        Ok(RelayObservationPublication::Suppress) => return,
+        Ok(RelayObservationPublication::Updated | RelayObservationPublication::StateChange) => {}
+        Err(error) => {
+            eprintln!("Relay observation traffic policy rejected publication: {error}");
+            return;
+        }
+    }
     let record = match AvianRecord::new(
         node_id.clone(),
         sequence,
@@ -601,6 +791,18 @@ mod tests {
         let runtime = RelayRuntimeState::new(configuration);
         assert_eq!(runtime.current_generation, 4);
         assert!(runtime.current_relay_members.is_empty());
+    }
+
+    #[test]
+    fn swarm_traffic_policy_sample_is_valid_for_the_onboard_agent() {
+        let policy: SwarmTrafficPolicy = serde_json::from_str(include_str!(
+            "../../../examples/swarm-traffic-policy.sample.json"
+        ))
+        .unwrap();
+
+        assert_eq!(policy.priority_telemetry_interval_ms, 500);
+        assert_eq!(policy.operator_summary_replicas, 3);
+        assert_eq!(policy.validate(), Ok(()));
     }
 
     #[test]

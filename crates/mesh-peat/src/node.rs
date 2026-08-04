@@ -93,6 +93,7 @@ fn payload_matches_class(payload: &MeshPayload, class: DeliveryClass) -> bool {
             | (MeshPayload::RelayReconfiguration(_), DeliveryClass::Mission)
             | (MeshPayload::NodeAdvertisement(_), DeliveryClass::Mission)
             | (MeshPayload::Telemetry(_), DeliveryClass::Telemetry)
+            | (MeshPayload::SwarmStatusSummary(_), DeliveryClass::Telemetry)
             | (
                 MeshPayload::RelayLinkObservation(_),
                 DeliveryClass::Telemetry

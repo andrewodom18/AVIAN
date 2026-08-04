@@ -16,6 +16,9 @@ are not required for continued operation.
 - Versioned membership manifests from which every aircraft independently
   selects its bounded PEAT neighbors.
 - Automatic multi-link selection with redundant emergency delivery.
+- Source-rate-limited telemetry and radio observations, plus rotating compact
+  swarm summaries so the normal operator feed is not every drone's detailed
+  stream.
 - Signed, expiring, replay-resistant emergency commands.
 - Deterministic pre-mission relay reservation plus live-observation relay
   chaining, range discovery, and exact manual relay overrides.
@@ -78,3 +81,5 @@ The [membership guide](docs/membership.md) shows how a formation is provisioned
 without selecting a leader.
 The [ARC UI relay-planning guide](docs/arc-ui-relay-planning.md) defines
 automatic relay reservation, manual overrides, and individual/group tasks.
+The [traffic-management guide](docs/traffic-management.md) defines routine,
+priority, radio-observation, and operator-summary traffic bounds.

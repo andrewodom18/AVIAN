@@ -1,0 +1,10 @@
+{
+  "routine_telemetry_interval_ms": 2000,
+  "priority_telemetry_interval_ms": 500,
+  "relay_observation_interval_ms": 500,
+  "operator_summary_interval_ms": 1000,
+  "operator_summary_replicas": 3,
+  "operator_summary_max_age_ms": 6000,
+  "low_battery_threshold": 0.2,
+  "max_attention_members": 16
+}

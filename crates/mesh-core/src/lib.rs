@@ -8,6 +8,7 @@ mod node;
 mod relay;
 mod relay_runtime;
 mod topology;
+mod traffic;
 
 pub use altitude::{Altitude, AltitudeError, SYSTEM_MAX_MSL_FT, SYSTEM_MAX_MSL_M};
 pub use command::{CommandError, EmergencyAction, EmergencyCommand, ReplayGuard};
@@ -36,4 +37,8 @@ pub use relay_runtime::{
 pub use topology::{
     TopologyError, TopologyPlan, TopologyPlanner, DEFAULT_MAX_NEIGHBORS, MAX_SUPPORTED_SWARM_SIZE,
     MIN_SUPPORTED_SWARM_SIZE,
+};
+pub use traffic::{
+    RelayObservationPublication, RelayObservationTrafficGovernor, SwarmStatusSummary,
+    SwarmTrafficPolicy, TelemetryPublication, TelemetryTrafficGovernor, TrafficPolicyError,
 };

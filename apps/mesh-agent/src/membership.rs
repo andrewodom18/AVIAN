@@ -12,6 +12,7 @@ const MEMBERSHIP_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug)]
 pub struct MembershipSelection {
     pub generation: u64,
+    pub members: Vec<NodeId>,
     pub peers: Vec<PeerDescriptor>,
 }
 
@@ -136,6 +137,7 @@ fn select_membership(
 
     Ok(MembershipSelection {
         generation: manifest.generation,
+        members: node_ids,
         peers,
     })
 }
@@ -179,6 +181,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(selection.generation, 7);
+            assert_eq!(selection.members.len(), count);
             assert!(!selection.peers.is_empty());
             assert!(selection.peers.len() <= 8);
             assert!(selection.peers.iter().all(|peer| peer.name != local_name));

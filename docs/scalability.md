@@ -39,6 +39,12 @@ field-tested. Hardware validation still needs a staged PEAT soak test at 5,
 25, 100, and 200 processes, followed by radio-in-the-loop tests measuring
 convergence time, airtime, packet loss, memory, CPU, and recovery under motion.
 
+The traffic governor separately bounds routine source telemetry and unchanged
+radio observations, while three rotating peers publish compact operator
+summaries by default. See [traffic management](traffic-management.md). Relay
+candidate and emergency-state updates deliberately bypass the routine bound;
+their field-measured airtime remains part of the radio-in-the-loop validation.
+
 ## Membership and failure behavior
 
 No member has permanent leadership or unique state. A versioned, locally
