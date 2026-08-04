@@ -1,0 +1,183 @@
+{
+  "runtime": {
+    "mission_id": "00000000-0000-0000-0000-000000000007",
+    "current_generation": 4,
+    "observed_at_ms": 10100,
+    "anchor": {
+      "node_id": "ground",
+      "position": {
+        "latitude_deg": 0.0,
+        "longitude_deg": 0.0,
+        "msl_m": 100.0
+      },
+      "agl_m": 0.0
+    },
+    "required_mission_members": [
+      "search-1",
+      "search-2"
+    ],
+    "candidates": [
+      {
+        "node_id": "relay-a",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.9,
+        "mission_utility": 0.2,
+        "position": { "latitude_deg": 0.001, "longitude_deg": 0.0, "msl_m": 100.0 },
+        "agl_m": 50.0
+      },
+      {
+        "node_id": "relay-b",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.85,
+        "mission_utility": 0.3,
+        "position": { "latitude_deg": 0.002, "longitude_deg": 0.0, "msl_m": 100.0 },
+        "agl_m": 50.0
+      },
+      {
+        "node_id": "reserve",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.8,
+        "mission_utility": 0.4,
+        "position": { "latitude_deg": 0.003, "longitude_deg": 0.0, "msl_m": 100.0 },
+        "agl_m": 50.0
+      },
+      {
+        "node_id": "search-1",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.4,
+        "mission_utility": 0.95,
+        "position": { "latitude_deg": 0.004, "longitude_deg": 0.0, "msl_m": 100.0 },
+        "agl_m": 50.0
+      },
+      {
+        "node_id": "search-2",
+        "available": true,
+        "relay_eligible": true,
+        "mission_eligible": true,
+        "relay_suitability": 0.4,
+        "mission_utility": 0.95,
+        "position": { "latitude_deg": 0.005, "longitude_deg": 0.0, "msl_m": 100.0 },
+        "agl_m": 50.0
+      }
+    ],
+    "observations": [
+      {
+        "first": "ground",
+        "second": "relay-a",
+        "transport": "silvus",
+        "observed_at_ms": 10000,
+        "sample_window_ms": 1000,
+        "bidirectional": true,
+        "available": true,
+        "metrics": {
+          "latency_ms": 20.0,
+          "loss_ratio": 0.01,
+          "goodput_bps": 2000000.0,
+          "signal_quality": 0.9,
+          "stability": 0.9,
+          "energy_cost": 0.3
+        },
+        "geometry": {
+          "distance_m": 110.0,
+          "line_of_sight": true,
+          "fresnel_clearance_ratio": 0.9
+        },
+        "received_power_dbm": -65.0,
+        "link_margin_db": 25.0
+      },
+      {
+        "first": "relay-a",
+        "second": "relay-b",
+        "transport": "silvus",
+        "observed_at_ms": 10000,
+        "sample_window_ms": 1000,
+        "bidirectional": true,
+        "available": true,
+        "metrics": {
+          "latency_ms": 20.0,
+          "loss_ratio": 0.01,
+          "goodput_bps": 2000000.0,
+          "signal_quality": 0.9,
+          "stability": 0.9,
+          "energy_cost": 0.3
+        },
+        "geometry": {
+          "distance_m": 110.0,
+          "line_of_sight": true,
+          "fresnel_clearance_ratio": 0.9
+        },
+        "received_power_dbm": -65.0,
+        "link_margin_db": 25.0
+      },
+      {
+        "first": "relay-b",
+        "second": "search-1",
+        "transport": "silvus",
+        "observed_at_ms": 10000,
+        "sample_window_ms": 1000,
+        "bidirectional": true,
+        "available": true,
+        "metrics": {
+          "latency_ms": 20.0,
+          "loss_ratio": 0.01,
+          "goodput_bps": 2000000.0,
+          "signal_quality": 0.9,
+          "stability": 0.9,
+          "energy_cost": 0.3
+        },
+        "geometry": {
+          "distance_m": 220.0,
+          "line_of_sight": true,
+          "fresnel_clearance_ratio": 0.9
+        },
+        "received_power_dbm": -65.0,
+        "link_margin_db": 25.0
+      },
+      {
+        "first": "relay-b",
+        "second": "search-2",
+        "transport": "silvus",
+        "observed_at_ms": 10000,
+        "sample_window_ms": 1000,
+        "bidirectional": true,
+        "available": true,
+        "metrics": {
+          "latency_ms": 20.0,
+          "loss_ratio": 0.01,
+          "goodput_bps": 2000000.0,
+          "signal_quality": 0.9,
+          "stability": 0.9,
+          "energy_cost": 0.3
+        },
+        "geometry": {
+          "distance_m": 330.0,
+          "line_of_sight": true,
+          "fresnel_clearance_ratio": 0.9
+        },
+        "received_power_dbm": -65.0,
+        "link_margin_db": 25.0
+      }
+    ],
+    "health_policy": {
+      "max_observation_age_ms": 2000,
+      "max_latency_ms": 100.0,
+      "max_loss_ratio": 0.05,
+      "min_goodput_bps": 500000.0,
+      "min_signal_quality": 0.7,
+      "min_stability": 0.7,
+      "min_fresnel_clearance_ratio": 0.6,
+      "min_link_margin_db": 10.0
+    },
+    "allocation": {
+      "mode": "automatic"
+    }
+  }
+}

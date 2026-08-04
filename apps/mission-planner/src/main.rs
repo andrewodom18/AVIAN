@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::Parser;
 use mesh_core::{
-    MissionAllocation, OperatorTaskGroup, RelayAllocationMode, RelayCorridorRequest, RelayPlan,
-    RelayPlanner,
+    InFlightRelayPlanner, InFlightRelayRequest, MissionAllocation, OperatorTaskGroup,
+    RelayAllocationMode, RelayCorridorRequest, RelayPlan, RelayPlanner,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -38,6 +38,23 @@ struct ArcPlanningRequest {
     task_groups: Vec<OperatorTaskGroup>,
 }
 
+/// The live-request wrapper intentionally has a different top-level field from
+/// the pre-mission corridor request. ARC UI can submit either JSON shape to
+/// the same planner endpoint without treating a runtime observation as a
+/// static range estimate.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArcInFlightRequest {
+    runtime: InFlightRelayRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+enum PlannerRequest {
+    PreMission(ArcPlanningRequest),
+    InFlight(ArcInFlightRequest),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RelayCountPreview {
@@ -62,11 +79,18 @@ struct RelayAlternative {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let encoded = read_request(args.input.as_ref())?;
-    let request: ArcPlanningRequest =
+    let request: PlannerRequest =
         serde_json::from_str(&encoded).context("decoding ARC planning request")?;
-    let response = plan_request(request)?;
-    let encoded =
-        serde_json::to_string_pretty(&response).context("encoding ARC planning response")?;
+    let encoded = match request {
+        PlannerRequest::PreMission(request) => {
+            serde_json::to_string_pretty(&plan_request(request)?)
+                .context("encoding ARC pre-mission planning response")?
+        }
+        PlannerRequest::InFlight(request) => {
+            serde_json::to_string_pretty(&InFlightRelayPlanner.decide(&request.runtime)?)
+                .context("encoding ARC in-flight planning response")?
+        }
+    };
     if let Some(path) = args.output {
         std::fs::write(&path, format!("{encoded}\n"))
             .with_context(|| format!("writing planning response to {}", path.display()))?;

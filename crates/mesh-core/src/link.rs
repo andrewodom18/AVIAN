@@ -12,7 +12,7 @@ impl From<&str> for LinkId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
     Ethernet,
@@ -35,12 +35,44 @@ pub struct LinkMetrics {
     pub energy_cost: f32,
 }
 
+impl LinkMetrics {
+    /// Returns whether a rolling link measurement can be used for routing or
+    /// relay-health decisions.
+    pub fn is_valid(&self) -> bool {
+        self.latency_ms.is_finite()
+            && self.latency_ms >= 0.0
+            && self.goodput_bps.is_finite()
+            && self.goodput_bps >= 0.0
+            && [
+                self.loss_ratio,
+                self.signal_quality,
+                self.stability,
+                self.energy_cost,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LinkGeometry {
     pub distance_m: f64,
     pub line_of_sight: bool,
     /// A value of 1.0 means the estimated first Fresnel zone is clear.
     pub fresnel_clearance_ratio: f32,
+}
+
+impl LinkGeometry {
+    /// Returns whether the RF geometry associated with a measurement is
+    /// internally consistent. `distance_m` remains an observed value; relay
+    /// decisions also derive the current three-dimensional distance from the
+    /// participants' reported positions.
+    pub fn is_valid(&self) -> bool {
+        self.distance_m.is_finite()
+            && self.distance_m >= 0.0
+            && self.fresnel_clearance_ratio.is_finite()
+            && (0.0..=1.0).contains(&self.fresnel_clearance_ratio)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,7 +157,7 @@ impl LinkOrchestrator {
 }
 
 fn score(candidate: &LinkCandidate, class: DeliveryClass) -> Option<f32> {
-    if !candidate.available || !metrics_valid(&candidate.metrics) {
+    if !candidate.available || !candidate.metrics.is_valid() || !candidate.geometry.is_valid() {
         return None;
     }
 
@@ -171,21 +203,6 @@ fn score(candidate: &LinkCandidate, class: DeliveryClass) -> Option<f32> {
         }
     };
     Some(weighted * 100.0)
-}
-
-fn metrics_valid(metrics: &LinkMetrics) -> bool {
-    metrics.latency_ms.is_finite()
-        && metrics.latency_ms >= 0.0
-        && metrics.goodput_bps.is_finite()
-        && metrics.goodput_bps >= 0.0
-        && [
-            metrics.loss_ratio,
-            metrics.signal_quality,
-            metrics.stability,
-            metrics.energy_cost,
-        ]
-        .into_iter()
-        .all(|value| value.is_finite() && (0.0..=1.0).contains(&value))
 }
 
 #[cfg(test)]

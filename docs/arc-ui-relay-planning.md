@@ -94,6 +94,49 @@ the communications and mission-capacity tradeoff before the operator accepts
 it. An invalid preview is returned with an error without discarding the main
 proposal.
 
+## In-mission chain discovery and regrouping
+
+Pre-mission corridors are useful when calibrated range is already known, but
+they are not enough for a moving swarm. During an active mission, every Linux
+companion can run the same `InFlightRelayPlanner` over a shared live snapshot.
+There is no elected coordinator: a peer can publish the deterministic outcome
+as a `RelayReconfiguration` mission record, and all peers can independently
+verify it before accepting its next generation.
+
+The runtime request requires these inputs; none has a hidden generic default:
+
+| Input | Why it is required |
+| --- | --- |
+| Fresh MSL positions and, when available, AGL for the ground anchor and every aircraft | Calculates each current three-dimensional hop and retains the altitude context needed for RF assessment. |
+| Current available/relay-eligible/mission-eligible state, suitability, and mission utility | Selects relay candidates while keeping operator-required mission aircraft out of hidden relay duty. |
+| Per-underlay rolling observations: both endpoint IDs, time, sample window, bidirectional confirmation, availability, latency, loss, goodput, signal quality, stability, Fresnel clearance, and optional received power/link margin | Establishes whether a link is truly usable now. A one-way or stale observation is not a chain edge. |
+| Mission-specific health policy: freshness, latency/loss ceilings, goodput/signal/stability/Fresnel floors, and optional margin floor | Defines "reliable" for this mission and radio configuration. |
+| Automatic allocation or an exact manual relay-member list | Lets the operator preserve control. An unsatisfied manual list never causes AVIAN to take an unlisted aircraft. |
+
+For every active mission member, runtime planning searches only direct links or
+paths whose intermediate nodes are relay-eligible aircraft. It returns ordered
+hops with measured underlay, current calculated separation, and health score.
+It also returns a single explicit relay group plus the mission members it
+serves. That is the grouping ARC UI needs to show a chain or branch and the
+number of payload aircraft affected. Every decision includes
+`reserved_relay_count` and `mission_drones_remaining`; only a complete
+`form_relay_chain` reserves aircraft, so partial discovery paths do not
+silently reduce mission capacity.
+
+| Runtime outcome | Meaning |
+| --- | --- |
+| `maintain_direct` | All required mission members currently have healthy direct anchor links. |
+| `form_relay_chain` | Live observations show a complete multi-hop path. The result reserves its exact relay group and proposes the next mission generation. |
+| `begin_range_discovery` | A current path is missing and automatic allocation is enabled. AVIAN nominates available relay candidates for a measured probing workflow; it does **not** invent a chain from an untested distance. |
+| `operator_action_required` | The exact manual group cannot form all required paths. AVIAN reports the affected mission members and leaves unlisted aircraft untouched. |
+
+Range discovery is intentionally conservative. A live chain can be formed only
+from fresh bidirectional observations that meet the mission policy. If those
+observations do not exist, the system reports the gap, exposes candidates for
+probing, and waits for measured results to be shared; it does not claim that a
+radio specification, 25,000 ft MSL ceiling, or free-space calculation proves
+an unobserved hop will work.
+
 ## Synthetic planner test
 
 The test suite retains the earlier 50-aircraft, one-mile scenario only to
@@ -121,11 +164,13 @@ is an individual instruction. The contract rejects empty instructions,
 unknown members, cross-pool assignments, duplicate group IDs, and assignment
 of one aircraft to two groups in the same mission generation.
 
-The accepted result is a versioned `MissionAllocation` with a mission UUID and
-positive generation. It is serializable as an AVIAN mission payload and can be
-stored through PEAT. The ARC-to-PEAT submission endpoint is not implemented
-yet; the current milestone supplies the validated planning contract and JSON
-planning engine.
+The accepted pre-mission result is a versioned `MissionAllocation` with a
+mission UUID and positive generation. A runtime chain decision is a
+`RelayReconfiguration` mission payload. Both are serializable through PEAT;
+new complete relay chains increment the mission generation instead of silently
+rewriting an active allocation. The ARC-to-PEAT submission endpoint is not
+implemented yet; the current milestone supplies the validated planning
+contract and JSON planning engine.
 
 ## Run the planning engine
 
@@ -141,17 +186,23 @@ SL5200 5 MHz parameters at a representative in-band frequency solely as a
 free-space planning example; it intentionally returns `activation_ready: false`
 until replaced with a field calibration.
 
+`arc-inflight-relay-request.sample.json` demonstrates a live Silvus chain for
+two mission members. It returns `form_relay_chain` and a new generation with
+two relay aircraft. Replace the sample observations with current measurements;
+they are illustrative input only.
+
 ## Current boundary
 
-This is pre-mission geometry and allocation. Complete closed-loop operation
-still requires:
+Pre-mission allocation and the deterministic in-flight decision core are
+implemented. Complete closed-loop operation still requires:
 
 - terrain and obstruction-aware corridor routing instead of one straight
   geodesic corridor;
-- live Silvus and alternate-link measurements feeding the range model;
+- a Silvus/alternate-underlay collector that continuously supplies the live
+  observation snapshot to the onboard companion;
 - onboard station-hold execution and relay-health reporting;
-- automatic backfill when a relay degrades or crashes;
-- mission-generation updates distributed while aircraft are moving; and
+- automatic physical backfill when a relay degrades or crashes;
+- mission-generation reconciliation while aircraft are moving; and
 - ARC UI approval, pause, manual reassignment, and abort workflows.
 
 Any automatic reallocation must publish a higher generation and preserve

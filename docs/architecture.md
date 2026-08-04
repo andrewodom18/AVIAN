@@ -117,9 +117,14 @@ reserved members, remaining payload capacity, hop utilization, failure
 tolerance, and warnings. Accepted plans are versioned mission allocations;
 roles describe work for that mission and do not create permanent authority.
 
-The current corridor is a straight geodesic path. Terrain-aware routing, live
-link feedback, and automatic in-flight relay replacement remain later stages.
-See [the ARC UI relay-planning guide](arc-ui-relay-planning.md).
+The current pre-mission corridor is a straight geodesic path. During a mission,
+the leaderless in-flight relay planner consumes shared, fresh bidirectional
+link observations and current aircraft positions. It forms a relay group only
+when a complete observed path meets the mission-specific health policy; if
+range is unknown or a path disappears, it asks for measured discovery rather
+than guessing an unobserved hop. Terrain-aware routing, radio-statistics
+collection, and physical station-hold/backfill execution remain integration
+stages. See [the ARC UI relay-planning guide](arc-ui-relay-planning.md).
 
 ## Flight-controller telemetry boundary
 

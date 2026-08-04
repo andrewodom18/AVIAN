@@ -27,6 +27,16 @@ terrain or range estimate exists. Battery, receiver-link quality, and landed
 state are also optional instead of inventing healthy defaults for unknown
 MAVLink values.
 
+## Relay link observation
+
+A relay link observation is a latest-value telemetry record for one rolling,
+bidirectional underlay measurement between two nodes. It carries its timestamp
+and sample window, transport, availability, latency, loss, goodput, signal
+quality, stability, Fresnel geometry, and optional received power/link margin.
+Companions combine these records with current vehicle telemetry and membership
+state to construct the shared in-flight relay snapshot. A stale or one-way
+observation is not eligible to become a chain hop.
+
 ## Emergency command
 
 An emergency command contains:
@@ -58,6 +68,21 @@ Task groups target either relay members or remaining mission members. A member
 can have only one group instruction in a generation. A one-member group is an
 individual assignment. A new allocation or in-flight reallocation increments
 the generation rather than silently rewriting an active plan.
+
+## In-flight relay reconfiguration
+
+A relay reconfiguration carries a mission UUID, previous and proposed
+generation, observation time, an explicit relay group, ordered per-mission
+member hops, any disconnected members, nominated range-discovery candidates,
+reserved relay count, remaining mission capacity, and operator-visible
+warnings. Each hop includes its transport, current
+three-dimensional separation from reported MSL positions, and score against
+the supplied health policy.
+
+Only a complete observed chain uses a higher proposed generation. When no
+fresh bidirectional path meets the policy, automatic mode reports
+`begin_range_discovery`; a manual relay list instead reports
+`operator_action_required` and is never silently expanded.
 
 ## Delivery classes
 

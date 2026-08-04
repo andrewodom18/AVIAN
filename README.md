@@ -17,6 +17,8 @@ are not required for continued operation.
   selects its bounded PEAT neighbors.
 - Automatic multi-link selection with redundant emergency delivery.
 - Signed, expiring, replay-resistant emergency commands.
+- Deterministic pre-mission relay reservation plus live-observation relay
+  chaining, range discovery, and exact manual relay overrides.
 - A system ceiling of 25,000 ft MSL (7,620 m), with MSL, AGL, and
   above-launch altitude kept separate.
 - Deterministic four-node simulation covering partitions, a crashed node,
@@ -35,12 +37,12 @@ radio-specific metrics are not implemented yet.
 
 | Package | Responsibility |
 | --- | --- |
-| `mesh-core` | Shared messages, identity, command security, altitude rules, and link scoring |
+| `mesh-core` | Shared messages, identity, command security, altitude rules, link scoring, and leaderless relay decisions |
 | `mesh-peat` | PEAT Automerge/Iroh node, AVIAN record store, delivery policy, and PACE configuration |
 | `vehicle-adapters` | Hardware-neutral ArduPilot, PX4, and Betaflight adapter contract |
 | `mesh-sim` | Deterministic failure and recovery simulation |
 | `mesh-agent` | Onboard companion-service entry point |
-| `mission-planner` | ARC UI JSON engine for relay corridors, overrides, and task groups |
+| `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
 
 ## Run
 

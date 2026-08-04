@@ -80,6 +80,14 @@ measurements for the particular radio/antenna/airframe and current environment
 before it presents a chain as mission-ready. The relay planner returns this
 distinction as `range_evidence` and `activation_ready`.
 
+While a mission is active, the in-flight relay planner does not extrapolate
+from either number. It requires fresh bidirectional link observations that
+meet the mission health policy, including timing, loss, goodput, signal
+quality, stability, Fresnel clearance, and optional measured link margin.
+It uses current MSL positions to report each actual relay hop. When a needed
+path is not observed, AVIAN enters measured range discovery rather than
+claiming that a data-sheet range proves a new chain will work.
+
 ## Vendor telemetry boundary
 
 AVIAN currently recognizes `silvus` as a transport type and can give PEAT

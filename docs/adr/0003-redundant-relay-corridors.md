@@ -24,6 +24,11 @@ single-aircraft chain would make each relay a single point of failure.
    station-failure tolerance, reserved relay count, and payload aircraft left.
 7. Accepted individual and group instructions are explicit node assignments
    in a versioned mission allocation.
+8. During a mission, all companions can derive a relay decision from the same
+   fresh bidirectional link-observation snapshot. A complete observed path
+   reserves a named relay group and increments the mission generation.
+9. Missing or stale observations trigger measured range discovery, not a
+   guessed physical chain. Exact manual relay overrides are preserved.
 
 ## Consequences
 
@@ -35,4 +40,4 @@ single-aircraft chain would make each relay a single point of failure.
 - Increasing relay count can improve redundancy or shorten hops depending on
   station count.
 - Straight-line planning is only the first stage; terrain-aware routing and
-  live link-driven reallocation remain required.
+  physical station-hold/backfill execution remain required.
