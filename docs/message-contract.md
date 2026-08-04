@@ -86,6 +86,11 @@ warnings. Each hop includes its transport, current
 three-dimensional separation from reported MSL positions, and score against
 the supplied health policy.
 
+For maximum coverage, the relay group also carries each active/standby
+Bluetooth pair and the standby's measured protected neighbors. A decision
+lists any active relays without a qualifying pair separately and does not
+commit that single-aircraft path as maximum coverage.
+
 Only a complete observed chain uses a higher proposed generation. When no
 fresh bidirectional path meets the policy, automatic mode reports
 `begin_range_discovery`; a manual relay list instead reports
@@ -99,9 +104,11 @@ new generation.
 A relay runtime configuration is a durable mission record supplied by ARC UI.
 It holds the initial accepted generation and relay set, anchor, required
 mission members, candidate role/suitability inventory, health policy, manual
-control, and maximum position age. It holds no dynamic vehicle position or
-radio measurement: companions construct their own live request from this
-policy plus synchronized telemetry and relay-link observations.
+control, maximum position age, coverage profile, optional Bluetooth handover
+policy, and current active/standby pair assignments. It holds no dynamic
+vehicle position or radio measurement: companions construct their own live
+request from this policy plus synchronized telemetry and relay-link
+observations.
 
 ## Delivery classes
 

@@ -128,6 +128,12 @@ than guessing an unobserved hop. Terrain-aware routing, radio-statistics
 collection, and physical station-hold/backfill execution remain integration
 stages. See [the ARC UI relay-planning guide](arc-ui-relay-planning.md).
 
+For maximum coverage, live planning also requires a distinct Bluetooth-linked
+standby for every active relay. The standby must have current non-Bluetooth
+links to the same neighboring hops, not merely a nearby Bluetooth peer. This
+keeps both aircraft ready to receive while the active radio alone broadcasts;
+the local heartbeat handover changes that role on an active-peer failure.
+
 The onboard `mesh-agent` can evaluate a shared runtime configuration at a
 bounded cadence. It reads latest telemetry and link observations from PEAT,
 rebuilds the dynamic candidate inventory, and publishes state-changing relay

@@ -7,8 +7,8 @@ use clap::{Parser, ValueEnum};
 use mesh_core::DEFAULT_MAX_NEIGHBORS;
 use mesh_core::{
     DeliveryClass, FlightStack, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
-    RelayLinkObservation, RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot,
-    Telemetry,
+    RelayBroadcastPair, RelayLinkObservation, RelayRuntimeAction, RelayRuntimeConfiguration,
+    RelayRuntimeSnapshot, Telemetry,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
@@ -117,6 +117,7 @@ struct RelayRuntimeState {
     configuration: RelayRuntimeConfiguration,
     current_generation: u64,
     current_relay_members: Vec<NodeId>,
+    current_broadcast_pairs: Vec<RelayBroadcastPair>,
     sequence: u64,
     last_published: Option<RelayDecisionKey>,
     last_error: Option<String>,
@@ -125,10 +126,12 @@ struct RelayRuntimeState {
 impl RelayRuntimeState {
     fn new(configuration: RelayRuntimeConfiguration) -> Self {
         let current_relay_members = configuration.current_relay_members.clone();
+        let current_broadcast_pairs = configuration.current_broadcast_pairs.clone();
         Self {
             current_generation: configuration.generation,
             configuration,
             current_relay_members,
+            current_broadcast_pairs,
             sequence: 0,
             last_published: None,
             last_error: None,
@@ -141,6 +144,7 @@ struct RelayDecisionKey {
     action: RelayRuntimeAction,
     proposed_generation: u64,
     relay_members: Vec<NodeId>,
+    broadcast_pairs: Vec<RelayBroadcastPair>,
     disconnected_mission_members: Vec<NodeId>,
 }
 
@@ -153,6 +157,11 @@ impl From<&InFlightRelayDecision> for RelayDecisionKey {
                 .relay_group
                 .as_ref()
                 .map(|group| group.members.clone())
+                .unwrap_or_default(),
+            broadcast_pairs: decision
+                .relay_group
+                .as_ref()
+                .map(|group| group.broadcast_pairs.clone())
                 .unwrap_or_default(),
             disconnected_mission_members: decision.disconnected_mission_members.clone(),
         }
@@ -470,6 +479,7 @@ async fn evaluate_relay_runtime(
         observed_at_ms: unix_time_ms(),
         current_generation: runtime.current_generation,
         current_relay_members: runtime.current_relay_members.clone(),
+        current_broadcast_pairs: runtime.current_broadcast_pairs.clone(),
         telemetry,
         observations,
     };
@@ -528,10 +538,16 @@ async fn evaluate_relay_runtime(
                 .as_ref()
                 .map(|group| group.members.clone())
                 .unwrap_or_default();
+            runtime.current_broadcast_pairs = decision
+                .relay_group
+                .as_ref()
+                .map(|group| group.broadcast_pairs.clone())
+                .unwrap_or_default();
         }
         RelayRuntimeAction::ReleaseRelayChain => {
             runtime.current_generation = decision.proposed_generation;
             runtime.current_relay_members.clear();
+            runtime.current_broadcast_pairs.clear();
         }
         RelayRuntimeAction::MaintainDirect
         | RelayRuntimeAction::MaintainRelayChain

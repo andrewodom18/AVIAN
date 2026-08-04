@@ -64,6 +64,7 @@
     "min_fresnel_clearance_ratio": 0.6,
     "min_link_margin_db": 10.0
   },
+  "coverage": "minimum",
   "allocation": {
     "mode": "automatic"
   },

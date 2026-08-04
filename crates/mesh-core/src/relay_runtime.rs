@@ -5,7 +5,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    GeoPoint, LinkGeometry, LinkMetrics, NodeId, RelayCandidate, Telemetry, TransportKind,
+    GeoPoint, LinkGeometry, LinkMetrics, NodeId, RelayCandidate, RelayCoverage,
+    RelayPairHandoverPolicy, RelayPeerCoordination, Telemetry, TransportKind,
     MAX_SUPPORTED_SWARM_SIZE, MIN_SUPPORTED_SWARM_SIZE,
 };
 
@@ -108,10 +109,22 @@ pub struct RelayRuntimeConfiguration {
     /// instead of forcing the companions to republish it on their first tick.
     #[serde(default)]
     pub current_relay_members: Vec<NodeId>,
+    /// Active/standby assignments accepted with the current generation. This
+    /// lets a maximum-coverage role swap produce a new mission generation even
+    /// when the set of reserved aircraft happens to remain unchanged.
+    #[serde(default)]
+    pub current_broadcast_pairs: Vec<RelayBroadcastPair>,
     pub anchor: RelayAnchor,
     pub required_mission_members: Vec<NodeId>,
     pub candidates: Vec<RelayCandidate>,
     pub health_policy: RelayHealthPolicy,
+    /// Minimum reserves the shortest measured chain; maximum requires a
+    /// Bluetooth-linked receiving standby for every active relay in any live
+    /// chain before that chain is committed.
+    pub coverage: RelayCoverage,
+    /// Required for maximum runtime coverage so every companion derives the
+    /// same local pair-failover deadline.
+    pub paired_handover: Option<RelayPairHandoverPolicy>,
     pub allocation: RuntimeRelayAllocationMode,
     /// Maximum age of a vehicle position before it becomes unavailable for
     /// relay assignment. This is explicit because it depends on vehicle speed
@@ -127,6 +140,8 @@ pub struct RelayRuntimeSnapshot {
     pub observed_at_ms: u64,
     pub current_generation: u64,
     pub current_relay_members: Vec<NodeId>,
+    #[serde(default)]
+    pub current_broadcast_pairs: Vec<RelayBroadcastPair>,
     pub telemetry: Vec<Telemetry>,
     pub observations: Vec<RelayLinkObservation>,
 }
@@ -189,9 +204,12 @@ impl RelayRuntimeConfiguration {
             anchor: self.anchor.clone(),
             required_mission_members: self.required_mission_members.clone(),
             current_relay_members: snapshot.current_relay_members.clone(),
+            current_broadcast_pairs: snapshot.current_broadcast_pairs.clone(),
             candidates,
             observations: snapshot.observations.clone(),
             health_policy: self.health_policy,
+            coverage: self.coverage,
+            paired_handover: self.paired_handover,
             allocation: self.allocation.clone(),
         })
     }
@@ -215,9 +233,13 @@ pub struct InFlightRelayRequest {
     /// connectivity returns.
     #[serde(default)]
     pub current_relay_members: Vec<NodeId>,
+    #[serde(default)]
+    pub current_broadcast_pairs: Vec<RelayBroadcastPair>,
     pub candidates: Vec<LiveRelayCandidate>,
     pub observations: Vec<RelayLinkObservation>,
     pub health_policy: RelayHealthPolicy,
+    pub coverage: RelayCoverage,
+    pub paired_handover: Option<RelayPairHandoverPolicy>,
     pub allocation: RuntimeRelayAllocationMode,
 }
 
@@ -270,6 +292,22 @@ pub struct RelayRoleGroup {
     pub group_id: String,
     pub members: Vec<NodeId>,
     pub serves_mission_members: Vec<NodeId>,
+    /// Empty for minimum coverage. Every maximum-coverage entry identifies
+    /// the one transmitting relay and its independently receive-ready
+    /// Bluetooth standby.
+    pub broadcast_pairs: Vec<RelayBroadcastPair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayBroadcastPair {
+    pub active_broadcaster: NodeId,
+    pub standby_receiver: NodeId,
+    pub peer_coordination: RelayPeerCoordination,
+    /// Relay-hop neighbors that both the active and standby have measured
+    /// healthy radio links to. A standby is not accepted only because it is
+    /// Bluetooth-connected; it must also be ready to replace the broadcast
+    /// role on the chain itself.
+    pub protected_neighbors: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,6 +328,10 @@ pub struct InFlightRelayDecision {
     pub relay_group: Option<RelayRoleGroup>,
     pub routes: Vec<RelayChainRoute>,
     pub disconnected_mission_members: Vec<NodeId>,
+    /// Active path relays that lack a distinct Bluetooth-linked, receive-ready
+    /// standby under maximum coverage. The single-aircraft path is reported
+    /// for visibility but is not committed as a maximum-coverage chain.
+    pub unpaired_active_relays: Vec<NodeId>,
     /// Eligible non-mission aircraft ordered for a measured range-discovery
     /// workflow when no current path exists. This is not a blind movement
     /// command or an assumed radio range.
@@ -335,27 +377,58 @@ impl InFlightRelayPlanner {
             }
         }
 
-        let relay_members: BTreeSet<NodeId> = routes
+        let active_relay_members: BTreeSet<NodeId> = routes
             .iter()
             .flat_map(|route| route.relay_members.iter().cloned())
+            .collect();
+        let (broadcast_pairs, unpaired_active_relays) = select_broadcast_pairs(
+            request.coverage,
+            &active_relay_members,
+            &routes,
+            &allowed_relays,
+            &candidate_by_id,
+            &graph,
+        );
+        let proposed_relay_members: BTreeSet<NodeId> = active_relay_members
+            .iter()
+            .cloned()
+            .chain(
+                broadcast_pairs
+                    .iter()
+                    .map(|pair| pair.standby_receiver.clone()),
+            )
             .collect();
         let serves_mission_members: Vec<NodeId> = routes
             .iter()
             .filter(|route| !route.relay_members.is_empty())
             .map(|route| route.mission_member.clone())
             .collect();
-        let relay_group = (!relay_members.is_empty()).then(|| RelayRoleGroup {
+        let relay_group = (!active_relay_members.is_empty()).then(|| RelayRoleGroup {
             group_id: "adaptive-relay-chain".to_owned(),
-            members: relay_members.iter().cloned().collect(),
+            // A partial group remains visible during maximum-coverage
+            // discovery, but only `proposed_relay_members` is committed once
+            // every active relay has a ready standby.
+            members: if unpaired_active_relays.is_empty() {
+                proposed_relay_members.iter().cloned().collect()
+            } else {
+                active_relay_members.iter().cloned().collect()
+            },
             serves_mission_members,
+            broadcast_pairs,
         });
 
         let current_relays: BTreeSet<NodeId> =
             request.current_relay_members.iter().cloned().collect();
+        let broadcast_pairs_match = request.coverage == RelayCoverage::Minimum
+            || request.current_broadcast_pairs
+                == relay_group
+                    .as_ref()
+                    .map(|group| group.broadcast_pairs.clone())
+                    .unwrap_or_default();
         let (action, proposed_generation, nominated_probe_members, mut warnings) =
-            if disconnected_mission_members.is_empty() {
-                if relay_members == current_relays {
-                    let action = if relay_members.is_empty() {
+            if disconnected_mission_members.is_empty() && unpaired_active_relays.is_empty() {
+                if proposed_relay_members == current_relays && broadcast_pairs_match {
+                    let action = if proposed_relay_members.is_empty() {
                         RelayRuntimeAction::MaintainDirect
                     } else {
                         RelayRuntimeAction::MaintainRelayChain
@@ -365,15 +438,15 @@ impl InFlightRelayPlanner {
                         request.current_generation,
                         Vec::new(),
                         vec![
-                            if relay_members.is_empty() {
+                            if proposed_relay_members.is_empty() {
                                 "Every required mission member has a fresh, bidirectional direct link that meets the mission health policy."
                             } else {
-                                "The committed relay group still matches fresh, bidirectional paths that meet the mission health policy."
+                                "The committed relay group still matches fresh, bidirectional paths and the selected live coverage policy."
                             }
                             .to_owned(),
                         ],
                     )
-                } else if relay_members.is_empty() {
+                } else if proposed_relay_members.is_empty() {
                     let generation = request
                         .current_generation
                         .checked_add(1)
@@ -397,9 +470,13 @@ impl InFlightRelayPlanner {
                         generation,
                         Vec::new(),
                         vec![format!(
-                            "{} aircraft are required in the currently observed relay chain for {} mission members.",
-                            relay_members.len(),
-                            required.len()
+                            "{} aircraft are required in the currently observed {} relay chain for {} mission members.",
+                            proposed_relay_members.len(),
+                            match request.coverage {
+                                RelayCoverage::Minimum => "minimum-coverage",
+                                RelayCoverage::Maximum => "maximum-coverage active/standby",
+                            },
+                            required.len(),
                         )],
                     )
                 }
@@ -409,7 +486,7 @@ impl InFlightRelayPlanner {
                     request.current_generation,
                     Vec::new(),
                     vec![
-                        "The manual relay-member override cannot currently connect every required mission member. AVIAN did not borrow any other aircraft."
+                        "The manual relay-member override cannot currently satisfy every required path and coverage pairing. AVIAN did not borrow any other aircraft."
                             .to_owned(),
                     ],
                 )
@@ -417,9 +494,13 @@ impl InFlightRelayPlanner {
                 (
                     RelayRuntimeAction::BeginRangeDiscovery,
                     request.current_generation,
-                    ranked_probe_candidates(&candidate_by_id, &required, &relay_members),
+                    ranked_probe_candidates(
+                        &candidate_by_id,
+                        &required,
+                        &active_relay_members,
+                    ),
                     vec![
-                        "One or more members have no fresh, bidirectional path meeting the mission health policy. Begin a measured range-discovery workflow; do not assume an unobserved link from a free-space model."
+                        "One or more members have no fresh, bidirectional path or the selected coverage cannot verify its required standbys. Begin a measured range-discovery workflow; do not assume an unobserved link from a free-space model."
                             .to_owned(),
                     ],
                 )
@@ -435,10 +516,20 @@ impl InFlightRelayPlanner {
                     .join(", ")
             ));
         }
+        if !unpaired_active_relays.is_empty() {
+            warnings.push(format!(
+                "Maximum coverage lacks a Bluetooth-linked, receive-ready standby for active relays: {}. The visible single-aircraft path is not committed as a maximum-coverage chain.",
+                unpaired_active_relays
+                    .iter()
+                    .map(NodeId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
 
         let committed_relays = match action {
             RelayRuntimeAction::FormRelayChain | RelayRuntimeAction::MaintainRelayChain => {
-                relay_members.clone()
+                proposed_relay_members.clone()
             }
             RelayRuntimeAction::ReleaseRelayChain | RelayRuntimeAction::MaintainDirect => {
                 BTreeSet::new()
@@ -466,6 +557,7 @@ impl InFlightRelayPlanner {
             relay_group,
             routes,
             disconnected_mission_members,
+            unpaired_active_relays,
             nominated_probe_members,
             warnings,
         })
@@ -508,6 +600,13 @@ fn validate_request(request: &InFlightRelayRequest) -> Result<(), RelayRuntimeEr
         request.anchor.agl_m,
     )?;
     validate_health_policy(request.health_policy)?;
+    if request.coverage == RelayCoverage::Maximum
+        && request
+            .paired_handover
+            .is_none_or(|policy| policy.max_bluetooth_heartbeat_age_ms == 0)
+    {
+        return Err(RelayRuntimeError::InvalidPairHandoverPolicy);
+    }
 
     let mut candidate_ids = BTreeSet::new();
     for candidate in &request.candidates {
@@ -743,6 +842,118 @@ fn ordered_pair(first: &NodeId, second: &NodeId) -> (NodeId, NodeId) {
     }
 }
 
+/// Derives one distinct Bluetooth-linked standby for every active route relay
+/// in maximum coverage. The standby must also have a healthy non-Bluetooth
+/// radio edge to every neighbor its active peer protects, proving that it can
+/// receive the traffic and take over the same hop rather than merely being
+/// nearby on Bluetooth.
+fn select_broadcast_pairs(
+    coverage: RelayCoverage,
+    active_relays: &BTreeSet<NodeId>,
+    routes: &[RelayChainRoute],
+    allowed_relays: &BTreeSet<NodeId>,
+    candidates: &BTreeMap<NodeId, &LiveRelayCandidate>,
+    graph: &BTreeMap<NodeId, Vec<GraphEdge>>,
+) -> (Vec<RelayBroadcastPair>, Vec<NodeId>) {
+    if coverage == RelayCoverage::Minimum {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut protected_neighbors: BTreeMap<NodeId, BTreeSet<NodeId>> = BTreeMap::new();
+    for route in routes {
+        for hop in &route.hops {
+            if active_relays.contains(&hop.from) {
+                protected_neighbors
+                    .entry(hop.from.clone())
+                    .or_default()
+                    .insert(hop.to.clone());
+            }
+            if active_relays.contains(&hop.to) {
+                protected_neighbors
+                    .entry(hop.to.clone())
+                    .or_default()
+                    .insert(hop.from.clone());
+            }
+        }
+    }
+
+    let mut assigned_standbys = BTreeSet::new();
+    let mut pairs = Vec::new();
+    let mut unpaired = Vec::new();
+    for active in active_relays {
+        let neighbors = protected_neighbors.get(active).cloned().unwrap_or_default();
+        let mut eligible_standbys: Vec<&LiveRelayCandidate> = allowed_relays
+            .iter()
+            .filter(|node_id| {
+                !active_relays.contains(*node_id) && !assigned_standbys.contains(*node_id)
+            })
+            .filter_map(|node_id| candidates.get(node_id).copied())
+            .filter(|candidate| {
+                candidate.candidate.available
+                    && has_transport_edge(
+                        graph,
+                        active,
+                        &candidate.candidate.node_id,
+                        TransportKind::Bluetooth,
+                    )
+                    && neighbors.iter().all(|neighbor| {
+                        has_non_bluetooth_edge(graph, &candidate.candidate.node_id, neighbor)
+                    })
+            })
+            .collect();
+        eligible_standbys.sort_by(|left, right| {
+            right
+                .candidate
+                .relay_suitability
+                .total_cmp(&left.candidate.relay_suitability)
+                .then_with(|| {
+                    left.candidate
+                        .mission_utility
+                        .total_cmp(&right.candidate.mission_utility)
+                })
+                .then_with(|| left.candidate.node_id.cmp(&right.candidate.node_id))
+        });
+
+        if let Some(standby) = eligible_standbys.into_iter().next() {
+            assigned_standbys.insert(standby.candidate.node_id.clone());
+            pairs.push(RelayBroadcastPair {
+                active_broadcaster: active.clone(),
+                standby_receiver: standby.candidate.node_id.clone(),
+                peer_coordination: RelayPeerCoordination::Bluetooth,
+                protected_neighbors: neighbors.into_iter().collect(),
+            });
+        } else {
+            unpaired.push(active.clone());
+        }
+    }
+    (pairs, unpaired)
+}
+
+fn has_transport_edge(
+    graph: &BTreeMap<NodeId, Vec<GraphEdge>>,
+    first: &NodeId,
+    second: &NodeId,
+    transport: TransportKind,
+) -> bool {
+    graph.get(first).is_some_and(|edges| {
+        edges
+            .iter()
+            .any(|edge| edge.neighbor == *second && edge.transport == transport)
+    })
+}
+
+fn has_non_bluetooth_edge(
+    graph: &BTreeMap<NodeId, Vec<GraphEdge>>,
+    first: &NodeId,
+    second: &NodeId,
+) -> bool {
+    graph.get(first).is_some_and(|edges| {
+        edges
+            .iter()
+            .any(|edge| edge.neighbor == *second && edge.transport != TransportKind::Bluetooth)
+    })
+}
+
 fn observation_is_healthy(
     observation: &RelayLinkObservation,
     now_ms: u64,
@@ -963,6 +1174,8 @@ pub enum RelayRuntimeError {
     InvalidAgl(NodeId),
     #[error("the in-flight health policy is invalid")]
     InvalidHealthPolicy,
+    #[error("maximum in-flight coverage requires a Bluetooth handover policy with a positive heartbeat age")]
+    InvalidPairHandoverPolicy,
     #[error("at least one required mission member is needed for in-flight relay planning")]
     MissingMissionMembers,
     #[error("required mission member {0} is duplicated")]
@@ -1067,6 +1280,7 @@ mod tests {
             },
             required_mission_members: vec!["search-1".into(), "search-2".into()],
             current_relay_members: Vec::new(),
+            current_broadcast_pairs: Vec::new(),
             candidates: vec![
                 candidate("relay-a", 0.001),
                 candidate("relay-b", 0.002),
@@ -1090,8 +1304,36 @@ mod tests {
                 min_fresnel_clearance_ratio: 0.6,
                 min_link_margin_db: Some(10.0),
             },
+            coverage: RelayCoverage::Minimum,
+            paired_handover: None,
             allocation,
         }
+    }
+
+    fn maximum_coverage_request() -> InFlightRelayRequest {
+        let mut request = request(RuntimeRelayAllocationMode::Automatic);
+        request.coverage = RelayCoverage::Maximum;
+        request.paired_handover = Some(RelayPairHandoverPolicy {
+            max_bluetooth_heartbeat_age_ms: 1_500,
+        });
+        request.candidates.extend([
+            candidate("standby-a", 0.001_1),
+            candidate("standby-b", 0.002_1),
+        ]);
+        let mut bluetooth_a = healthy_observation("relay-a", "standby-a");
+        bluetooth_a.transport = TransportKind::Bluetooth;
+        let mut bluetooth_b = healthy_observation("relay-b", "standby-b");
+        bluetooth_b.transport = TransportKind::Bluetooth;
+        request.observations.extend([
+            bluetooth_a,
+            bluetooth_b,
+            healthy_observation("ground", "standby-a"),
+            healthy_observation("standby-a", "relay-b"),
+            healthy_observation("relay-a", "standby-b"),
+            healthy_observation("standby-b", "search-1"),
+            healthy_observation("standby-b", "search-2"),
+        ]);
+        request
     }
 
     fn configuration(request: &InFlightRelayRequest) -> RelayRuntimeConfiguration {
@@ -1099,6 +1341,7 @@ mod tests {
             mission_id: request.mission_id,
             generation: request.current_generation,
             current_relay_members: request.current_relay_members.clone(),
+            current_broadcast_pairs: request.current_broadcast_pairs.clone(),
             anchor: request.anchor.clone(),
             required_mission_members: request.required_mission_members.clone(),
             candidates: request
@@ -1107,6 +1350,8 @@ mod tests {
                 .map(|candidate| candidate.candidate.clone())
                 .collect(),
             health_policy: request.health_policy,
+            coverage: request.coverage,
+            paired_handover: request.paired_handover,
             allocation: request.allocation.clone(),
             max_position_age_ms: 2_000,
         }
@@ -1157,6 +1402,69 @@ mod tests {
     }
 
     #[test]
+    fn maximum_coverage_requires_distinct_bluetooth_receive_ready_standbys() {
+        let request = maximum_coverage_request();
+        let decision = InFlightRelayPlanner.decide(&request).unwrap();
+        let group = decision.relay_group.as_ref().unwrap();
+
+        assert_eq!(decision.action, RelayRuntimeAction::FormRelayChain);
+        assert_eq!(decision.reserved_relay_count, 4);
+        assert!(decision.unpaired_active_relays.is_empty());
+        assert_eq!(group.broadcast_pairs.len(), 2);
+        assert_eq!(
+            group
+                .broadcast_pairs
+                .iter()
+                .map(|pair| (&pair.active_broadcaster, &pair.standby_receiver))
+                .collect::<Vec<_>>(),
+            vec![
+                (&NodeId::from("relay-a"), &NodeId::from("standby-a")),
+                (&NodeId::from("relay-b"), &NodeId::from("standby-b")),
+            ]
+        );
+        assert!(group.broadcast_pairs.iter().all(|pair| {
+            pair.peer_coordination == RelayPeerCoordination::Bluetooth
+                && !pair.protected_neighbors.is_empty()
+        }));
+    }
+
+    #[test]
+    fn maximum_coverage_does_not_commit_a_single_aircraft_chain() {
+        let mut request = maximum_coverage_request();
+        request
+            .observations
+            .retain(|observation| observation.transport != TransportKind::Bluetooth);
+
+        let decision = InFlightRelayPlanner.decide(&request).unwrap();
+
+        assert_eq!(decision.action, RelayRuntimeAction::BeginRangeDiscovery);
+        assert_eq!(decision.reserved_relay_count, 0);
+        assert_eq!(
+            decision.unpaired_active_relays,
+            vec![NodeId::from("relay-a"), NodeId::from("relay-b")]
+        );
+    }
+
+    #[test]
+    fn unchanged_maximum_coverage_pairs_do_not_churn_a_generation() {
+        let first_request = maximum_coverage_request();
+        let first = InFlightRelayPlanner.decide(&first_request).unwrap();
+        let mut next_request = first_request;
+        next_request.current_generation = first.proposed_generation;
+        next_request.current_relay_members = first.relay_group.as_ref().unwrap().members.clone();
+        next_request.current_broadcast_pairs = first.relay_group.unwrap().broadcast_pairs;
+
+        let decision = InFlightRelayPlanner.decide(&next_request).unwrap();
+
+        assert_eq!(decision.action, RelayRuntimeAction::MaintainRelayChain);
+        assert_eq!(
+            decision.proposed_generation,
+            next_request.current_generation
+        );
+        assert_eq!(decision.reserved_relay_count, 4);
+    }
+
+    #[test]
     fn durable_runtime_configuration_rebuilds_a_live_request_from_mesh_state() {
         let request = request(RuntimeRelayAllocationMode::Automatic);
         let configuration = configuration(&request);
@@ -1164,6 +1472,7 @@ mod tests {
             observed_at_ms: request.observed_at_ms,
             current_generation: request.current_generation,
             current_relay_members: Vec::new(),
+            current_broadcast_pairs: Vec::new(),
             telemetry: request
                 .candidates
                 .iter()
@@ -1199,6 +1508,7 @@ mod tests {
             observed_at_ms: request.observed_at_ms,
             current_generation: request.current_generation,
             current_relay_members: Vec::new(),
+            current_broadcast_pairs: Vec::new(),
             telemetry,
             observations: request.observations.clone(),
         };
@@ -1225,6 +1535,7 @@ mod tests {
             observed_at_ms: request.observed_at_ms,
             current_generation: request.current_generation,
             current_relay_members: Vec::new(),
+            current_broadcast_pairs: Vec::new(),
             telemetry: request
                 .candidates
                 .iter()

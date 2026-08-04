@@ -140,6 +140,7 @@ The runtime request requires these inputs; none has a hidden generic default:
 | Current available/relay-eligible/mission-eligible state, suitability, and mission utility | Selects relay candidates while keeping operator-required mission aircraft out of hidden relay duty. |
 | Per-underlay rolling observations: both endpoint IDs, time, sample window, bidirectional confirmation, availability, latency, loss, goodput, signal quality, stability, Fresnel clearance, and optional received power/link margin | Establishes whether a link is truly usable now. A one-way or stale observation is not a chain edge. |
 | Mission-specific health policy: freshness, latency/loss ceilings, goodput/signal/stability/Fresnel floors, and optional margin floor | Defines "reliable" for this mission and radio configuration. |
+| Coverage profile and, for `maximum`, a positive Bluetooth heartbeat deadline | Minimum accepts one live relay per chain hop. Maximum additionally requires a distinct Bluetooth-linked standby with measured non-Bluetooth receive-ready links to every neighbor protected by its active relay. |
 | Automatic allocation or an exact manual relay-member list | Lets the operator preserve control. An unsatisfied manual list never causes AVIAN to take an unlisted aircraft. |
 
 For every active mission member, runtime planning searches only direct links or
@@ -151,6 +152,14 @@ number of payload aircraft affected. Every decision includes
 `reserved_relay_count` and `mission_drones_remaining`; only a complete
 `form_relay_chain` reserves aircraft, so partial discovery paths do not
 silently reduce mission capacity.
+
+For `maximum`, a runtime relay group also includes one
+`broadcast_pairs` entry per active relay: the active broadcaster, its distinct
+Bluetooth standby, and the named neighboring hops whose current non-Bluetooth
+links the standby is ready to receive and take over. If that pairing evidence
+is incomplete, AVIAN reports `unpaired_active_relays`, begins measured
+discovery (or requests operator action for a manual list), and does **not**
+commit a single-aircraft route as maximum coverage.
 
 The runtime request also carries `current_relay_members`. That makes the
 decision stateful without assigning a coordinator: unchanged chains are
@@ -233,7 +242,8 @@ they are illustrative input only.
 ARC UI distributes one durable `RelayRuntimeConfiguration` for the accepted
 mission generation. It contains the anchor, mission members, candidate
 eligibility/suitability, health policy, allocation control, maximum position
-age, and any relay members already committed by the pre-mission plan. It does
+age, coverage profile, Bluetooth handover policy when required, and any relay
+members/pair assignments already committed by the pre-mission plan. It does
 not contain live positions or radio values.
 
 Each Linux companion combines that shared policy with synchronized AVIAN
@@ -272,6 +282,8 @@ implemented. Complete closed-loop operation still requires:
   geodesic corridor;
 - a Silvus/alternate-underlay collector that continuously supplies the live
   observation snapshot to the onboard companion;
+- the local Bluetooth heartbeat transport and radio-adapter control that
+  applies the paired-station receive-only/takeover action;
 - onboard station-hold execution and relay-health reporting;
 - automatic physical backfill when a relay degrades or crashes;
 - mission-generation reconciliation while aircraft are moving; and
