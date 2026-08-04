@@ -11,6 +11,8 @@ are not required for continued operation.
 
 - ArduPilot and PX4: telemetry, navigation tasks, and emergency control.
 - Betaflight: mesh telemetry and emergency control only.
+- Leaderless, bounded-degree topology planning for 5-200 aircraft with no
+  all-to-all peer requirement.
 - Automatic multi-link selection with redundant emergency delivery.
 - Signed, expiring, replay-resistant emergency commands.
 - A system ceiling of 25,000 ft MSL (7,620 m), with MSL, AGL, and
@@ -54,5 +56,7 @@ docker run --rm -v "$PWD:/work" -w /work rust:1.91-bookworm cargo run -p mesh-si
 
 See [the architecture](docs/architecture.md) and
 [message contract](docs/message-contract.md) for the current design boundary.
+The [scalability contract](docs/scalability.md) describes the 5-200 aircraft
+overlay and what remains to validate on real radios.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.

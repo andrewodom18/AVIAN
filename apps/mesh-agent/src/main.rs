@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
+use mesh_core::DEFAULT_MAX_NEIGHBORS;
 use mesh_core::{DeliveryClass, FlightStack, MeshPayload, NodeId, Telemetry};
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::sync::mpsc;
@@ -58,6 +59,10 @@ struct Args {
     #[arg(long)]
     peer: Vec<PeerDescriptor>,
 
+    /// Hard limit on direct PEAT neighbors; prevents accidental full meshes.
+    #[arg(long, default_value_t = DEFAULT_MAX_NEIGHBORS)]
+    max_mesh_peers: usize,
+
     /// Seconds between attempts to reconnect unavailable static peers.
     #[arg(long, default_value_t = 5)]
     peer_retry_seconds: u64,
@@ -84,6 +89,16 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if !args.telemetry_hz.is_finite() || !(0.1..=20.0).contains(&args.telemetry_hz) {
         anyhow::bail!("--telemetry-hz must be between 0.1 and 20.0");
+    }
+    if !(1..=DEFAULT_MAX_NEIGHBORS).contains(&args.max_mesh_peers) {
+        anyhow::bail!("--max-mesh-peers must be between 1 and {DEFAULT_MAX_NEIGHBORS}");
+    }
+    if args.peer.len() > args.max_mesh_peers {
+        anyhow::bail!(
+            "{} configured peers exceeds --max-mesh-peers {}",
+            args.peer.len(),
+            args.max_mesh_peers
+        );
     }
     let node_id = NodeId::from(args.name.clone());
     let formation_key = std::fs::read_to_string(&args.formation_key_file).with_context(|| {

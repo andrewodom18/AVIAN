@@ -78,6 +78,19 @@ hysteresis, path changes, and per-message redundancy because those are
 application-specific decisions. PEAT synchronization is independent of any
 ground or cloud peer.
 
+## Swarm topology
+
+AVIAN supports formations from 5 through 200 aircraft. A deterministic,
+leaderless planner gives each node at most eight direct AVIAN neighbors. It
+combines a ring with progressively longer chords, so connection and sync work
+grow linearly with formation size instead of creating an all-to-all graph.
+Every node given the same signed membership view computes the same symmetric
+overlay; no node is assigned authority by the planner.
+
+The current agent enforces the eight-peer ceiling for static bootstrap peers.
+Automatic distribution and reconciliation of membership views is a later
+milestone. See [the scalability contract](scalability.md).
+
 ## Flight-controller telemetry boundary
 
 ArduPilot and PX4 are decoded through the MAVLink common dialect. AVIAN locks
