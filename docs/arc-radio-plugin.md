@@ -65,6 +65,16 @@ The implementation encodes these StreamCaster 5.0 behaviors from the supplied
 - routing beacon overhead grows with node count, so the default sample uses a
   500 ms beacon period rather than the 100 ms minimum.
 
+The SL5200 OEM v1.1 integration profile adds exact SL5205, SL5210, and SL5220
+identities plus confirmed dimensions, mass, 9–32 V input, missing reverse
+polarity protection, power-consumption envelopes, and thermal limits. The
+`fcc_sl52_245_oem` regulatory profile can be selected only for an exact SL5210
+or SL5220 model listed by the grant. It permits 10 MHz from 2416–2457 MHz and
+20 MHz at 2440 MHz only, with respective 24 and 27 dBm per-port conducted-power
+caps. Generic and estimated 5200 profiles remain capability-only. These limits
+constrain planning; the radio's live capability response and the operator's
+authorization still constrain hardware apply.
+
 Published peak data rate is never treated as usable mission capacity. Each
 radio/antenna/airframe/environment group can carry a field-calibrated UDP
 capacity; otherwise the assessment warns that capacity is unknown.

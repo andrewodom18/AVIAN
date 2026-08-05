@@ -56,7 +56,9 @@ application session and synchronization overhead.
 
 ## Altitude and aircraft variety
 
-The radio type does not change AVIAN's 30,000 ft MSL planning ceiling. Link
+The radio type does not change AVIAN's 30,000 ft MSL planning ceiling. This is
+a software planning ceiling, not evidence that an SL5200 installation is
+environmentally qualified for 30,000 ft. Link
 selection uses current measurements and geometry rather than assuming that a
 higher aircraft always has a better path. Platform profiles will include
 antenna placement, radio power/thermal limits, energy cost, usable interfaces,
@@ -66,9 +68,9 @@ ft MSL applies.
 ## Range calibration for relay planning
 
 Do not use a single published “radio range” to space the swarm. The SL5200
-datasheet specifies parameters such as 2 W native power, -101 dBm sensitivity
-at 5 MHz, -107 dBm at optional 1.25 MHz, selectable bandwidth, and several
-frequency bands. Those values are inputs to a link budget, but they do not
+datasheet specifies parameters such as a 2 W total power class, -101 dBm
+sensitivity at 5 MHz, -107 dBm at optional 1.25 MHz, selectable bandwidth, and
+several frequency bands. Those values are inputs to a link budget, but they do not
 capture the installed antennas, selected center frequency, vehicle attitude,
 terrain, clutter, interference, traffic demand, or required availability.
 [SL5200 OEM datasheet](https://silvustechnologies.com/wp-content/uploads/2026/02/StreamCaster-LITE-5200-SL5200-OEM-Module-Datasheet.pdf)
@@ -103,6 +105,15 @@ channel, with no more than 80% airtime allocated. This is not a Silvus standard
 or vendor throughput claim. End-to-end goodput, route depth, retries, queues,
 and installed antenna characteristics must be measured before delivery time or
 EIRP can be accepted.
+
+The SL5200/LC5200 OEM Integration Manual v1.1 confirms the two-port SL5220
+power split as 1 W (30 dBm) per port. Its FCC 2.4 GHz modular profile permits
+20 MHz at 2440 MHz with no more than 27 dBm conducted power per antenna. AVIAN
+models total radio power separately from per-path conducted power and rejects
+other 20 MHz center frequencies when `fcc_sl52_245_oem` is selected for an
+exact SL5210 or SL5220. Generic/estimated 5200 profiles cannot claim that
+grant. Other bands, countries, and radio families remain live-capability and
+operator-authorization dependent.
 
 - [StreamCaster API manual access page](https://silvustechnologies.com/resources/downloads/api-manual/)
 

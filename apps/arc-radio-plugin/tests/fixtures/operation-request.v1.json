@@ -1,18 +1,18 @@
 {
-  "source": "arc-configd/device-001",
-  "sequence": 1,
-  "published_at_ms": 1785945600000,
-  "configuration": {
+  "schema_version": 1,
+  "request_id": "radio-plan-7-air-017",
+  "intent": "prepare",
+  "fleet_plan": {
     "schema_version": 1,
     "authority": "arc",
-    "generation": 1,
+    "generation": 7,
     "network": {
-      "network_id": "ARC-4000-Series",
+      "network_id": "ARC-RADIO",
       "center_frequency_mhz": 2440.0,
       "bandwidth_mhz": "20",
-      "average_node_distance_m": 5000.0,
-      "maximum_node_distance_m": 10000.0,
-      "link_distance_m": null,
+      "average_node_distance_m": 2000.0,
+      "maximum_node_distance_m": 5000.0,
+      "link_distance_m": 5750,
       "routing_beacon_period_ms": 500,
       "encryption_required": true
     },
@@ -20,9 +20,9 @@
       "total_nodes": 150,
       "groups": [
         {
-          "group_id": "airborne-5200",
+          "group_id": "air",
           "node_id_prefix": "air",
-          "percentage": 96.0,
+          "percentage": 98.0,
           "model": "sl5200_lite_estimated",
           "role": "airborne",
           "altitude_msl_ft": 10000.0,
@@ -33,28 +33,15 @@
           "field_calibrated_udp_capacity_bps": null
         },
         {
-          "group_id": "control-4400",
-          "node_id_prefix": "gcs4400",
+          "group_id": "gcs",
+          "node_id_prefix": "gcs",
           "percentage": 2.0,
           "model": "sc4400",
           "role": "control_station",
           "altitude_msl_ft": 0.0,
           "regulatory_profile": "live_capabilities_required",
-          "transmit_power": { "mode": "target_dbm", "dbm": 36 },
-          "antenna_mask": 15,
-          "beamforming": true,
-          "field_calibrated_udp_capacity_bps": null
-        },
-        {
-          "group_id": "control-4200",
-          "node_id_prefix": "gcs4200",
-          "percentage": 2.0,
-          "model": "sc4200",
-          "role": "control_station",
-          "altitude_msl_ft": 0.0,
-          "regulatory_profile": "live_capabilities_required",
           "transmit_power": { "mode": "max_supported" },
-          "antenna_mask": 3,
+          "antenna_mask": 15,
           "beamforming": true,
           "field_calibrated_udp_capacity_bps": null
         }
@@ -71,5 +58,17 @@
       "calibrated_end_to_end_goodput_bps": null
     },
     "persist_after_apply": false
-  }
+  },
+  "assignment": {
+    "schema_version": 1,
+    "node_id": "air-017",
+    "group_id": "air",
+    "expected_model": "sl5200_lite_estimated",
+    "management_interface": "eth1",
+    "data_interface": "streamcaster0",
+    "management_address": "192.168.169.11",
+    "antenna_installation_profile_id": "airframe/u28-generic-v1",
+    "hardware_apply_enabled": false
+  },
+  "activation": { "mode": "validation_only" }
 }

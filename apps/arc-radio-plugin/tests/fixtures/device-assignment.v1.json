@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "node_id": "air-017",
+  "group_id": "air",
+  "expected_model": "sl5200_lite_estimated",
+  "management_interface": "eth1",
+  "data_interface": "streamcaster0",
+  "management_address": "192.168.169.11",
+  "antenna_installation_profile_id": "airframe/u28-generic-v1",
+  "credential_reference": "streamcaster/air-017.json",
+  "hardware_apply_enabled": false
+}

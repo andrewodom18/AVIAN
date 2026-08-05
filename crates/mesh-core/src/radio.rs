@@ -29,6 +29,9 @@ pub enum StreamCasterModel {
     Sc4400,
     Sc4400E,
     Sc4400X,
+    Sl5205,
+    Sl5210,
+    Sl5220,
     Sl5200,
     /// Planning profile derived from the documented SL5200 family plus the
     /// public LITE datasheet. A live capability read is mandatory before use.
@@ -40,6 +43,122 @@ pub enum StreamCasterModel {
 pub enum RadioProfileEvidence {
     Manual,
     EstimatedRequiresLiveCapabilities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioRegulatoryProfile {
+    /// Do not infer legal frequencies or conducted-power limits. A live
+    /// capability response and operator-supplied regulatory authorization are
+    /// required before hardware apply.
+    #[default]
+    LiveCapabilitiesRequired,
+    /// FCC modular grant N2S-SL52-245-OEM, as documented by the SL5200/LC5200
+    /// OEM Integration Manual v1.1. This profile covers the 2.4 GHz module
+    /// variants listed by that grant; it is not a general SL5200 band profile.
+    FccSl52_245Oem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OemDimensionsMm {
+    pub length: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StreamCasterOemIntegrationProfile {
+    pub dimensions_mm: OemDimensionsMm,
+    pub mass_g: f64,
+    pub input_voltage_min_v: f64,
+    pub input_voltage_max_v: f64,
+    pub recommended_supply_fuse_a: f64,
+    pub has_reverse_polarity_protection: bool,
+    pub idle_power_w: f64,
+    pub recommended_max_case_temperature_c: f64,
+    pub transmit_backoff_temperature_c: f64,
+    pub transmit_cutoff_temperature_c: f64,
+    pub rf_port_count: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Sl5200PowerProfile {
+    pub total_rf_power_w: f64,
+    pub conducted_power_per_port_dbm: f64,
+    pub l_band_max_input_power_w: f64,
+    pub s_band_max_input_power_w: f64,
+    pub l_band_peak_input_power_w: f64,
+    pub s_band_peak_input_power_w: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamCasterRfBand {
+    LBand,
+    SBand,
+}
+
+impl Sl5200PowerProfile {
+    /// Estimates average radio input power from the documented 4 W listening
+    /// state and the selected band's 100%-airtime maximum. The integration
+    /// guide's 1 W S-band/80% worked example contains an arithmetic error;
+    /// this formula intentionally yields 8.0 W rather than 8.5 W.
+    pub fn estimated_average_input_power_w(
+        self,
+        band: StreamCasterRfBand,
+        airtime_ratio: f64,
+    ) -> Option<f64> {
+        if !airtime_ratio.is_finite() || !(0.0..=1.0).contains(&airtime_ratio) {
+            return None;
+        }
+        let maximum = match band {
+            StreamCasterRfBand::LBand => self.l_band_max_input_power_w,
+            StreamCasterRfBand::SBand => self.s_band_max_input_power_w,
+        };
+        Some(
+            SL5200_OEM_INTEGRATION_PROFILE.idle_power_w
+                + airtime_ratio * (maximum - SL5200_OEM_INTEGRATION_PROFILE.idle_power_w),
+        )
+    }
+}
+
+pub const SL5200_OEM_INTEGRATION_PROFILE: StreamCasterOemIntegrationProfile =
+    StreamCasterOemIntegrationProfile {
+        dimensions_mm: OemDimensionsMm {
+            length: 63.5,
+            width: 44.5,
+            height: 10.4,
+        },
+        mass_g: 52.9,
+        input_voltage_min_v: 9.0,
+        input_voltage_max_v: 32.0,
+        recommended_supply_fuse_a: 5.0,
+        has_reverse_polarity_protection: false,
+        idle_power_w: 4.0,
+        recommended_max_case_temperature_c: 70.0,
+        transmit_backoff_temperature_c: 75.0,
+        transmit_cutoff_temperature_c: 85.0,
+        rf_port_count: 2,
+    };
+
+pub const FCC_SL52_245_20_MHZ_CENTER_FREQUENCY_MHZ: f64 = 2_440.0;
+pub const FCC_SL52_245_20_MHZ_MAX_CONDUCTED_POWER_PER_PORT_DBM: u8 = 27;
+pub const FCC_SL52_245_10_MHZ_MIN_CENTER_FREQUENCY_MHZ: f64 = 2_416.0;
+pub const FCC_SL52_245_10_MHZ_MAX_CENTER_FREQUENCY_MHZ: f64 = 2_457.0;
+pub const FCC_SL52_245_10_MHZ_MAX_CONDUCTED_POWER_PER_PORT_DBM: u8 = 24;
+
+impl RadioRegulatoryProfile {
+    fn max_conducted_power_per_port_dbm(self, bandwidth: ChannelBandwidthMhz) -> Option<u8> {
+        match (self, bandwidth) {
+            (Self::FccSl52_245Oem, ChannelBandwidthMhz::Mhz10) => {
+                Some(FCC_SL52_245_10_MHZ_MAX_CONDUCTED_POWER_PER_PORT_DBM)
+            }
+            (Self::FccSl52_245Oem, ChannelBandwidthMhz::Mhz20) => {
+                Some(FCC_SL52_245_20_MHZ_MAX_CONDUCTED_POWER_PER_PORT_DBM)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +246,11 @@ pub struct RadioNodeGroup {
     pub model: StreamCasterModel,
     pub role: RadioNodeRole,
     pub altitude_msl_ft: f64,
+    #[serde(default)]
+    pub regulatory_profile: RadioRegulatoryProfile,
+    /// Conducted transmit-power intent. `TargetDbm` is interpreted per active
+    /// RF port; aggregate MIMO power must never be used as a single-path link
+    /// budget input.
     pub transmit_power: TransmitPowerMode,
     pub antenna_mask: u8,
     pub beamforming: bool,
@@ -291,6 +415,8 @@ pub struct SilvusApiStep {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SilvusGroupApplyTemplate {
     pub group_id: String,
+    pub regulatory_profile: RadioRegulatoryProfile,
+    pub maximum_conducted_power_per_port_dbm: Option<u8>,
     pub requires_password_authenticated_api: bool,
     pub requires_live_supported_frequency_profile: bool,
     pub steps: Vec<SilvusApiStep>,
@@ -323,7 +449,7 @@ impl StreamCasterModel {
                     evidence: RadioProfileEvidence::Manual,
                 }
             }
-            Self::Sl5200 => StreamCasterModelProfile {
+            Self::Sl5205 | Self::Sl5210 | Self::Sl5220 | Self::Sl5200 => StreamCasterModelProfile {
                 antenna_count: 2,
                 published_peak_data_rate_mbps: 100,
                 evidence: RadioProfileEvidence::Manual,
@@ -346,6 +472,53 @@ impl StreamCasterModel {
             ),
             _ => true,
         }
+    }
+
+    pub fn oem_integration_profile(self) -> Option<StreamCasterOemIntegrationProfile> {
+        self.is_sl5200_family()
+            .then_some(SL5200_OEM_INTEGRATION_PROFILE)
+    }
+
+    pub fn sl5200_power_profile(self) -> Option<Sl5200PowerProfile> {
+        let profile = match self {
+            Self::Sl5205 => Sl5200PowerProfile {
+                total_rf_power_w: 0.5,
+                conducted_power_per_port_dbm: 24.0,
+                l_band_max_input_power_w: 9.0,
+                s_band_max_input_power_w: 8.0,
+                l_band_peak_input_power_w: 10.0,
+                s_band_peak_input_power_w: 9.0,
+            },
+            Self::Sl5210 => Sl5200PowerProfile {
+                total_rf_power_w: 1.0,
+                conducted_power_per_port_dbm: 27.0,
+                l_band_max_input_power_w: 11.0,
+                s_band_max_input_power_w: 9.0,
+                l_band_peak_input_power_w: 12.0,
+                s_band_peak_input_power_w: 10.0,
+            },
+            Self::Sl5220 => Sl5200PowerProfile {
+                total_rf_power_w: 2.0,
+                conducted_power_per_port_dbm: 30.0,
+                l_band_max_input_power_w: 13.0,
+                s_band_max_input_power_w: 11.0,
+                l_band_peak_input_power_w: 14.0,
+                s_band_peak_input_power_w: 12.0,
+            },
+            _ => return None,
+        };
+        Some(profile)
+    }
+
+    fn is_sl5200_family(self) -> bool {
+        matches!(
+            self,
+            Self::Sl5205 | Self::Sl5210 | Self::Sl5220 | Self::Sl5200 | Self::Sl5200LiteEstimated
+        )
+    }
+
+    fn is_listed_by_fcc_sl52_245_oem(self) -> bool {
+        matches!(self, Self::Sl5210 | Self::Sl5220)
     }
 }
 
@@ -405,6 +578,21 @@ impl ArcRadioConfiguration {
                 });
             }
             group.validate()?;
+            group.validate_for_network(&self.network)?;
+            if group.regulatory_profile == RadioRegulatoryProfile::LiveCapabilitiesRequired {
+                warnings.push(format!(
+                    "group {:?} has no pinned regulatory profile; live radio capabilities and operator authorization are required before apply",
+                    group.group_id
+                ));
+            }
+            if group.regulatory_profile == RadioRegulatoryProfile::FccSl52_245Oem
+                && group.transmit_power == TransmitPowerMode::MaxSupported
+            {
+                warnings.push(format!(
+                    "group {:?} requests max-supported power under the FCC SL52 profile; hardware apply must resolve that intent to the bandwidth-specific per-port cap",
+                    group.group_id
+                ));
+            }
             if group.model.profile().evidence
                 == RadioProfileEvidence::EstimatedRequiresLiveCapabilities
             {
@@ -563,6 +751,10 @@ impl ArcRadioConfiguration {
                 }
                 Ok(SilvusGroupApplyTemplate {
                     group_id: group.group_id.clone(),
+                    regulatory_profile: group.regulatory_profile,
+                    maximum_conducted_power_per_port_dbm: group
+                        .regulatory_profile
+                        .max_conducted_power_per_port_dbm(self.network.bandwidth_mhz),
                     requires_password_authenticated_api: true,
                     requires_live_supported_frequency_profile: true,
                     steps,
@@ -742,6 +934,62 @@ impl RadioNodeGroup {
         }
         Ok(())
     }
+
+    fn validate_for_network(
+        &self,
+        network: &StreamCasterNetworkSettings,
+    ) -> Result<(), RadioConfigError> {
+        if self.regulatory_profile != RadioRegulatoryProfile::FccSl52_245Oem {
+            return Ok(());
+        }
+        if !self.model.is_listed_by_fcc_sl52_245_oem() {
+            return Err(RadioConfigError::InvalidRegulatoryProfileForModel {
+                group_id: self.group_id.clone(),
+                profile: self.regulatory_profile,
+                model: self.model,
+            });
+        }
+
+        let frequency_allowed = match network.bandwidth_mhz {
+            ChannelBandwidthMhz::Mhz20 => {
+                (network.center_frequency_mhz - FCC_SL52_245_20_MHZ_CENTER_FREQUENCY_MHZ).abs()
+                    <= 0.05
+            }
+            ChannelBandwidthMhz::Mhz10 => (FCC_SL52_245_10_MHZ_MIN_CENTER_FREQUENCY_MHZ
+                ..=FCC_SL52_245_10_MHZ_MAX_CENTER_FREQUENCY_MHZ)
+                .contains(&network.center_frequency_mhz),
+            _ => {
+                return Err(RadioConfigError::UnsupportedRegulatoryBandwidth {
+                    group_id: self.group_id.clone(),
+                    profile: self.regulatory_profile,
+                    bandwidth: network.bandwidth_mhz,
+                });
+            }
+        };
+        if !frequency_allowed {
+            return Err(RadioConfigError::UnsupportedRegulatoryFrequency {
+                group_id: self.group_id.clone(),
+                profile: self.regulatory_profile,
+                bandwidth: network.bandwidth_mhz,
+                center_frequency_mhz: network.center_frequency_mhz,
+            });
+        }
+
+        if let (Some(limit_dbm), TransmitPowerMode::TargetDbm { dbm }) = (
+            self.regulatory_profile
+                .max_conducted_power_per_port_dbm(network.bandwidth_mhz),
+            self.transmit_power,
+        ) {
+            if dbm > limit_dbm {
+                return Err(RadioConfigError::RegulatoryPowerExceeded {
+                    group_id: self.group_id.clone(),
+                    requested_dbm: dbm,
+                    maximum_dbm: limit_dbm,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl RadioTrafficProfile {
@@ -915,6 +1163,33 @@ pub enum RadioConfigError {
     InvalidAntennaMask { group_id: String, mask: u8 },
     #[error("radio group {group_id:?} has invalid target power {dbm} dBm")]
     InvalidTransmitPower { group_id: String, dbm: u8 },
+    #[error(
+        "radio group {group_id:?} cannot use regulatory profile {profile:?} with model {model:?}"
+    )]
+    InvalidRegulatoryProfileForModel {
+        group_id: String,
+        profile: RadioRegulatoryProfile,
+        model: StreamCasterModel,
+    },
+    #[error("radio group {group_id:?} regulatory profile {profile:?} does not authorize bandwidth {bandwidth:?}")]
+    UnsupportedRegulatoryBandwidth {
+        group_id: String,
+        profile: RadioRegulatoryProfile,
+        bandwidth: ChannelBandwidthMhz,
+    },
+    #[error("radio group {group_id:?} regulatory profile {profile:?} does not authorize {center_frequency_mhz} MHz at {bandwidth:?}")]
+    UnsupportedRegulatoryFrequency {
+        group_id: String,
+        profile: RadioRegulatoryProfile,
+        bandwidth: ChannelBandwidthMhz,
+        center_frequency_mhz: f64,
+    },
+    #[error("radio group {group_id:?} requests {requested_dbm} dBm per port, above the regulatory maximum of {maximum_dbm} dBm")]
+    RegulatoryPowerExceeded {
+        group_id: String,
+        requested_dbm: u8,
+        maximum_dbm: u8,
+    },
     #[error("radio group {0:?} field-calibrated capacity must be positive")]
     InvalidCalibratedCapacity(String),
     #[error("radio network requires at least one control-station or gateway node")]
@@ -976,7 +1251,7 @@ mod tests {
             generation: 1,
             network: StreamCasterNetworkSettings {
                 network_id: "ARC-4000-Series".to_owned(),
-                center_frequency_mhz: 2_450.0,
+                center_frequency_mhz: 2_440.0,
                 bandwidth_mhz: ChannelBandwidthMhz::Mhz20,
                 average_node_distance_m: 5_000.0,
                 maximum_node_distance_m: 10_000.0,
@@ -994,6 +1269,7 @@ mod tests {
                         model: StreamCasterModel::Sl5200LiteEstimated,
                         role: RadioNodeRole::Airborne,
                         altitude_msl_ft: 10_000.0,
+                        regulatory_profile: RadioRegulatoryProfile::LiveCapabilitiesRequired,
                         transmit_power: TransmitPowerMode::MaxSupported,
                         antenna_mask: 3,
                         beamforming: true,
@@ -1006,6 +1282,7 @@ mod tests {
                         model: StreamCasterModel::Sc4400,
                         role: RadioNodeRole::ControlStation,
                         altitude_msl_ft: 0.0,
+                        regulatory_profile: RadioRegulatoryProfile::LiveCapabilitiesRequired,
                         transmit_power: TransmitPowerMode::TargetDbm { dbm: 36 },
                         antenna_mask: 15,
                         beamforming: true,
@@ -1018,6 +1295,7 @@ mod tests {
                         model: StreamCasterModel::Sc4200,
                         role: RadioNodeRole::ControlStation,
                         altitude_msl_ft: 0.0,
+                        regulatory_profile: RadioRegulatoryProfile::LiveCapabilitiesRequired,
                         transmit_power: TransmitPowerMode::MaxSupported,
                         antenna_mask: 3,
                         beamforming: true,
@@ -1045,6 +1323,29 @@ mod tests {
                 .count(),
             144
         );
+    }
+
+    #[test]
+    fn deterministic_radio_plan_assessment_covers_all_validation_scales() {
+        for total_nodes in [5, 25, 100, 150, 200] {
+            let mut request = config(total_nodes);
+            if total_nodes < 50 {
+                request.fleet.groups[0].percentage = 60.0;
+                request.fleet.groups[1].percentage = 20.0;
+                request.fleet.groups[2].percentage = 20.0;
+            }
+            let assessment = request.assess().unwrap();
+            assert_eq!(assessment.node_count, total_nodes);
+            assert_eq!(assessment.assignments.len(), total_nodes);
+            assert!(assessment
+                .assignments
+                .iter()
+                .any(|node| node.role == RadioNodeRole::Airborne));
+            assert!(assessment
+                .assignments
+                .iter()
+                .any(|node| node.role == RadioNodeRole::ControlStation));
+        }
     }
 
     #[test]
@@ -1148,8 +1449,92 @@ mod tests {
     }
 
     #[test]
+    fn fcc_sl52_profile_requires_2440_mhz_for_twenty_mhz() {
+        let mut request = config(150);
+        request.fleet.groups[0].model = StreamCasterModel::Sl5220;
+        request.fleet.groups[0].regulatory_profile = RadioRegulatoryProfile::FccSl52_245Oem;
+        request.network.center_frequency_mhz = 2_450.0;
+
+        assert!(matches!(
+            request.assess(),
+            Err(RadioConfigError::UnsupportedRegulatoryFrequency {
+                bandwidth: ChannelBandwidthMhz::Mhz20,
+                center_frequency_mhz: 2_450.0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fcc_sl52_profile_rejects_power_above_per_port_limit() {
+        let mut request = config(150);
+        request.fleet.groups[0].model = StreamCasterModel::Sl5220;
+        request.fleet.groups[0].regulatory_profile = RadioRegulatoryProfile::FccSl52_245Oem;
+        request.fleet.groups[0].transmit_power = TransmitPowerMode::TargetDbm { dbm: 28 };
+
+        assert!(matches!(
+            request.assess(),
+            Err(RadioConfigError::RegulatoryPowerExceeded {
+                requested_dbm: 28,
+                maximum_dbm: 27,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fcc_sl52_profile_rejects_undocumented_bandwidths() {
+        let mut request = config(150);
+        request.fleet.groups[0].model = StreamCasterModel::Sl5220;
+        request.fleet.groups[0].regulatory_profile = RadioRegulatoryProfile::FccSl52_245Oem;
+        request.network.bandwidth_mhz = ChannelBandwidthMhz::Mhz5;
+
+        assert!(matches!(
+            request.assess(),
+            Err(RadioConfigError::UnsupportedRegulatoryBandwidth {
+                bandwidth: ChannelBandwidthMhz::Mhz5,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fcc_sl52_profile_requires_an_exact_listed_model() {
+        let mut request = config(150);
+        request.fleet.groups[0].regulatory_profile = RadioRegulatoryProfile::FccSl52_245Oem;
+
+        assert!(matches!(
+            request.assess(),
+            Err(RadioConfigError::InvalidRegulatoryProfileForModel {
+                model: StreamCasterModel::Sl5200LiteEstimated,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn sl5200_oem_profile_records_confirmed_power_and_thermal_limits() {
+        let integration = StreamCasterModel::Sl5220.oem_integration_profile().unwrap();
+        assert_eq!(integration.dimensions_mm.length, 63.5);
+        assert_eq!(integration.mass_g, 52.9);
+        assert_eq!(integration.input_voltage_min_v, 9.0);
+        assert!(!integration.has_reverse_polarity_protection);
+        assert_eq!(integration.transmit_cutoff_temperature_c, 85.0);
+
+        let power = StreamCasterModel::Sl5210.sl5200_power_profile().unwrap();
+        assert_eq!(power.conducted_power_per_port_dbm, 27.0);
+        assert_eq!(
+            power.estimated_average_input_power_w(StreamCasterRfBand::SBand, 0.8),
+            Some(8.0)
+        );
+    }
+
+    #[test]
     fn apply_template_models_soft_boot_reconnect_and_capability_check() {
-        let templates = config(150).silvus_apply_templates().unwrap();
+        let mut request = config(150);
+        request.fleet.groups[0].model = StreamCasterModel::Sl5220;
+        request.fleet.groups[0].regulatory_profile = RadioRegulatoryProfile::FccSl52_245Oem;
+        let templates = request.silvus_apply_templates().unwrap();
         let airborne = templates
             .iter()
             .find(|template| template.group_id == "airborne-5200")
@@ -1162,6 +1547,10 @@ mod tests {
         assert_eq!(airborne.steps[1].method.as_deref(), Some("freq_bw"));
         assert_eq!(airborne.steps[1].effect, SilvusStepEffect::SoftBoot);
         assert_eq!(airborne.steps[2].effect, SilvusStepEffect::WaitForReconnect);
+        assert_eq!(
+            airborne.maximum_conducted_power_per_port_dbm,
+            Some(FCC_SL52_245_20_MHZ_MAX_CONDUCTED_POWER_PER_PORT_DBM)
+        );
         assert!(airborne
             .steps
             .iter()

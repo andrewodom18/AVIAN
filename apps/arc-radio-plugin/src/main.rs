@@ -10,6 +10,8 @@ use mesh_core::{
 use mesh_peat::AvianRecord;
 use serde::{Deserialize, Serialize};
 
+mod service;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "arc-radio-plugin",
@@ -24,11 +26,63 @@ struct Args {
     /// JSON response file. Omit to write JSON to standard output.
     #[arg(long)]
     output: Option<PathBuf>,
+
+    /// Run as the ARC Zenoh/PEAT edge sidecar instead of one-shot JSON mode.
+    #[arg(long)]
+    serve: bool,
+
+    /// ARC comms-router endpoint. The sidecar always uses Zenoh client mode.
+    #[arg(long, default_value = "unixsock-stream//run/arc/zenoh.sock")]
+    zenoh_endpoint: String,
+
+    /// Stable AVIAN source/node name for PEAT records.
+    #[arg(long, default_value = "arc-radio-plugin/local")]
+    source: String,
+
+    /// Optional StreamCaster management base URL. Omit for contract-only mode.
+    #[arg(long)]
+    radio_url: Option<String>,
+
+    /// Use the in-process StreamCaster simulator. Mutually exclusive with --radio-url.
+    #[arg(long)]
+    simulate_radio: bool,
+
+    /// Optional protected JSON credential file for authenticated read-only API calls.
+    #[arg(long)]
+    credential_file: Option<PathBuf>,
+
+    /// Directory containing signed/approved antenna installation evidence JSON.
+    #[arg(long)]
+    installation_evidence_dir: Option<PathBuf>,
+
+    /// Signed/approved local regulatory authorization JSON for this installation.
+    #[arg(long)]
+    regulatory_evidence_file: Option<PathBuf>,
+
+    /// Optional PEAT formation ID. All PEAT options are required together.
+    #[arg(long)]
+    peat_formation_id: Option<String>,
+
+    /// File containing the base64 PEAT formation key.
+    #[arg(long)]
+    peat_formation_key_file: Option<PathBuf>,
+
+    /// PEAT bind address (for example 0.0.0.0:9000).
+    #[arg(long)]
+    peat_bind: Option<std::net::SocketAddr>,
+
+    /// Persistent PEAT data directory.
+    #[arg(long)]
+    peat_storage: Option<PathBuf>,
+
+    /// PEAT peer descriptor ENDPOINT_ID@IP:PORT[,IP:PORT...].
+    #[arg(long)]
+    peat_peer: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ArcRadioPluginRequest {
+pub(crate) struct ArcRadioPluginRequest {
     source: NodeId,
     sequence: u64,
     published_at_ms: u64,
@@ -36,14 +90,18 @@ struct ArcRadioPluginRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct ArcRadioPluginResponse {
+pub(crate) struct ArcRadioPluginResponse {
     assessment: RadioPlanAssessment,
     silvus_apply_templates: Vec<SilvusGroupApplyTemplate>,
     peat_record: AvianRecord,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if args.serve {
+        return service::serve(args).await;
+    }
     let encoded = read_request(args.input.as_ref())?;
     let request: ArcRadioPluginRequest =
         serde_json::from_str(&encoded).context("decoding Arc radio-plugin request")?;
@@ -71,7 +129,7 @@ fn read_request(path: Option<&PathBuf>) -> anyhow::Result<String> {
     Ok(encoded)
 }
 
-fn process(request: ArcRadioPluginRequest) -> anyhow::Result<ArcRadioPluginResponse> {
+pub(crate) fn process(request: ArcRadioPluginRequest) -> anyhow::Result<ArcRadioPluginResponse> {
     if request.source.as_str().trim().is_empty() {
         bail!("PEAT record source cannot be empty");
     }
@@ -98,8 +156,8 @@ fn process(request: ArcRadioPluginRequest) -> anyhow::Result<ArcRadioPluginRespo
 mod tests {
     use mesh_core::{
         ChannelBandwidthMhz, RadioConfigAuthority, RadioFleetDefinition, RadioNodeGroup,
-        RadioNodeRole, RadioTrafficProfile, StreamCasterModel, StreamCasterNetworkSettings,
-        TransmitPowerMode, RADIO_CONFIG_SCHEMA_VERSION,
+        RadioNodeRole, RadioRegulatoryProfile, RadioTrafficProfile, StreamCasterModel,
+        StreamCasterNetworkSettings, TransmitPowerMode, RADIO_CONFIG_SCHEMA_VERSION,
     };
 
     use super::*;
@@ -115,7 +173,7 @@ mod tests {
                 generation: 7,
                 network: StreamCasterNetworkSettings {
                     network_id: "ARC-RADIO".to_owned(),
-                    center_frequency_mhz: 2_450.0,
+                    center_frequency_mhz: 2_440.0,
                     bandwidth_mhz: ChannelBandwidthMhz::Mhz20,
                     average_node_distance_m: 2_000.0,
                     maximum_node_distance_m: 5_000.0,
@@ -133,6 +191,7 @@ mod tests {
                             model: StreamCasterModel::Sl5200LiteEstimated,
                             role: RadioNodeRole::Airborne,
                             altitude_msl_ft: 10_000.0,
+                            regulatory_profile: RadioRegulatoryProfile::LiveCapabilitiesRequired,
                             transmit_power: TransmitPowerMode::MaxSupported,
                             antenna_mask: 3,
                             beamforming: true,
@@ -145,6 +204,7 @@ mod tests {
                             model: StreamCasterModel::Sc4400,
                             role: RadioNodeRole::ControlStation,
                             altitude_msl_ft: 0.0,
+                            regulatory_profile: RadioRegulatoryProfile::LiveCapabilitiesRequired,
                             transmit_power: TransmitPowerMode::MaxSupported,
                             antenna_mask: 15,
                             beamforming: true,
