@@ -125,9 +125,16 @@ observations.
 The radio configuration is durable PEAT mission state whose desired-value
 authority is always Arc. It carries a positive generation, shared network
 settings, percentage-based 4200/4400/5200 node groups, the 30,000 ft planning
-ceiling, antenna/power intent, and routine/stress traffic assumptions. AVIAN
-validates and distributes this state; it does not write Arc's canonical
-configuration.
+ceiling, antenna/power intent, routine traffic assumptions, and a single-source
+5.5 MB priority transfer to a 4000-series control station. The priority model
+caps planned radio airtime at 80%, reserves the other 20%, and requires measured
+end-to-end goodput before it estimates transfer duration. AVIAN validates and
+distributes this state; it does not write Arc's canonical configuration.
+
+Antenna gain and installation losses remain explicit unknowns. Consequently,
+the configuration does not claim an EIRP; it records conducted-power intent
+and requires installed-antenna evidence before an EIRP or link budget is
+accepted.
 
 The payload contains no radio password, session cookie, encryption key, HMAC
 key, or TLS private material. Those remain local secret inputs to the eventual

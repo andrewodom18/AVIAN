@@ -97,6 +97,13 @@ available neighbor, signal, throughput, route, queue, airtime, and spectrum
 measurements. Hardware execution remains disabled until the adapter can check
 the target radio's live capabilities and effective settings.
 
+The current operational workload assumption is one 5.5 MB priority payload
+from an airborne StreamCaster to a 4000-series control station over a 20 MHz
+channel, with no more than 80% airtime allocated. This is not a Silvus standard
+or vendor throughput claim. End-to-end goodput, route depth, retries, queues,
+and installed antenna characteristics must be measured before delivery time or
+EIRP can be accepted.
+
 - [StreamCaster API manual access page](https://silvustechnologies.com/resources/downloads/api-manual/)
 
 When representative radios are available, the Silvus adapter will normalize
@@ -127,9 +134,9 @@ mission-specific health policy.
 
 Desired radio settings come only from Arc. `arc-radio-plugin` validates the
 grouped 4200/4400/5200 fleet, expands it to deterministic node assignments,
-computes routine and stress offered load, produces a PEAT mission-class
-record, and emits a dry-run StreamCaster API sequence. It never includes
-passwords or encryption keys in the PEAT payload. See
+computes routine load and the single-source priority-transfer assessment,
+produces a PEAT mission-class record, and emits a dry-run StreamCaster API
+sequence. It never includes passwords or encryption keys in the PEAT payload. See
 [the Arc radio-plugin guide](arc-radio-plugin.md).
 
 ## Remaining handoff work

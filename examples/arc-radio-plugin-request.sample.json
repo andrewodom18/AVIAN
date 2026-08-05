@@ -60,7 +60,12 @@
     "traffic": {
       "routine_packet_bytes": 3072,
       "routine_packets_per_second": 1.0,
-      "stress_extra_bps_per_node": 5500000
+      "priority_transfer_bytes": 5500000,
+      "priority_source_nodes": 1,
+      "priority_source_role": "airborne",
+      "priority_destination_role": "control_station",
+      "max_airtime_ratio": 0.8,
+      "calibrated_end_to_end_goodput_bps": null
     },
     "persist_after_apply": false
   }

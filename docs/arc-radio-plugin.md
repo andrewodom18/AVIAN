@@ -26,9 +26,10 @@ observations; it does not become a competing configuration authority.
 
 1. validates the Arc-owned network and grouped fleet configuration;
 2. expands percentage groups into deterministic per-node assignments;
-3. computes the 3 KiB routine load and a second load with an additional
-   5.5 Mbps per node;
-4. reports the even-share gateway ingress floor;
+3. computes the 3 KiB routine load and assesses a single-source 5.5 MB
+   priority transfer to a 4000-series control station;
+4. enforces an 80% maximum airtime planning ceiling and reports the
+   even-share gateway ingress floor;
 5. wraps the accepted configuration as a durable PEAT mission record; and
 6. emits a dry-run StreamCaster JSON-RPC apply template.
 
@@ -67,6 +68,20 @@ The implementation encodes these StreamCaster 5.0 behaviors from the supplied
 Published peak data rate is never treated as usable mission capacity. Each
 radio/antenna/airframe/environment group can carry a field-calibrated UDP
 capacity; otherwise the assessment warns that capacity is unknown.
+
+The priority payload is 5,500,000 bytes, or 44,000,000 bits. The remaining
+20% airtime is reserved for routing, control, retransmissions, and other mesh
+traffic. Transfer time remains unknown until end-to-end UDP goodput is measured
+from the source, through the operational route, to the control station. When
+that measurement is supplied, the planner applies the airtime ceiling,
+subtracts routine offered load, and reports a planning-only transfer time.
+
+Installed antenna gain and feed-line/connector losses are not yet known, so
+the plugin does not claim an EIRP. For one transmit path, the planning relation
+is `EIRP dBm = conducted transmit power dBm + antenna gain dBi - cable and
+connector losses dB`. MIMO/beamforming compliance must use the vendor and
+regulatory method for the actual array; port powers must not simply be added.
+The airtime ceiling limits channel occupation, not instantaneous EIRP.
 
 ## Security and hardware gate
 

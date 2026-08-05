@@ -9,7 +9,9 @@ pub const RADIO_CONFIG_SCHEMA_VERSION: u16 = 1;
 pub const RADIO_VALIDATION_TARGET_NODES: usize = 150;
 pub const DEFAULT_ROUTINE_PACKET_BYTES: u32 = 3 * 1024;
 pub const DEFAULT_ROUTINE_PACKETS_PER_SECOND: f64 = 1.0;
-pub const DEFAULT_STRESS_EXTRA_BPS_PER_NODE: u64 = 5_500_000;
+pub const DEFAULT_PRIORITY_TRANSFER_BYTES: u64 = 5_500_000;
+pub const DEFAULT_PRIORITY_SOURCE_NODES: usize = 1;
+pub const DEFAULT_MAX_AIRTIME_RATIO: f64 = 0.80;
 pub const MAX_STREAMCASTER_LINK_DISTANCE_M: u32 = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,8 +149,20 @@ pub struct RadioTrafficProfile {
     pub routine_packet_bytes: u32,
     #[serde(default = "default_routine_packets_per_second")]
     pub routine_packets_per_second: f64,
-    #[serde(default = "default_stress_extra_bps_per_node")]
-    pub stress_extra_bps_per_node: u64,
+    #[serde(default = "default_priority_transfer_bytes")]
+    pub priority_transfer_bytes: u64,
+    #[serde(default = "default_priority_source_nodes")]
+    pub priority_source_nodes: usize,
+    #[serde(default = "default_priority_source_role")]
+    pub priority_source_role: RadioNodeRole,
+    #[serde(default = "default_priority_destination_role")]
+    pub priority_destination_role: RadioNodeRole,
+    #[serde(default = "default_max_airtime_ratio")]
+    pub max_airtime_ratio: f64,
+    /// Measured end-to-end UDP goodput baseline at full offered channel load,
+    /// from the priority source through the installed antennas and operational
+    /// route to the control station. The airtime ceiling is applied below.
+    pub calibrated_end_to_end_goodput_bps: Option<u64>,
 }
 
 impl Default for RadioTrafficProfile {
@@ -156,7 +170,12 @@ impl Default for RadioTrafficProfile {
         Self {
             routine_packet_bytes: DEFAULT_ROUTINE_PACKET_BYTES,
             routine_packets_per_second: DEFAULT_ROUTINE_PACKETS_PER_SECOND,
-            stress_extra_bps_per_node: DEFAULT_STRESS_EXTRA_BPS_PER_NODE,
+            priority_transfer_bytes: DEFAULT_PRIORITY_TRANSFER_BYTES,
+            priority_source_nodes: DEFAULT_PRIORITY_SOURCE_NODES,
+            priority_source_role: RadioNodeRole::Airborne,
+            priority_destination_role: RadioNodeRole::ControlStation,
+            max_airtime_ratio: DEFAULT_MAX_AIRTIME_RATIO,
+            calibrated_end_to_end_goodput_bps: None,
         }
     }
 }
@@ -169,8 +188,24 @@ const fn default_routine_packets_per_second() -> f64 {
     DEFAULT_ROUTINE_PACKETS_PER_SECOND
 }
 
-const fn default_stress_extra_bps_per_node() -> u64 {
-    DEFAULT_STRESS_EXTRA_BPS_PER_NODE
+const fn default_priority_transfer_bytes() -> u64 {
+    DEFAULT_PRIORITY_TRANSFER_BYTES
+}
+
+const fn default_priority_source_nodes() -> usize {
+    DEFAULT_PRIORITY_SOURCE_NODES
+}
+
+const fn default_priority_source_role() -> RadioNodeRole {
+    RadioNodeRole::Airborne
+}
+
+const fn default_priority_destination_role() -> RadioNodeRole {
+    RadioNodeRole::ControlStation
+}
+
+const fn default_max_airtime_ratio() -> f64 {
+    DEFAULT_MAX_AIRTIME_RATIO
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -206,6 +241,24 @@ pub struct RadioTrafficLoad {
     pub average_payload_bps_per_gateway: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PriorityTransferAssessment {
+    pub payload_bytes_per_source: u64,
+    pub concurrent_source_count: usize,
+    pub total_payload_bits: u64,
+    pub source_role: RadioNodeRole,
+    pub destination_role: RadioNodeRole,
+    pub max_airtime_ratio: f64,
+    pub reserved_airtime_ratio: f64,
+    /// Calibrated end-to-end goodput after applying the airtime ceiling.
+    pub airtime_limited_goodput_bps: Option<u64>,
+    /// Airtime-limited goodput remaining after routine offered load.
+    pub residual_priority_goodput_bps: Option<u64>,
+    /// Planning estimate only; route hops, retries, queues, and changing RF
+    /// conditions must still be measured.
+    pub estimated_transfer_time_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RadioPlanAssessment {
     pub node_count: usize,
@@ -213,7 +266,7 @@ pub struct RadioPlanAssessment {
     pub resolved_link_distance_m: u32,
     pub assignments: Vec<RadioNodeAssignment>,
     pub routine_load: RadioTrafficLoad,
-    pub stress_load: RadioTrafficLoad,
+    pub priority_transfer: PriorityTransferAssessment,
     pub warnings: Vec<String>,
 }
 
@@ -314,13 +367,14 @@ impl ArcRadioConfiguration {
             self.traffic.routine_packet_bytes,
             self.traffic.routine_packets_per_second,
         )?;
-        let stress_per_node = routine_per_node
-            .checked_add(self.traffic.stress_extra_bps_per_node)
-            .ok_or(RadioConfigError::TrafficOverflow)?;
         let routine_load = traffic_load(routine_per_node, assignments.len(), gateway_count)?;
-        let stress_load = traffic_load(stress_per_node, assignments.len(), gateway_count)?;
 
         let mut warnings = Vec::new();
+        let priority_transfer = self.traffic.assess_priority_transfer(
+            &assignments,
+            routine_load.aggregate_payload_bps,
+            &mut warnings,
+        )?;
         if assignments.len() < RADIO_VALIDATION_TARGET_NODES {
             warnings.push(format!(
                 "configuration has {} nodes; the requested radio validation target is at least {}",
@@ -334,6 +388,10 @@ impl ArcRadioConfiguration {
         );
         warnings.push(
             "average gateway load is only an even-share floor; validate the measured routing tree, retransmissions, multicast behavior, and per-link airtime"
+                .to_owned(),
+        );
+        warnings.push(
+            "EIRP is unresolved until conducted transmit power, installed antenna gain, and cable/connector losses are known for each installation"
                 .to_owned(),
         );
 
@@ -393,7 +451,7 @@ impl ArcRadioConfiguration {
             resolved_link_distance_m,
             assignments,
             routine_load,
-            stress_load,
+            priority_transfer,
             warnings,
         })
     }
@@ -694,7 +752,101 @@ impl RadioTrafficProfile {
         {
             return Err(RadioConfigError::InvalidTrafficProfile);
         }
+        if self.priority_transfer_bytes == 0 || self.priority_source_nodes == 0 {
+            return Err(RadioConfigError::InvalidPriorityTransfer);
+        }
+        if !self.max_airtime_ratio.is_finite()
+            || self.max_airtime_ratio <= 0.0
+            || self.max_airtime_ratio > DEFAULT_MAX_AIRTIME_RATIO
+        {
+            return Err(RadioConfigError::InvalidMaxAirtimeRatio(
+                self.max_airtime_ratio,
+            ));
+        }
+        if self.calibrated_end_to_end_goodput_bps == Some(0) {
+            return Err(RadioConfigError::InvalidCalibratedGoodput);
+        }
         Ok(())
+    }
+
+    fn assess_priority_transfer(
+        &self,
+        assignments: &[RadioNodeAssignment],
+        routine_aggregate_bps: u64,
+        warnings: &mut Vec<String>,
+    ) -> Result<PriorityTransferAssessment, RadioConfigError> {
+        if self.priority_source_nodes > assignments.len() {
+            return Err(RadioConfigError::PrioritySourceCountExceedsFleet {
+                sources: self.priority_source_nodes,
+                nodes: assignments.len(),
+            });
+        }
+        let available_sources = assignments
+            .iter()
+            .filter(|node| node.role == self.priority_source_role)
+            .count();
+        if self.priority_source_nodes > available_sources {
+            return Err(RadioConfigError::InsufficientPrioritySources {
+                role: self.priority_source_role,
+                requested: self.priority_source_nodes,
+                available: available_sources,
+            });
+        }
+        if !assignments
+            .iter()
+            .any(|node| node.role == self.priority_destination_role)
+        {
+            return Err(RadioConfigError::MissingPriorityDestination(
+                self.priority_destination_role,
+            ));
+        }
+
+        let total_payload_bits = self
+            .priority_transfer_bytes
+            .checked_mul(8)
+            .and_then(|bits| bits.checked_mul(self.priority_source_nodes as u64))
+            .ok_or(RadioConfigError::TrafficOverflow)?;
+        let (
+            airtime_limited_goodput_bps,
+            residual_priority_goodput_bps,
+            estimated_transfer_time_ms,
+        ) = if let Some(calibrated_goodput_bps) = self.calibrated_end_to_end_goodput_bps {
+            let airtime_limited =
+                (calibrated_goodput_bps as f64 * self.max_airtime_ratio).floor() as u64;
+            let residual = airtime_limited.saturating_sub(routine_aggregate_bps);
+            if residual == 0 {
+                warnings.push(
+                        "the routine offered load consumes the calibrated goodput available under the airtime ceiling; priority transfer duration cannot be estimated"
+                            .to_owned(),
+                    );
+                (Some(airtime_limited), Some(0), None)
+            } else {
+                let milliseconds = total_payload_bits
+                    .checked_mul(1_000)
+                    .ok_or(RadioConfigError::TrafficOverflow)?
+                    .div_ceil(residual);
+                (Some(airtime_limited), Some(residual), Some(milliseconds))
+            }
+        } else {
+            warnings.push(
+                    "priority transfer duration is unknown until end-to-end goodput is measured through the installed antennas, airframes, route, and environment"
+                        .to_owned(),
+                );
+            (None, None, None)
+        };
+
+        Ok(PriorityTransferAssessment {
+            payload_bytes_per_source: self.priority_transfer_bytes,
+            concurrent_source_count: self.priority_source_nodes,
+            total_payload_bits,
+            source_role: self.priority_source_role,
+            destination_role: self.priority_destination_role,
+            max_airtime_ratio: self.max_airtime_ratio,
+            reserved_airtime_ratio: ((1.0 - self.max_airtime_ratio) * 100.0).round() / 100.0,
+            airtime_limited_goodput_bps,
+            residual_priority_goodput_bps,
+            estimated_transfer_time_ms,
+        })
     }
 }
 
@@ -791,6 +943,24 @@ pub enum RadioConfigError {
     },
     #[error("traffic profile requires a positive packet size and finite positive packet rate")]
     InvalidTrafficProfile,
+    #[error("priority transfer requires a positive payload size and source count")]
+    InvalidPriorityTransfer,
+    #[error("priority transfer source count {sources} exceeds fleet size {nodes}")]
+    PrioritySourceCountExceedsFleet { sources: usize, nodes: usize },
+    #[error(
+        "priority transfer requests {requested} {role:?} sources, but only {available} are assigned"
+    )]
+    InsufficientPrioritySources {
+        role: RadioNodeRole,
+        requested: usize,
+        available: usize,
+    },
+    #[error("radio fleet has no node with priority destination role {0:?}")]
+    MissingPriorityDestination(RadioNodeRole),
+    #[error("maximum airtime ratio {0} must be positive and no greater than 0.8")]
+    InvalidMaxAirtimeRatio(f64),
+    #[error("calibrated end-to-end goodput must be positive")]
+    InvalidCalibratedGoodput,
     #[error("traffic calculation overflowed")]
     TrafficOverflow,
 }
@@ -878,16 +1048,70 @@ mod tests {
     }
 
     #[test]
-    fn routine_and_stress_traffic_use_three_kib_and_five_point_five_mbps() {
+    fn routine_and_priority_transfer_use_three_kib_and_five_point_five_mb() {
         let assessment = config(150).assess().unwrap();
 
         assert_eq!(assessment.routine_load.per_node_payload_bps, 24_576);
         assert_eq!(assessment.routine_load.aggregate_payload_bps, 3_686_400);
-        assert_eq!(assessment.stress_load.per_node_payload_bps, 5_524_576);
-        assert_eq!(assessment.stress_load.aggregate_payload_bps, 828_686_400);
         assert_eq!(
-            assessment.stress_load.average_payload_bps_per_gateway,
-            138_114_400
+            assessment.priority_transfer.payload_bytes_per_source,
+            5_500_000
+        );
+        assert_eq!(assessment.priority_transfer.concurrent_source_count, 1);
+        assert_eq!(assessment.priority_transfer.total_payload_bits, 44_000_000);
+        assert_eq!(
+            assessment.priority_transfer.source_role,
+            RadioNodeRole::Airborne
+        );
+        assert_eq!(assessment.priority_transfer.max_airtime_ratio, 0.8);
+        assert!((assessment.priority_transfer.reserved_airtime_ratio - 0.2).abs() < f64::EPSILON);
+        assert_eq!(
+            assessment.priority_transfer.estimated_transfer_time_ms,
+            None
+        );
+    }
+
+    #[test]
+    fn calibrated_goodput_applies_airtime_ceiling_and_routine_load() {
+        let mut request = config(150);
+        request.traffic.calibrated_end_to_end_goodput_bps = Some(94_000_000);
+
+        let transfer = request.assess().unwrap().priority_transfer;
+
+        assert_eq!(transfer.airtime_limited_goodput_bps, Some(75_200_000));
+        assert_eq!(transfer.residual_priority_goodput_bps, Some(71_513_600));
+        assert_eq!(transfer.estimated_transfer_time_ms, Some(616));
+    }
+
+    #[test]
+    fn rejects_more_than_eighty_percent_airtime() {
+        let mut request = config(150);
+        request.traffic.max_airtime_ratio = 0.81;
+
+        assert!(matches!(
+            request.assess(),
+            Err(RadioConfigError::InvalidMaxAirtimeRatio(value)) if value == 0.81
+        ));
+    }
+
+    #[test]
+    fn requires_configured_source_and_destination_roles() {
+        let mut no_airborne_source = config(150);
+        no_airborne_source.fleet.groups[0].role = RadioNodeRole::Relay;
+        assert!(matches!(
+            no_airborne_source.assess(),
+            Err(RadioConfigError::InsufficientPrioritySources {
+                role: RadioNodeRole::Airborne,
+                requested: 1,
+                available: 0
+            })
+        ));
+
+        let mut no_control_destination = config(150);
+        no_control_destination.traffic.priority_destination_role = RadioNodeRole::Gateway;
+        assert_eq!(
+            no_control_destination.assess().unwrap_err(),
+            RadioConfigError::MissingPriorityDestination(RadioNodeRole::Gateway)
         );
     }
 
