@@ -3,7 +3,8 @@ use uuid::Uuid;
 
 use crate::{
     Altitude, ArcRadioConfiguration, EmergencyCommand, InFlightRelayDecision, MissionAllocation,
-    NodeId, NodeProfile, RelayLinkObservation, RelayRuntimeConfiguration, SwarmStatusSummary,
+    NodeId, NodeProfile, RelayLinkObservation, RelayRuntimeConfiguration,
+    StreamCasterMeshObservation, SwarmStatusSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -129,6 +130,8 @@ pub enum MeshPayload {
     /// Latest rolling radio observation used to build a shared in-flight relay
     /// snapshot. The record is telemetry-class data, not a mission command.
     RelayLinkObservation(RelayLinkObservation),
+    /// Latest read-only radio and PEAT connectivity observation for one ARC node.
+    StreamCasterMeshObservation(StreamCasterMeshObservation),
     Mission(MissionState),
     MissionAllocation(MissionAllocation),
     /// Durable ARC-supplied policy used by companions to rebuild an in-flight

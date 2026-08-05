@@ -28,4 +28,18 @@ deployment. Enable `arc_streamcaster_plugin_enabled` only after provisioning:
 - `/etc/arc/keys/peat-radio.key` as the out-of-band PEAT formation key;
 - an isolated management interface and a separate operational data interface.
 
+Start one sidecar per locally attached StreamCaster. Supply that radio's actual
+management URL with `--radio-url`; the observation publisher exposes only its
+sanitized host/IP. Supply each intended PEAT relationship with one or more
+`--peat-peer ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a PEAT
+link connected only when the transport reports that endpoint as connected.
+Configured but disconnected peers remain visible as disconnected; no link is
+fabricated for an unobserved relationship.
+
+The peer address is the PEAT/ARC reachability address, which may differ from the
+StreamCaster management IP. Direct radio-neighbor RSSI, SNR, throughput, and
+geographic position stay unavailable until a documented vendor telemetry call
+or an ARC telemetry source supplies them. Operators must not treat the logical
+PEAT topology as a radio propagation map.
+
 Do not put credentials in ARC config, PEAT, compose variables, or logs.

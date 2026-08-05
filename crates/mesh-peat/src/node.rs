@@ -99,6 +99,10 @@ fn payload_matches_class(payload: &MeshPayload, class: DeliveryClass) -> bool {
                 MeshPayload::RelayLinkObservation(_),
                 DeliveryClass::Telemetry
             )
+            | (
+                MeshPayload::StreamCasterMeshObservation(_),
+                DeliveryClass::Telemetry
+            )
     )
 }
 

@@ -20,9 +20,38 @@ The plugin never writes the canonical Arc configuration and never talks to a
 flight controller. PEAT distributes the accepted Arc generation and radio
 observations; it does not become a competing configuration authority.
 
-## Current executable
+## Current executable and live inventory
 
-`arc-radio-plugin` is a local JSON stdin/file tool. It:
+`arc-radio-plugin` supports both a local JSON stdin/file compatibility tool and
+an ARC sidecar. The compatibility tool still validates legacy grouped planning
+documents, but groups, percentages, average spacing, and generated topology are
+not operational inventory.
+
+In `--serve` mode the sidecar polls its configured radio with the documented
+read-only `supported_frequency_profiles` and `print_all_settings` calls every
+five seconds. It publishes a versioned observation containing:
+
+- the real local management IP, stripped of credentials and URL paths;
+- the effective radio node ID, system name, network ID, frequency, bandwidth,
+  antenna mask, transmit power, firmware, and model when the radio reports them;
+- the local PEAT endpoint and actual connected-peer count; and
+- configured PEAT peer addresses with a live connected/disconnected state; and
+- the current fused ARC `local/telemetry` position when it is no more than 30
+  seconds old. Raw GPS is not substituted for missing fused position data.
+
+Each sidecar stores one stable, latest-value PEAT telemetry record for its own
+observation. PEAT synchronizes those records across the formation, and the
+sidecar republishes synchronized records onto its local Zenoh session. The
+ground-side view can therefore aggregate actual reports without inventing node
+counts, positions, spacing, or radio links.
+
+ARC Link Manager aggregates fresh observations for 30 seconds and exposes them
+through dev-bridge at `GET /api/radio/streamcaster/mesh`. Zero observed nodes is
+valid. The response carries `capacity_requirement_nodes: 150` and
+`capacity_verification: not_yet_field_verified`; it never claims that the
+currently observed node count proves the capacity requirement.
+
+The compatibility tool:
 
 1. validates the Arc-owned network and grouped fleet configuration;
 2. expands percentage groups into deterministic per-node assignments;
@@ -38,10 +67,10 @@ cargo run -p arc-radio-plugin -- \
   --input examples/arc-radio-plugin-request.sample.json
 ```
 
-The current scale contract accepts 5-200 nodes and explicitly validates the
-requested 150-node target. Smaller configurations remain useful for bench and
-radio-in-the-loop tests; they receive a target warning rather than being
-rejected.
+The 150-node figure is a network capacity requirement, not a minimum active
+population. Small live networks and single-radio benches are valid. Capacity
+must be demonstrated separately with representative hardware and traffic; it
+is not inferred from inventory size or Ethernet link speed.
 
 ## Manual-grounded rules
 
@@ -103,6 +132,7 @@ storage, use the password-authenticated API session, refresh the expiring
 cookie, serialize disruptive calls, and re-read effective state after every
 reconnect.
 
-This branch does not send commands to real radios. Hardware apply remains
+This branch does not send commands to real radios. Live discovery is read-only.
+Hardware apply remains
 gated on representative 4200, 4400, and 5200 units, live capability captures,
 and radio-in-the-loop tests.

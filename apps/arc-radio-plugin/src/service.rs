@@ -8,8 +8,11 @@ use mesh_core::{
     ArcActivationAuthorization, ArcRadioConfiguration, DeliveryClass, MeshPayload, NodeId,
     StreamCasterActivationGates, StreamCasterApplyPhase, StreamCasterCapabilities,
     StreamCasterDeviceAssignment, StreamCasterEffectiveSettings, StreamCasterFrequencyProfile,
-    StreamCasterOperationIntent, StreamCasterOperationRequest, StreamCasterOperationStatus,
-    TransmitPowerMode, STREAMCASTER_CONTROL_SCHEMA_VERSION,
+    StreamCasterMeshObservation, StreamCasterObservedNode, StreamCasterObservedPosition,
+    StreamCasterObservedRadio, StreamCasterObservedStatus, StreamCasterOperationIntent,
+    StreamCasterOperationRequest, StreamCasterOperationStatus, StreamCasterPeerLink,
+    TransmitPowerMode, STREAMCASTER_CAPACITY_REQUIREMENT_NODES,
+    STREAMCASTER_CONTROL_SCHEMA_VERSION, STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use serde::Deserialize;
@@ -28,8 +31,10 @@ const TOPIC_DESIRED: &str = "local/link/radio/streamcaster/desired/v1";
 const TOPIC_STATUS: &str = "local/link/radio/streamcaster/status/v1";
 const TOPIC_OBSERVATIONS: &str = "local/link/radio/streamcaster/observations/v1";
 const TOPIC_HEALTH: &str = "local/link/radio/streamcaster/plugin-health";
+const TOPIC_TELEMETRY: &str = "local/telemetry";
 const ARC_AUTHORIZATION_MAX_AGE_MS: u64 = 5 * 60 * 1_000;
 const ARC_AUTHORIZATION_MAX_CLOCK_SKEW_MS: u64 = 5_000;
+const POSITION_FRESH_MS: u64 = 30_000;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +68,7 @@ struct AntennaEvidence {
     calibrated_at_ms: u64,
 }
 
+#[derive(Clone)]
 enum Backend {
     ContractOnly,
     LiveReadOnly(StreamCasterClient),
@@ -79,8 +85,12 @@ struct ServiceState {
     prepared: Option<PreparedStreamCasterTransaction>,
     latest_status: Option<StreamCasterOperationStatus>,
     latest_plan_generation: Option<u64>,
+    latest_mesh_observation: Option<serde_json::Value>,
     peat: Option<Arc<PeatNode>>,
+    peat_peers: Vec<PeerDescriptor>,
+    management_address: Option<String>,
     simulate_radio: bool,
+    latest_position: Option<StreamCasterObservedPosition>,
 }
 
 pub async fn serve(args: Args) -> anyhow::Result<()> {
@@ -94,6 +104,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
 
     let auth = load_auth(args.credential_file.as_deref())?;
     let credential_resolved = !matches!(auth, StreamCasterAuth::None);
+    let management_address = args.radio_url.as_deref().and_then(management_host);
     let backend = if args.simulate_radio {
         Backend::ContractOnly
     } else if let Some(url) = args.radio_url.as_deref() {
@@ -101,7 +112,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
     } else {
         Backend::ContractOnly
     };
-    let peat = start_peat(&args).await?;
+    let (peat, peat_peers) = start_peat(&args).await?;
 
     let mut zenoh_config = zenoh::Config::default();
     zenoh_config
@@ -126,6 +137,10 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         .declare_subscriber(TOPIC_DESIRED)
         .await
         .map_err(|error| anyhow::anyhow!("desired subscriber: {error}"))?;
+    let telemetry_subscriber = session
+        .declare_subscriber(TOPIC_TELEMETRY)
+        .await
+        .map_err(|error| anyhow::anyhow!("telemetry subscriber: {error}"))?;
     let health_queryable = session
         .declare_queryable(TOPIC_HEALTH)
         .await
@@ -141,8 +156,12 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         prepared: None,
         latest_status: None,
         latest_plan_generation: None,
+        latest_mesh_observation: None,
         peat: peat.clone(),
+        peat_peers,
+        management_address,
         simulate_radio: args.simulate_radio,
+        latest_position: None,
     }));
 
     if args.simulate_radio {
@@ -152,8 +171,15 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
     }
 
     let mut peat_poll = tokio::time::interval(Duration::from_secs(2));
+    let mut mesh_poll = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
+            sample = telemetry_subscriber.recv_async() => {
+                let Ok(sample) = sample else { break; };
+                if let Some(position) = observed_position(&sample.payload().to_bytes(), now_unix_ms()) {
+                    state.write().await.latest_position = Some(position);
+                }
+            }
             sample = desired_subscriber.recv_async() => {
                 let Ok(sample) = sample else { break; };
                 let now_ms = now_unix_ms();
@@ -196,6 +222,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                         "peat_enabled": state.peat.is_some(),
                         "fleet_generation": state.latest_plan_generation,
                         "latest_status": state.latest_status,
+                        "latest_mesh_observation": state.latest_mesh_observation,
                     })
                 };
                 let _ = query
@@ -203,7 +230,8 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     .await;
             }
             _ = peat_poll.tick(), if peat.is_some() => {
-                if let Some(plan) = newest_peat_plan(peat.as_deref().expect("guarded PEAT node")).await? {
+                let peat_node = peat.as_deref().expect("guarded PEAT node");
+                if let Some(plan) = newest_peat_plan(peat_node).await? {
                     let generation = plan.generation;
                     let should_publish = state.read().await.latest_plan_generation
                         .is_none_or(|current| generation > current);
@@ -213,6 +241,26 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                             .put(TOPIC_FLEET_PLAN, serde_json::to_vec(&plan).unwrap_or_default())
                             .await;
                     }
+                }
+                for observation in peat_mesh_observations(peat_node).await? {
+                    let _ = session
+                        .put(
+                            TOPIC_OBSERVATIONS,
+                            serde_json::to_vec(&observation).unwrap_or_default(),
+                        )
+                        .await;
+                }
+            }
+            _ = mesh_poll.tick() => {
+                if let Some(observation) = observe_local_mesh(&state, now_unix_ms()).await {
+                    state.write().await.latest_mesh_observation = serde_json::to_value(&observation).ok();
+                    let _ = session
+                        .put(
+                            TOPIC_OBSERVATIONS,
+                            serde_json::to_vec(&observation).unwrap_or_default(),
+                        )
+                        .await;
+                    persist_mesh_observation(&state, &observation).await;
                 }
             }
             _ = tokio::signal::ctrl_c() => break,
@@ -499,6 +547,52 @@ async fn newest_peat_plan(peat: &PeatNode) -> anyhow::Result<Option<ArcRadioConf
     Ok(plans.pop())
 }
 
+async fn persist_mesh_observation(
+    state: &Arc<RwLock<ServiceState>>,
+    observation: &StreamCasterMeshObservation,
+) {
+    let (peat, sequence) = {
+        let state = state.read().await;
+        (
+            state.peat.clone(),
+            state.sequence.fetch_add(1, Ordering::Relaxed),
+        )
+    };
+    let Some(peat) = peat else {
+        return;
+    };
+    let record = AvianRecord::new(
+        observation.source.clone(),
+        sequence,
+        DeliveryClass::Telemetry,
+        observation.observed_at_ms,
+        MeshPayload::StreamCasterMeshObservation(observation.clone()),
+    );
+    let record_id = format!("streamcaster-mesh/{}", observation.source);
+    match record {
+        Ok(record) => {
+            if let Err(error) = peat.put(&record_id, &record).await {
+                tracing::warn!(%error, "failed to persist StreamCaster mesh observation through PEAT");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "failed to create PEAT StreamCaster mesh observation"),
+    }
+}
+
+async fn peat_mesh_observations(
+    peat: &PeatNode,
+) -> anyhow::Result<Vec<StreamCasterMeshObservation>> {
+    Ok(peat
+        .scan(DeliveryClass::Telemetry)
+        .await?
+        .into_iter()
+        .filter_map(|(_, record)| match record.payload {
+            MeshPayload::StreamCasterMeshObservation(observation) => Some(observation),
+            _ => None,
+        })
+        .collect())
+}
+
 async fn evidence_gates(
     state: &Arc<RwLock<ServiceState>>,
     request: &StreamCasterOperationRequest,
@@ -598,7 +692,7 @@ fn validate_secret_permissions(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn start_peat(args: &Args) -> anyhow::Result<Option<Arc<PeatNode>>> {
+async fn start_peat(args: &Args) -> anyhow::Result<(Option<Arc<PeatNode>>, Vec<PeerDescriptor>)> {
     let options_present = [
         args.peat_formation_id.is_some(),
         args.peat_formation_key_file.is_some(),
@@ -606,7 +700,7 @@ async fn start_peat(args: &Args) -> anyhow::Result<Option<Arc<PeatNode>>> {
         args.peat_storage.is_some(),
     ];
     if !options_present.iter().any(|present| *present) {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     }
     if !options_present.iter().all(|present| *present) {
         bail!("PEAT formation ID, key file, bind address, and storage are required together");
@@ -624,11 +718,169 @@ async fn start_peat(args: &Args) -> anyhow::Result<Option<Arc<PeatNode>>> {
         })
         .await?,
     );
+    let mut peers = Vec::with_capacity(args.peat_peer.len());
     for peer in &args.peat_peer {
         let peer: PeerDescriptor = peer.parse()?;
         peat.connect(&peer).await?;
+        peers.push(peer);
     }
-    Ok(Some(peat))
+    Ok((Some(peat), peers))
+}
+
+fn management_host(url: &str) -> Option<String> {
+    let authority = url
+        .split_once("://")
+        .map_or(url, |(_, authority)| authority)
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .trim();
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        return bracketed.split(']').next().map(str::to_owned);
+    }
+    Some(authority.split(':').next().unwrap_or(authority).to_owned())
+}
+
+async fn observe_local_mesh(
+    state: &Arc<RwLock<ServiceState>>,
+    observed_at_ms: u64,
+) -> Option<StreamCasterMeshObservation> {
+    let (source, backend, management_address, peat, peers, latest_position) = {
+        let state = state.read().await;
+        (
+            state.source.clone(),
+            state.backend.clone(),
+            state.management_address.clone(),
+            state.peat.clone(),
+            state.peat_peers.clone(),
+            state.latest_position,
+        )
+    };
+
+    let (capabilities, effective, error, simulated) = match backend {
+        Backend::ContractOnly => return None,
+        Backend::LiveReadOnly(api) => {
+            let capabilities = api.read_capabilities(observed_at_ms).await;
+            let effective = api.read_effective_settings(observed_at_ms).await;
+            let error = capabilities
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .or_else(|| effective.as_ref().err().map(ToString::to_string));
+            (capabilities.ok(), effective.ok(), error, false)
+        }
+        Backend::Simulator(api) => {
+            let capabilities = api.read_capabilities(observed_at_ms).await.ok();
+            let effective = api.read_effective_settings(observed_at_ms).await.ok();
+            (capabilities, effective, None, true)
+        }
+    };
+
+    let endpoint_id = peat.as_ref().map(|node| node.endpoint_id_hex());
+    let links = peers
+        .iter()
+        .map(|peer| {
+            let connected = peat
+                .as_ref()
+                .is_some_and(|node| node.is_peer_connected(peer));
+            StreamCasterPeerLink {
+                source: source.clone(),
+                source_endpoint_id: endpoint_id.clone(),
+                target: peer.name.clone(),
+                target_endpoint_id: peer.endpoint_id_hex.clone(),
+                target_addresses: peer.addresses().iter().map(ToString::to_string).collect(),
+                transport: "peat_over_streamcaster".into(),
+                state: if connected {
+                    "connected"
+                } else {
+                    "disconnected"
+                }
+                .into(),
+                observed_at_ms,
+            }
+        })
+        .collect::<Vec<_>>();
+    let status = if effective.is_some() {
+        StreamCasterObservedStatus::Online
+    } else {
+        StreamCasterObservedStatus::Unreachable
+    };
+
+    Some(StreamCasterMeshObservation {
+        schema_version: STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
+        observed_at_ms,
+        source: source.clone(),
+        capacity_requirement_nodes: STREAMCASTER_CAPACITY_REQUIREMENT_NODES,
+        simulated,
+        node: StreamCasterObservedNode {
+            node_key: source,
+            management_ip: management_address,
+            status,
+            last_seen_ms: observed_at_ms,
+            peat_endpoint_id: endpoint_id,
+            peat_connected_peers: peat.as_ref().map_or(0, |node| node.peer_count()),
+            position: latest_position.filter(|position| {
+                position.observed_at_ms
+                    <= observed_at_ms.saturating_add(ARC_AUTHORIZATION_MAX_CLOCK_SKEW_MS)
+                    && observed_at_ms.saturating_sub(position.observed_at_ms) <= POSITION_FRESH_MS
+            }),
+            radio: StreamCasterObservedRadio {
+                node_id: effective.as_ref().and_then(|settings| settings.node_id),
+                system_name: effective
+                    .as_ref()
+                    .and_then(|settings| settings.system_name.clone()),
+                network_id: effective
+                    .as_ref()
+                    .map(|settings| settings.network_id.clone()),
+                center_frequency_mhz: effective
+                    .as_ref()
+                    .map(|settings| settings.center_frequency_mhz),
+                bandwidth_mhz: effective.as_ref().map(|settings| settings.bandwidth_mhz),
+                link_distance_m: effective.as_ref().map(|settings| settings.link_distance_m),
+                antenna_mask: effective.as_ref().map(|settings| settings.antenna_mask),
+                transmit_power_dbm_per_port: effective
+                    .as_ref()
+                    .and_then(|settings| settings.transmit_power_dbm_per_port),
+                model: capabilities.as_ref().and_then(|value| value.model),
+                firmware_version: capabilities
+                    .as_ref()
+                    .and_then(|value| value.firmware_version.clone()),
+            },
+        },
+        links,
+        error,
+    })
+}
+
+fn observed_position(payload: &[u8], received_at_ms: u64) -> Option<StreamCasterObservedPosition> {
+    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let position = value.get("position")?;
+    let latitude_deg = position.get("lat")?.as_f64()?;
+    let longitude_deg = position.get("lon")?.as_f64()?;
+    if !latitude_deg.is_finite()
+        || !longitude_deg.is_finite()
+        || !(-90.0..=90.0).contains(&latitude_deg)
+        || !(-180.0..=180.0).contains(&longitude_deg)
+    {
+        return None;
+    }
+    let altitude_msl_m = position
+        .get("alt_msl_m")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|altitude| altitude.is_finite());
+    Some(StreamCasterObservedPosition {
+        latitude_deg,
+        longitude_deg,
+        altitude_msl_m,
+        observed_at_ms: value
+            .get("timestamp_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(received_at_ms),
+    })
 }
 
 fn blocked_status(
@@ -740,6 +992,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn management_host_never_exposes_credentials_or_paths() {
+        assert_eq!(
+            management_host("https://operator:secret@10.20.30.40:443/api"),
+            Some("10.20.30.40".into())
+        );
+        assert_eq!(
+            management_host("http://[fd00::52]:8080/jsonrpc"),
+            Some("fd00::52".into())
+        );
+        assert_eq!(management_host(""), None);
+    }
+
+    #[test]
+    fn fused_telemetry_position_is_validated_without_raw_gps_fallback() {
+        let position = observed_position(
+            br#"{"timestamp_ms":1234,"position":{"lat":34.5,"lon":-86.7,"alt_msl_m":3048.0}}"#,
+            9_000,
+        )
+        .unwrap();
+        assert_eq!(position.latitude_deg, 34.5);
+        assert_eq!(position.longitude_deg, -86.7);
+        assert_eq!(position.altitude_msl_m, Some(3048.0));
+        assert_eq!(position.observed_at_ms, 1_234);
+
+        assert!(observed_position(
+            br#"{"timestamp_ms":1234,"gps":{"lat":34.5,"lon":-86.7}}"#,
+            9_000
+        )
+        .is_none());
+        assert!(observed_position(br#"{"position":{"lat":91.0,"lon":-86.7}}"#, 9_000).is_none());
+    }
+
+    #[test]
     fn regulatory_evidence_requires_the_exact_frequency_bandwidth_tuple() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("regulatory.json");
@@ -804,9 +1089,34 @@ mod tests {
             prepared: None,
             latest_status: None,
             latest_plan_generation: None,
+            latest_mesh_observation: None,
             peat: None,
+            peat_peers: Vec::new(),
+            management_address: Some("10.0.0.52".into()),
             simulate_radio: true,
+            latest_position: Some(StreamCasterObservedPosition {
+                latitude_deg: 34.5,
+                longitude_deg: -86.7,
+                altitude_msl_m: Some(3_048.0),
+                observed_at_ms: 8_000,
+            }),
         }));
+
+        let observation = observe_local_mesh(&state, 9_000).await.unwrap();
+        assert_eq!(observation.capacity_requirement_nodes, 150);
+        assert_eq!(observation.node.management_ip.as_deref(), Some("10.0.0.52"));
+        assert_eq!(observation.node.status, StreamCasterObservedStatus::Online);
+        assert_eq!(
+            observation
+                .node
+                .position
+                .map(|position| position.altitude_msl_m),
+            Some(Some(3_048.0))
+        );
+        assert!(observation.simulated);
+
+        let stale_position = observe_local_mesh(&state, 40_001).await.unwrap();
+        assert!(stale_position.node.position.is_none());
 
         let prepared = process_operation(&state, request.clone(), 10_000).await;
         assert_eq!(prepared.phase, StreamCasterApplyPhase::Prepared);

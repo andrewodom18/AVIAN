@@ -7,6 +7,7 @@ mod message;
 mod node;
 mod radio;
 mod radio_control;
+mod radio_observation;
 mod relay;
 mod relay_runtime;
 mod topology;
@@ -44,6 +45,11 @@ pub use radio_control::{
     StreamCasterCapabilities, StreamCasterControlError, StreamCasterDeviceAssignment,
     StreamCasterEffectiveSettings, StreamCasterFrequencyProfile, StreamCasterOperationIntent,
     StreamCasterOperationRequest, StreamCasterOperationStatus, STREAMCASTER_CONTROL_SCHEMA_VERSION,
+};
+pub use radio_observation::{
+    StreamCasterMeshObservation, StreamCasterObservedNode, StreamCasterObservedPosition,
+    StreamCasterObservedRadio, StreamCasterObservedStatus, StreamCasterPeerLink,
+    STREAMCASTER_CAPACITY_REQUIREMENT_NODES, STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
 };
 pub use relay::{
     AssignmentPool, GeoPoint, MissionAllocation, OperatorTaskGroup, RadioLinkBudget, RangeEvidence,
