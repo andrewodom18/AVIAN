@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/arc-radio-plugin",
     "apps/mesh-agent",
     "apps/mission-planner",
     "crates/mesh-core",

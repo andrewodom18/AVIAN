@@ -56,11 +56,11 @@ application session and synchronization overhead.
 
 ## Altitude and aircraft variety
 
-The radio type does not change AVIAN's 25,000 ft MSL system ceiling. Link
+The radio type does not change AVIAN's 30,000 ft MSL planning ceiling. Link
 selection uses current measurements and geometry rather than assuming that a
 higher aircraft always has a better path. Platform profiles will include
 antenna placement, radio power/thermal limits, energy cost, usable interfaces,
-and a platform-specific ceiling. The lower of the platform ceiling and 25,000
+and a platform-specific ceiling. The lower of the platform ceiling and 30,000
 ft MSL applies.
 
 ## Range calibration for relay planning
@@ -90,16 +90,17 @@ claiming that a data-sheet range proves a new chain will work.
 
 ## Vendor telemetry boundary
 
-AVIAN currently recognizes `silvus` as a transport type and can give PEAT
-multiple IP addresses. It does not yet read StreamCaster neighbor, signal,
-throughput, or route statistics. Silvus publishes a StreamCaster API manual
-entry, but the public page does not provide enough schema detail to implement
-and verify a client without the manual or hardware.
+AVIAN recognizes `silvus` as a transport type and can give PEAT multiple IP
+addresses. The supplied StreamCaster 4000-series user and API manuals now
+ground the radio configuration contract, dry-run JSON-RPC sequence, and the
+available neighbor, signal, throughput, route, queue, airtime, and spectrum
+measurements. Hardware execution remains disabled until the adapter can check
+the target radio's live capabilities and effective settings.
 
 - [StreamCaster API manual access page](https://silvustechnologies.com/resources/downloads/api-manual/)
 
-When the supported API and a representative radio are available, a Silvus
-adapter will normalize vendor measurements into AVIAN's existing latency,
+When representative radios are available, the Silvus adapter will normalize
+vendor measurements into AVIAN's existing latency,
 loss, goodput, signal quality, stability, energy cost, line-of-sight, and
 Fresnel-clearance model. Until then, the integration stays standards-based and
 does not invent proprietary endpoints.
@@ -123,6 +124,13 @@ one directional RSSI sample. Its required JSON shape is shown in
 AVIAN checks endpoint shape, sample window, finite metrics, and geometry at
 ingress; mission evaluation then checks membership, freshness, and the
 mission-specific health policy.
+
+Desired radio settings come only from Arc. `arc-radio-plugin` validates the
+grouped 4200/4400/5200 fleet, expands it to deterministic node assignments,
+computes routine and stress offered load, produces a PEAT mission-class
+record, and emits a dry-run StreamCaster API sequence. It never includes
+passwords or encryption keys in the PEAT payload. See
+[the Arc radio-plugin guide](arc-radio-plugin.md).
 
 ## Remaining handoff work
 

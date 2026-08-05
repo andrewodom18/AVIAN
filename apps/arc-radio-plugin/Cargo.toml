@@ -1,0 +1,17 @@
+[package]
+name = "arc-radio-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mesh-core = { path = "../../crates/mesh-core" }
+mesh-peat = { path = "../../crates/mesh-peat" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

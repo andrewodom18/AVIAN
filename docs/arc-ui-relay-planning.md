@@ -179,7 +179,7 @@ Range discovery is intentionally conservative. A live chain can be formed only
 from fresh bidirectional observations that meet the mission policy. If those
 observations do not exist, the system reports the gap, exposes candidates for
 probing, and waits for measured results to be shared; it does not claim that a
-radio specification, 25,000 ft MSL ceiling, or free-space calculation proves
+radio specification, 30,000 ft MSL planning ceiling, or free-space calculation proves
 an unobserved hop will work.
 
 ## Synthetic planner test

@@ -5,6 +5,7 @@ mod command;
 mod link;
 mod message;
 mod node;
+mod radio;
 mod relay;
 mod relay_runtime;
 mod topology;
@@ -20,6 +21,15 @@ pub use message::{
     Telemetry,
 };
 pub use node::{Capability, FlightStack, NodeId, NodeProfile, NodeRole, ProfileError};
+pub use radio::{
+    ArcRadioConfiguration, ChannelBandwidthMhz, RadioConfigAuthority, RadioConfigError,
+    RadioFleetDefinition, RadioNodeAssignment, RadioNodeGroup, RadioNodeRole, RadioPlanAssessment,
+    RadioProfileEvidence, RadioTrafficLoad, RadioTrafficProfile, SilvusApiStep,
+    SilvusGroupApplyTemplate, SilvusStepEffect, StreamCasterModel, StreamCasterModelProfile,
+    StreamCasterNetworkSettings, TransmitPowerMode, DEFAULT_ROUTINE_PACKETS_PER_SECOND,
+    DEFAULT_ROUTINE_PACKET_BYTES, DEFAULT_STRESS_EXTRA_BPS_PER_NODE,
+    MAX_STREAMCASTER_LINK_DISTANCE_M, RADIO_CONFIG_SCHEMA_VERSION, RADIO_VALIDATION_TARGET_NODES,
+};
 pub use relay::{
     AssignmentPool, GeoPoint, MissionAllocation, OperatorTaskGroup, RadioLinkBudget, RangeEvidence,
     RelayAllocationMode, RelayCandidate, RelayCorridorRequest, RelayCoverage, RelayFeasibility,

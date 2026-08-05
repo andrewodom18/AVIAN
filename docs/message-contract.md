@@ -120,6 +120,20 @@ vehicle position or radio measurement: companions construct their own live
 request from this policy plus synchronized telemetry and relay-link
 observations.
 
+## Arc radio configuration
+
+The radio configuration is durable PEAT mission state whose desired-value
+authority is always Arc. It carries a positive generation, shared network
+settings, percentage-based 4200/4400/5200 node groups, the 30,000 ft planning
+ceiling, antenna/power intent, and routine/stress traffic assumptions. AVIAN
+validates and distributes this state; it does not write Arc's canonical
+configuration.
+
+The payload contains no radio password, session cookie, encryption key, HMAC
+key, or TLS private material. Those remain local secret inputs to the eventual
+hardware adapter. A real apply must query `supported_frequency_profiles`,
+verify effective values after reconnect, and report status back to Arc.
+
 ## Delivery classes
 
 | Class | Durable | Reliable | Redundancy | Lifetime |

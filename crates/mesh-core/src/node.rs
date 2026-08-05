@@ -128,7 +128,7 @@ impl NodeProfile {
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum ProfileError {
-    #[error("platform MSL ceiling must be in (0, 7,620] m, got {0}")]
+    #[error("platform MSL ceiling must be in (0, 9,144] m, got {0}")]
     InvalidPlatformCeiling(f64),
 }
 

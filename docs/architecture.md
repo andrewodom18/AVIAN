@@ -49,7 +49,7 @@ Roles describe capabilities, not authority:
 
 ## Altitude model
 
-The system-wide ceiling is 25,000 ft MSL (7,620 m). Messages retain three
+The system-wide planning ceiling is 30,000 ft MSL (9,144 m). Messages retain three
 different measurements rather than treating them as interchangeable:
 
 - `msl_m`: altitude above mean sea level; used for the system ceiling.
@@ -101,8 +101,10 @@ mesh that already routes packets.
 Silvus is a preferred path, not a required dependency. A peer descriptor may
 carry a Silvus address followed by Wi-Fi, cellular, or other reachable
 addresses. PEAT receives the complete list whenever the agent connects or
-reconnects. Live vendor radio statistics and score-driven make-before-break
-handoff remain future work. See [the Silvus integration guide](silvus.md).
+reconnects. Arc remains the desired radio-configuration authority; the
+PEAT-backed radio plugin validates and distributes that state without writing
+Arc's canonical configuration. Live score-driven make-before-break handoff
+remains future work. See [the Arc radio-plugin guide](arc-radio-plugin.md).
 
 ## Swarm topology
 

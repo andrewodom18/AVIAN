@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Altitude, EmergencyCommand, InFlightRelayDecision, MissionAllocation, NodeId, NodeProfile,
-    RelayLinkObservation, RelayRuntimeConfiguration, SwarmStatusSummary,
+    Altitude, ArcRadioConfiguration, EmergencyCommand, InFlightRelayDecision, MissionAllocation,
+    NodeId, NodeProfile, RelayLinkObservation, RelayRuntimeConfiguration, SwarmStatusSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -135,6 +135,9 @@ pub enum MeshPayload {
     /// request from synchronized telemetry and radio observations.
     RelayRuntimeConfiguration(RelayRuntimeConfiguration),
     RelayReconfiguration(InFlightRelayDecision),
+    /// Arc-authored desired StreamCaster configuration. AVIAN validates and
+    /// distributes it through PEAT but never becomes the desired-config owner.
+    RadioConfiguration(ArcRadioConfiguration),
     EmergencyCommand(EmergencyCommand),
     EmergencyAck(EmergencyAck),
 }

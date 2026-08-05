@@ -788,7 +788,7 @@ pub enum RelayPlanError {
     UnsupportedSwarmSize(usize),
     #[error("relay planning coordinate is non-finite or outside latitude/longitude bounds")]
     InvalidCoordinate,
-    #[error("relay altitude {0} m MSL exceeds the 7,620 m system ceiling")]
+    #[error("relay altitude {0} m MSL exceeds the 9,144 m system ceiling")]
     AboveSystemCeiling(f64),
     #[error("field-calibrated usable radio range must be finite and positive")]
     InvalidUsableRange,

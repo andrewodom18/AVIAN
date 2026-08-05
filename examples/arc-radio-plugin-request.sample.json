@@ -1,0 +1,67 @@
+{
+  "source": "arc-configd/device-001",
+  "sequence": 1,
+  "published_at_ms": 1785945600000,
+  "configuration": {
+    "schema_version": 1,
+    "authority": "arc",
+    "generation": 1,
+    "network": {
+      "network_id": "ARC-4000-Series",
+      "center_frequency_mhz": 2450.0,
+      "bandwidth_mhz": "20",
+      "average_node_distance_m": 5000.0,
+      "maximum_node_distance_m": 10000.0,
+      "link_distance_m": null,
+      "routing_beacon_period_ms": 500,
+      "encryption_required": true
+    },
+    "fleet": {
+      "total_nodes": 150,
+      "groups": [
+        {
+          "group_id": "airborne-5200",
+          "node_id_prefix": "air",
+          "percentage": 96.0,
+          "model": "sl5200_lite_estimated",
+          "role": "airborne",
+          "altitude_msl_ft": 10000.0,
+          "transmit_power": { "mode": "max_supported" },
+          "antenna_mask": 3,
+          "beamforming": true,
+          "field_calibrated_udp_capacity_bps": null
+        },
+        {
+          "group_id": "control-4400",
+          "node_id_prefix": "gcs4400",
+          "percentage": 2.0,
+          "model": "sc4400",
+          "role": "control_station",
+          "altitude_msl_ft": 0.0,
+          "transmit_power": { "mode": "target_dbm", "dbm": 36 },
+          "antenna_mask": 15,
+          "beamforming": true,
+          "field_calibrated_udp_capacity_bps": null
+        },
+        {
+          "group_id": "control-4200",
+          "node_id_prefix": "gcs4200",
+          "percentage": 2.0,
+          "model": "sc4200",
+          "role": "control_station",
+          "altitude_msl_ft": 0.0,
+          "transmit_power": { "mode": "max_supported" },
+          "antenna_mask": 3,
+          "beamforming": true,
+          "field_calibrated_udp_capacity_bps": null
+        }
+      ]
+    },
+    "traffic": {
+      "routine_packet_bytes": 3072,
+      "routine_packets_per_second": 1.0,
+      "stress_extra_bps_per_node": 5500000
+    },
+    "persist_after_apply": false
+  }
+}
