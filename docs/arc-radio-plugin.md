@@ -86,12 +86,14 @@ from the source, through the operational route, to the control station. When
 that measurement is supplied, the planner applies the airtime ceiling,
 subtracts routine offered load, and reports a planning-only transfer time.
 
-Installed antenna gain and feed-line/connector losses are not yet known, so
-the plugin does not claim an EIRP. For one transmit path, the planning relation
-is `EIRP dBm = conducted transmit power dBm + antenna gain dBi - cable and
-connector losses dB`. MIMO/beamforming compliance must use the vendor and
-regulatory method for the actual array; port powers must not simply be added.
-The airtime ceiling limits channel occupation, not instantaneous EIRP.
+The current operator-supplied installed-system estimates are 34.44 dBm EIRP
+airborne and 33 dBm EIRP ground. They are retained as approximate planning
+inputs, not regulatory authorization or calibrated installation evidence. For
+one transmit path, the relation is `EIRP dBm = conducted transmit power dBm +
+antenna gain dBi - cable and connector losses dB`. MIMO/beamforming compliance
+must use the vendor and regulatory method for the actual array; port powers
+must not simply be added. The airtime ceiling limits channel occupation, not
+instantaneous EIRP.
 
 ## Security and hardware gate
 

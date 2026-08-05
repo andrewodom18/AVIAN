@@ -131,10 +131,11 @@ caps planned radio airtime at 80%, reserves the other 20%, and requires measured
 end-to-end goodput before it estimates transfer duration. AVIAN validates and
 distributes this state; it does not write Arc's canonical configuration.
 
-Antenna gain and installation losses remain explicit unknowns. Consequently,
-the configuration does not claim an EIRP; it records conducted-power intent
-and requires installed-antenna evidence before an EIRP or link budget is
-accepted.
+Antenna gain and installation losses remain explicit unknowns. The configuration
+may carry the current approximate installed-system values of 34.44 dBm airborne
+EIRP and 33 dBm ground EIRP for planning, but requires the underlying conducted
+power and installed-antenna evidence before either value or a link budget is
+accepted as calibrated or activation-ready.
 
 The payload contains no radio password, session cookie, encryption key, HMAC
 key, or TLS private material. Those remain local secret inputs to the eventual

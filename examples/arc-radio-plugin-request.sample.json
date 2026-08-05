@@ -28,9 +28,10 @@
           "altitude_msl_ft": 10000.0,
           "regulatory_profile": "live_capabilities_required",
           "transmit_power": { "mode": "max_supported" },
-          "antenna_mask": 3,
-          "beamforming": true,
-          "field_calibrated_udp_capacity_bps": null
+        "antenna_mask": 3,
+        "beamforming": true,
+        "estimated_installed_eirp_dbm": 34.44,
+        "field_calibrated_udp_capacity_bps": null
         },
         {
           "group_id": "control-4400",
@@ -41,9 +42,10 @@
           "altitude_msl_ft": 0.0,
           "regulatory_profile": "live_capabilities_required",
           "transmit_power": { "mode": "target_dbm", "dbm": 36 },
-          "antenna_mask": 15,
-          "beamforming": true,
-          "field_calibrated_udp_capacity_bps": null
+        "antenna_mask": 15,
+        "beamforming": true,
+        "estimated_installed_eirp_dbm": 33.0,
+        "field_calibrated_udp_capacity_bps": null
         },
         {
           "group_id": "control-4200",

@@ -103,8 +103,11 @@ The current operational workload assumption is one 5.5 MB priority payload
 from an airborne StreamCaster to a 4000-series control station over a 20 MHz
 channel, with no more than 80% airtime allocated. This is not a Silvus standard
 or vendor throughput claim. End-to-end goodput, route depth, retries, queues,
-and installed antenna characteristics must be measured before delivery time or
-EIRP can be accepted.
+and installed antenna characteristics must be measured before delivery time can
+be accepted. Approximate installed-system inputs are currently 34.44 dBm EIRP
+airborne and 33 dBm EIRP ground; they remain planning estimates until the
+underlying conducted power, gain, loss, array method, and calibration are
+captured.
 
 The SL5200/LC5200 OEM Integration Manual v1.1 confirms the two-port SL5220
 power split as 1 W (30 dBm) per port. Its FCC 2.4 GHz modular profile permits

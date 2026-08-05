@@ -254,6 +254,11 @@ pub struct RadioNodeGroup {
     pub transmit_power: TransmitPowerMode,
     pub antenna_mask: u8,
     pub beamforming: bool,
+    /// Approximate installed-system EIRP supplied by the operator for planning.
+    /// This does not replace the conducted-power, antenna-gain, installation-
+    /// loss, or regulatory evidence required for hardware activation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_installed_eirp_dbm: Option<f64>,
     /// Optional measured usable UDP capacity for this installed radio,
     /// antenna, airframe, channel, and environment combination.
     pub field_calibrated_udp_capacity_bps: Option<u64>,
@@ -563,12 +568,8 @@ impl ArcRadioConfiguration {
             "average gateway load is only an even-share floor; validate the measured routing tree, retransmissions, multicast behavior, and per-link airtime"
                 .to_owned(),
         );
-        warnings.push(
-            "EIRP is unresolved until conducted transmit power, installed antenna gain, and cable/connector losses are known for each installation"
-                .to_owned(),
-        );
-
         let mut all_calibrated = true;
+        let mut all_eirp_estimated = true;
         for group in &self.fleet.groups {
             if !group.model.planning_supports(self.network.bandwidth_mhz) {
                 return Err(RadioConfigError::UnsupportedPlanningBandwidth {
@@ -612,12 +613,26 @@ impl ArcRadioConfiguration {
             if group.field_calibrated_udp_capacity_bps.is_none() {
                 all_calibrated = false;
             }
+            if let Some(eirp_dbm) = group.estimated_installed_eirp_dbm {
+                warnings.push(format!(
+                    "group {:?} uses approximately {eirp_dbm:.2} dBm installed EIRP for planning; underlying conducted power, antenna gain, installation loss, array method, and calibration remain activation gates",
+                    group.group_id
+                ));
+            } else {
+                all_eirp_estimated = false;
+            }
             if matches!(group.transmit_power, TransmitPowerMode::TargetDbm { dbm } if dbm < 10) {
                 warnings.push(format!(
                     "group {:?} targets less than 10 dBm; the API manual says actual output accuracy is specified only from 10-39 dBm",
                     group.group_id
                 ));
             }
+        }
+        if !all_eirp_estimated {
+            warnings.push(
+                "one or more groups lack even an estimated installed EIRP; link-budget planning remains incomplete"
+                    .to_owned(),
+            );
         }
         if !all_calibrated {
             warnings.push(
@@ -932,6 +947,15 @@ impl RadioNodeGroup {
                 self.group_id.clone(),
             ));
         }
+        if self
+            .estimated_installed_eirp_dbm
+            .is_some_and(|eirp| !eirp.is_finite() || !(-20.0..=80.0).contains(&eirp))
+        {
+            return Err(RadioConfigError::InvalidEstimatedEirp {
+                group_id: self.group_id.clone(),
+                eirp_dbm: self.estimated_installed_eirp_dbm.unwrap_or_default(),
+            });
+        }
         Ok(())
     }
 
@@ -1192,6 +1216,8 @@ pub enum RadioConfigError {
     },
     #[error("radio group {0:?} field-calibrated capacity must be positive")]
     InvalidCalibratedCapacity(String),
+    #[error("radio group {group_id:?} has invalid estimated installed EIRP {eirp_dbm} dBm")]
+    InvalidEstimatedEirp { group_id: String, eirp_dbm: f64 },
     #[error("radio network requires at least one control-station or gateway node")]
     NoGateway,
     #[error("network ID must contain 1-32 alphanumeric, space, or hyphen characters")]
@@ -1273,6 +1299,7 @@ mod tests {
                         transmit_power: TransmitPowerMode::MaxSupported,
                         antenna_mask: 3,
                         beamforming: true,
+                        estimated_installed_eirp_dbm: Some(34.44),
                         field_calibrated_udp_capacity_bps: None,
                     },
                     RadioNodeGroup {
@@ -1286,6 +1313,7 @@ mod tests {
                         transmit_power: TransmitPowerMode::TargetDbm { dbm: 36 },
                         antenna_mask: 15,
                         beamforming: true,
+                        estimated_installed_eirp_dbm: Some(33.0),
                         field_calibrated_udp_capacity_bps: None,
                     },
                     RadioNodeGroup {
@@ -1299,6 +1327,7 @@ mod tests {
                         transmit_power: TransmitPowerMode::MaxSupported,
                         antenna_mask: 3,
                         beamforming: true,
+                        estimated_installed_eirp_dbm: Some(33.0),
                         field_calibrated_udp_capacity_bps: None,
                     },
                 ],
@@ -1323,6 +1352,21 @@ mod tests {
                 .count(),
             144
         );
+    }
+
+    #[test]
+    fn estimated_eirp_is_retained_but_reported_as_planning_only() {
+        let assessment = config(150).assess().unwrap();
+        assert!(assessment.warnings.iter().any(|warning| {
+            warning.contains("34.44 dBm installed EIRP") && warning.contains("activation gates")
+        }));
+
+        let mut invalid = config(150);
+        invalid.fleet.groups[0].estimated_installed_eirp_dbm = Some(100.0);
+        assert!(matches!(
+            invalid.assess(),
+            Err(RadioConfigError::InvalidEstimatedEirp { .. })
+        ));
     }
 
     #[test]

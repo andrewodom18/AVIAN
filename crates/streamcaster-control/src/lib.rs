@@ -814,6 +814,7 @@ mod tests {
                         transmit_power: TransmitPowerMode::TargetDbm { dbm: 27 },
                         antenna_mask: 3,
                         beamforming: true,
+                        estimated_installed_eirp_dbm: Some(34.44),
                         field_calibrated_udp_capacity_bps: None,
                     },
                     RadioNodeGroup {
@@ -827,6 +828,7 @@ mod tests {
                         transmit_power: TransmitPowerMode::MaxSupported,
                         antenna_mask: 15,
                         beamforming: true,
+                        estimated_installed_eirp_dbm: Some(33.0),
                         field_calibrated_udp_capacity_bps: None,
                     },
                 ],

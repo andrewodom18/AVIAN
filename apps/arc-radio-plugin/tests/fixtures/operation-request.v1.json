@@ -30,6 +30,7 @@
           "transmit_power": { "mode": "max_supported" },
           "antenna_mask": 3,
           "beamforming": true,
+          "estimated_installed_eirp_dbm": 34.44,
           "field_calibrated_udp_capacity_bps": null
         },
         {
@@ -43,6 +44,7 @@
           "transmit_power": { "mode": "max_supported" },
           "antenna_mask": 15,
           "beamforming": true,
+          "estimated_installed_eirp_dbm": 33.0,
           "field_calibrated_udp_capacity_bps": null
         }
       ]

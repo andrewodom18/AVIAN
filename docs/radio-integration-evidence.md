@@ -7,6 +7,10 @@ country, antenna, or airframe.
 
 ## Radio expert evidence
 
+Current planning inputs are approximately 34.44 dBm installed EIRP airborne
+and 33 dBm installed EIRP ground. Preserve these as estimates until the
+following evidence reconstructs and validates each value per active RF path.
+
 Capture the following for one representative unit of every 4200, 4400, and
 5200 variant before hardware apply is enabled:
 
