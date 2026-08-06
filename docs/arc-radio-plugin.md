@@ -45,6 +45,11 @@ sidecar republishes synchronized records onto its local Zenoh session. The
 ground-side view can therefore aggregate actual reports without inventing node
 counts, positions, spacing, or radio links.
 
+Local effective-radio observations and fleet mesh observations use separate
+Zenoh topics. Only the local five-second radio read can refresh ARC bearer
+health; a synchronized observation from another node cannot make the local
+bearer appear present.
+
 ARC Link Manager aggregates fresh observations for 30 seconds and exposes them
 through dev-bridge at `GET /api/radio/streamcaster/mesh`. Zero observed nodes is
 valid. The response carries `capacity_requirement_nodes: 150` and

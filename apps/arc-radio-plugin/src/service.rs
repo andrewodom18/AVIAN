@@ -29,7 +29,8 @@ use super::Args;
 const TOPIC_FLEET_PLAN: &str = "local/link/radio/streamcaster/fleet-plan/v1";
 const TOPIC_DESIRED: &str = "local/link/radio/streamcaster/desired/v1";
 const TOPIC_STATUS: &str = "local/link/radio/streamcaster/status/v1";
-const TOPIC_OBSERVATIONS: &str = "local/link/radio/streamcaster/observations/v1";
+const TOPIC_EFFECTIVE_OBSERVATIONS: &str = "local/link/radio/streamcaster/observations/v1";
+const TOPIC_MESH_OBSERVATIONS: &str = "local/link/radio/streamcaster/mesh-observations/v1";
 const TOPIC_HEALTH: &str = "local/link/radio/streamcaster/plugin-health";
 const TOPIC_TELEMETRY: &str = "local/telemetry";
 const ARC_AUTHORIZATION_MAX_AGE_MS: u64 = 5 * 60 * 1_000;
@@ -198,7 +199,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                 if let Some(observation) = status.effective.as_ref() {
                     let _ = session
                         .put(
-                            TOPIC_OBSERVATIONS,
+                            TOPIC_EFFECTIVE_OBSERVATIONS,
                             serde_json::to_vec(observation).unwrap_or_default(),
                         )
                         .await;
@@ -245,7 +246,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                 for observation in peat_mesh_observations(peat_node).await? {
                     let _ = session
                         .put(
-                            TOPIC_OBSERVATIONS,
+                            TOPIC_MESH_OBSERVATIONS,
                             serde_json::to_vec(&observation).unwrap_or_default(),
                         )
                         .await;
@@ -256,10 +257,18 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     state.write().await.latest_mesh_observation = serde_json::to_value(&observation).ok();
                     let _ = session
                         .put(
-                            TOPIC_OBSERVATIONS,
+                            TOPIC_MESH_OBSERVATIONS,
                             serde_json::to_vec(&observation).unwrap_or_default(),
                         )
                         .await;
+                    if observation.node.status == StreamCasterObservedStatus::Online {
+                        let _ = session
+                            .put(
+                                TOPIC_EFFECTIVE_OBSERVATIONS,
+                                serde_json::to_vec(&effective_observation(&observation)).unwrap_or_default(),
+                            )
+                            .await;
+                    }
                     persist_mesh_observation(&state, &observation).await;
                 }
             }
@@ -883,6 +892,22 @@ fn observed_position(payload: &[u8], received_at_ms: u64) -> Option<StreamCaster
     })
 }
 
+fn effective_observation(observation: &StreamCasterMeshObservation) -> serde_json::Value {
+    json!({
+        "observed_at_ms": observation.observed_at_ms,
+        "node_id": observation.node.radio.node_id,
+        "system_name": observation.node.radio.system_name,
+        "network_id": observation.node.radio.network_id,
+        "center_frequency_mhz": observation.node.radio.center_frequency_mhz,
+        "bandwidth_mhz": observation.node.radio.bandwidth_mhz,
+        "link_distance_m": observation.node.radio.link_distance_m,
+        "antenna_mask": observation.node.radio.antenna_mask,
+        "transmit_power_dbm_per_port": observation.node.radio.transmit_power_dbm_per_port,
+        "model": observation.node.radio.model,
+        "firmware_version": observation.node.radio.firmware_version,
+    })
+}
+
 fn blocked_status(
     request: &StreamCasterOperationRequest,
     now_ms: u64,
@@ -1114,6 +1139,10 @@ mod tests {
             Some(Some(3_048.0))
         );
         assert!(observation.simulated);
+        let effective = effective_observation(&observation);
+        assert_eq!(effective["observed_at_ms"], 9_000);
+        assert_eq!(effective["system_name"], "air-017");
+        assert_eq!(effective["network_id"], "SIMULATOR-INITIAL");
 
         let stale_position = observe_local_mesh(&state, 40_001).await.unwrap();
         assert!(stale_position.node.position.is_none());

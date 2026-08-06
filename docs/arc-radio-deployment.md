@@ -30,16 +30,17 @@ deployment. Enable `arc_streamcaster_plugin_enabled` only after provisioning:
 
 Start one sidecar per locally attached StreamCaster. Supply that radio's actual
 management URL with `--radio-url`; the observation publisher exposes only its
-sanitized host/IP. Supply each intended PEAT relationship with one or more
+sanitized host/IP. Set `--source` to the stable ARC device identity used for
+that companion. Supply each intended PEAT relationship with one or more
 `--peat-peer ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a PEAT
 link connected only when the transport reports that endpoint as connected.
 Configured but disconnected peers remain visible as disconnected; no link is
 fabricated for an unobserved relationship.
 
 The peer address is the PEAT/ARC reachability address, which may differ from the
-StreamCaster management IP. Direct radio-neighbor RSSI, SNR, throughput, and
-geographic position stay unavailable until a documented vendor telemetry call
-or an ARC telemetry source supplies them. Operators must not treat the logical
-PEAT topology as a radio propagation map.
+StreamCaster management IP. Fresh fused ARC `local/telemetry` supplies node
+position when available. Direct radio-neighbor RSSI, SNR, and throughput stay
+unavailable until a documented vendor telemetry call supplies them. Operators
+must not treat the logical PEAT topology as a radio propagation map.
 
 Do not put credentials in ARC config, PEAT, compose variables, or logs.
