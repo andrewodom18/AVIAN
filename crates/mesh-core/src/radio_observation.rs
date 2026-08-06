@@ -60,6 +60,18 @@ pub struct StreamCasterPeerLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamCasterRfLink {
+    pub source_node_id: u32,
+    pub target_node_id: u32,
+    pub snr_db: Option<f64>,
+    #[serde(default)]
+    pub rssi_dbm: Vec<f64>,
+    pub tx_mcs: Option<u8>,
+    pub rx_mcs: Option<u8>,
+    pub observed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamCasterMeshObservation {
     pub schema_version: u16,
     pub observed_at_ms: u64,
@@ -68,5 +80,7 @@ pub struct StreamCasterMeshObservation {
     pub simulated: bool,
     pub node: StreamCasterObservedNode,
     pub links: Vec<StreamCasterPeerLink>,
+    #[serde(default)]
+    pub rf_links: Vec<StreamCasterRfLink>,
     pub error: Option<String>,
 }

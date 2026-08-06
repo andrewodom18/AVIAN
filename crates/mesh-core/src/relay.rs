@@ -787,7 +787,7 @@ impl MissionAllocation {
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum RelayPlanError {
-    #[error("relay planning supports formations of 5-200 aircraft, got {0}")]
+    #[error("relay planning supports formations of 5-1024 aircraft, got {0}")]
     UnsupportedSwarmSize(usize),
     #[error("relay planning coordinate is non-finite or outside latitude/longitude bounds")]
     InvalidCoordinate,

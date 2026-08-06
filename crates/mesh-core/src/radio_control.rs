@@ -147,6 +147,8 @@ pub struct StreamCasterEffectiveSettings {
     pub bandwidth_mhz: ChannelBandwidthMhz,
     pub link_distance_m: u32,
     pub antenna_mask: u8,
+    #[serde(default)]
+    pub max_power_enabled: Option<bool>,
     pub transmit_power_dbm_per_port: Option<u8>,
 }
 
@@ -156,6 +158,7 @@ pub enum StreamCasterOperationIntent {
     Validate,
     Prepare,
     Activate,
+    Confirm,
     Rollback,
 }
 
@@ -204,7 +207,10 @@ impl StreamCasterOperationRequest {
             ));
         }
         validate_identifier("request_id", &self.request_id)?;
-        if matches!(self.intent, StreamCasterOperationIntent::Activate) {
+        if matches!(
+            self.intent,
+            StreamCasterOperationIntent::Activate | StreamCasterOperationIntent::Confirm
+        ) {
             let authorization = self.arc_authorization.ok_or_else(|| {
                 StreamCasterControlError::InvalidActivation(
                     "ARC activation authorization is required".into(),
@@ -291,6 +297,7 @@ pub enum StreamCasterApplyPhase {
     Activating,
     Reconnecting,
     Verifying,
+    AwaitingConfirmation,
     Effective,
     Drifted,
     Failed,

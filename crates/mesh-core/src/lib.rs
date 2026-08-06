@@ -49,7 +49,8 @@ pub use radio_control::{
 pub use radio_observation::{
     StreamCasterMeshObservation, StreamCasterObservedNode, StreamCasterObservedPosition,
     StreamCasterObservedRadio, StreamCasterObservedStatus, StreamCasterPeerLink,
-    STREAMCASTER_CAPACITY_REQUIREMENT_NODES, STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
+    StreamCasterRfLink, STREAMCASTER_CAPACITY_REQUIREMENT_NODES,
+    STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
 };
 pub use relay::{
     AssignmentPool, GeoPoint, MissionAllocation, OperatorTaskGroup, RadioLinkBudget, RangeEvidence,

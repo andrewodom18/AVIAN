@@ -37,11 +37,15 @@ const ARC_AUTHORIZATION_MAX_AGE_MS: u64 = 5 * 60 * 1_000;
 const ARC_AUTHORIZATION_MAX_CLOCK_SKEW_MS: u64 = 5_000;
 const POSITION_FRESH_MS: u64 = 30_000;
 const PEAT_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const VOLATILE_CONFIRMATION_WINDOW_MS: u64 = 60_000;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialFile {
-    method: String,
+    /// Accepted for compatibility with the v1 credential file. StreamCaster
+    /// password authentication is always performed through /login.sh.
+    #[serde(default, rename = "method")]
+    _method: Option<String>,
     username: String,
     password: String,
 }
@@ -73,7 +77,7 @@ struct AntennaEvidence {
 #[derive(Clone)]
 enum Backend {
     ContractOnly,
-    LiveReadOnly(StreamCasterClient),
+    Live(Box<StreamCasterClient>),
     Simulator(SimulatedStreamCaster),
 }
 
@@ -85,6 +89,8 @@ struct ServiceState {
     installation_evidence_dir: Option<PathBuf>,
     regulatory_evidence_file: Option<PathBuf>,
     prepared: Option<PreparedStreamCasterTransaction>,
+    pending_activation: Option<StreamCasterOperationRequest>,
+    confirmation_deadline_ms: Option<u64>,
     latest_status: Option<StreamCasterOperationStatus>,
     latest_plan_generation: Option<u64>,
     latest_mesh_observation: Option<serde_json::Value>,
@@ -110,7 +116,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
     let backend = if args.simulate_radio {
         Backend::ContractOnly
     } else if let Some(url) = args.radio_url.as_deref() {
-        Backend::LiveReadOnly(StreamCasterClient::new(url, auth)?)
+        Backend::Live(Box::new(StreamCasterClient::new(url, auth)?))
     } else {
         Backend::ContractOnly
     };
@@ -156,6 +162,8 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         installation_evidence_dir: args.installation_evidence_dir,
         regulatory_evidence_file: args.regulatory_evidence_file,
         prepared: None,
+        pending_activation: None,
+        confirmation_deadline_ms: None,
         latest_status: None,
         latest_plan_generation: None,
         latest_mesh_observation: None,
@@ -169,7 +177,9 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
     if args.simulate_radio {
         tracing::warn!("StreamCaster simulator enabled; no physical radio writes are possible");
     } else {
-        tracing::info!("StreamCaster sidecar started with live writes disabled");
+        tracing::info!(
+            "StreamCaster sidecar started; live writes require every ARC and hardware evidence gate"
+        );
     }
 
     let mut peat_poll = tokio::time::interval(Duration::from_secs(2));
@@ -212,14 +222,14 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     let state = state.read().await;
                     let backend = match &state.backend {
                         Backend::ContractOnly => "contract_only",
-                        Backend::LiveReadOnly(_) => "live_read_only",
+                        Backend::Live(_) => "live_gated",
                         Backend::Simulator(_) => "simulator",
                     };
                     json!({
                         "status": "healthy",
                         "schema_version": STREAMCASTER_CONTROL_SCHEMA_VERSION,
                         "backend": backend,
-                        "live_writes_enabled": false,
+                        "live_write_adapter_available": matches!(state.backend, Backend::Live(_)),
                         "credential_resolved": state.credential_resolved,
                         "peat_enabled": state.peat.is_some(),
                         "fleet_generation": state.latest_plan_generation,
@@ -255,6 +265,12 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                 }
             }
             _ = mesh_poll.tick() => {
+                if let Some(status) = rollback_expired_activation(&state, now_unix_ms()).await {
+                    state.write().await.latest_status = Some(status.clone());
+                    let _ = session
+                        .put(TOPIC_STATUS, serde_json::to_vec(&status).unwrap_or_default())
+                        .await;
+                }
                 if let Some(observation) = observe_local_mesh(&state, now_unix_ms()).await {
                     state.write().await.latest_mesh_observation = serde_json::to_value(&observation).ok();
                     let _ = session
@@ -293,8 +309,32 @@ async fn process_operation(
         return failed_status(&request, now_ms, "invalid_operation", error.to_string());
     }
 
-    if matches!(request.intent, StreamCasterOperationIntent::Activate) {
-        return activate_simulated(state, request, now_ms).await;
+    match request.intent {
+        StreamCasterOperationIntent::Activate => {
+            return activate_prepared(state, request, now_ms).await;
+        }
+        StreamCasterOperationIntent::Confirm => {
+            return confirm_prepared(state, request, now_ms).await;
+        }
+        StreamCasterOperationIntent::Rollback => {
+            return rollback_prepared(state, request, now_ms).await;
+        }
+        StreamCasterOperationIntent::Validate | StreamCasterOperationIntent::Prepare => {}
+    }
+
+    let configured_management = state.read().await.management_address.clone();
+    if let Some(configured_management) = configured_management {
+        let requested_management = management_host(&request.assignment.management_address)
+            .unwrap_or_else(|| request.assignment.management_address.clone());
+        if configured_management != requested_management {
+            return blocked_status(
+                &request,
+                now_ms,
+                StreamCasterActivationGates::default(),
+                "management_binding_mismatch",
+                "The sidecar radio endpoint does not match the canonical ARC management address.",
+            );
+        }
     }
 
     persist_plan(state, &request.fleet_plan, now_ms).await;
@@ -320,7 +360,7 @@ async fn process_operation(
         let state = state.read().await;
         match &state.backend {
             Backend::ContractOnly => 0,
-            Backend::LiveReadOnly(_) => 1,
+            Backend::Live(_) => 1,
             Backend::Simulator(_) => 2,
         }
     };
@@ -338,10 +378,21 @@ async fn process_operation(
     let prepared = {
         let state_guard = state.read().await;
         match &state_guard.backend {
-            Backend::LiveReadOnly(client) => {
-                StreamCasterTransactionEngine::new(client.clone())
+            Backend::Live(client) => {
+                let prepared = StreamCasterTransactionEngine::new(client.as_ref().clone())
                     .prepare(&request.fleet_plan, &request.assignment, evidence, now_ms)
-                    .await
+                    .await;
+                match prepared {
+                    Ok(mut prepared) => {
+                        if request.fleet_plan.network.encryption_required
+                            && !matches!(client.encryption_enabled().await, Ok(true))
+                        {
+                            prepared.gates.live_capability_match = false;
+                        }
+                        Ok(prepared)
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Backend::Simulator(simulator) => {
                 StreamCasterTransactionEngine::new(simulator.clone())
@@ -393,27 +444,14 @@ async fn process_operation(
     status
 }
 
-async fn activate_simulated(
+async fn activate_prepared(
     state: &Arc<RwLock<ServiceState>>,
     request: StreamCasterOperationRequest,
     now_ms: u64,
 ) -> StreamCasterOperationStatus {
     let (backend, prepared) = {
         let state = state.read().await;
-        let backend = match &state.backend {
-            Backend::Simulator(simulator) => Some(simulator.clone()),
-            _ => None,
-        };
-        (backend, state.prepared.clone())
-    };
-    let Some(simulator) = backend else {
-        return blocked_status(
-            &request,
-            now_ms,
-            StreamCasterActivationGates::default(),
-            "live_write_adapter_unverified",
-            "Live StreamCaster writes remain disabled until radio-in-the-loop verification is complete.",
-        );
+        (state.backend.clone(), state.prepared.clone())
     };
     let Some(prepared) = prepared else {
         return blocked_status(
@@ -421,7 +459,7 @@ async fn activate_simulated(
             now_ms,
             StreamCasterActivationGates::default(),
             "prepare_required",
-            "The simulator requires a matching prepared transaction before activation.",
+            "A matching prepared transaction is required before activation.",
         );
     };
     if prepared.generation != request.fleet_plan.generation {
@@ -451,7 +489,7 @@ async fn activate_simulated(
             "ARC activation authorization is expired or outside the allowed clock skew.",
         );
     }
-    let Some(mut prepared) = state.write().await.prepared.take() else {
+    let Some(mut prepared) = state.read().await.prepared.clone() else {
         return blocked_status(
             &request,
             now_ms,
@@ -463,30 +501,231 @@ async fn activate_simulated(
     prepared.gates.known_landed = authorization.known_landed;
     prepared.gates.preserves_control_bearer = authorization.preserves_control_bearer;
     prepared.gates.hardware_apply_enabled = request.assignment.hardware_apply_enabled;
-    let result = StreamCasterTransactionEngine::new(simulator)
-        .apply_simulated(prepared.clone(), request.activation, now_ms)
-        .await;
+    let live = matches!(backend, Backend::Live(_));
+    let result = match backend {
+        Backend::Live(client) => {
+            StreamCasterTransactionEngine::new(*client)
+                .apply_live(&prepared, request.activation, now_ms)
+                .await
+        }
+        Backend::Simulator(simulator) => {
+            StreamCasterTransactionEngine::new(simulator)
+                .apply_simulated(prepared.clone(), request.activation, now_ms)
+                .await
+        }
+        Backend::ContractOnly => {
+            Err(streamcaster_control::StreamCasterError::ActivationGatesFailed)
+        }
+    };
     match result {
-        Ok(effective) => StreamCasterOperationStatus {
-            schema_version: STREAMCASTER_CONTROL_SCHEMA_VERSION,
-            request_id: request.request_id,
-            node_id: request.assignment.node_id,
-            generation: request.fleet_plan.generation,
-            observed_at_ms: now_ms,
-            phase: StreamCasterApplyPhase::Effective,
-            gates: prepared.gates,
-            capabilities: None,
-            effective: Some(effective),
-            error_code: None,
-            message: Some("Simulated transaction applied and verified.".into()),
-        },
-        Err(error) => failed_status(
+        Ok(effective) => {
+            if live {
+                let mut mutable = state.write().await;
+                mutable.pending_activation = Some(request.clone());
+                mutable.confirmation_deadline_ms =
+                    Some(now_ms.saturating_add(VOLATILE_CONFIRMATION_WINDOW_MS));
+            }
+            StreamCasterOperationStatus {
+                schema_version: STREAMCASTER_CONTROL_SCHEMA_VERSION,
+                request_id: request.request_id,
+                node_id: request.assignment.node_id,
+                generation: request.fleet_plan.generation,
+                observed_at_ms: now_ms,
+                phase: if live {
+                    StreamCasterApplyPhase::AwaitingConfirmation
+                } else {
+                    StreamCasterApplyPhase::Effective
+                },
+                gates: prepared.gates,
+                capabilities: None,
+                effective: Some(effective),
+                error_code: None,
+                message: Some(if live {
+                    "Volatile radio settings applied and verified; operator confirmation is required before persistence."
+                    .into()
+                } else {
+                    "Simulated transaction applied and verified.".into()
+                }),
+            }
+        }
+        Err(error) => failed_status(&request, now_ms, "radio_apply_failed", error.to_string()),
+    }
+}
+
+async fn confirm_prepared(
+    state: &Arc<RwLock<ServiceState>>,
+    request: StreamCasterOperationRequest,
+    now_ms: u64,
+) -> StreamCasterOperationStatus {
+    let (backend, prepared) = {
+        let state = state.read().await;
+        (state.backend.clone(), state.prepared.clone())
+    };
+    let Some(prepared) = prepared else {
+        return blocked_status(
             &request,
             now_ms,
-            "simulated_apply_failed",
-            error.to_string(),
-        ),
+            StreamCasterActivationGates::default(),
+            "prepare_required",
+            "No matching volatile radio transaction is awaiting confirmation.",
+        );
+    };
+    if prepared.generation != request.fleet_plan.generation {
+        return blocked_status(
+            &request,
+            now_ms,
+            prepared.gates,
+            "prepared_generation_mismatch",
+            "The prepared transaction does not match the requested generation.",
+        );
     }
+    let Some(authorization) = request.arc_authorization else {
+        return blocked_status(
+            &request,
+            now_ms,
+            prepared.gates,
+            "arc_authorization_required",
+            "Fresh ARC authorization is required before volatile settings can be persisted.",
+        );
+    };
+    if !arc_authorization_is_fresh(authorization, now_ms) {
+        return blocked_status(
+            &request,
+            now_ms,
+            prepared.gates,
+            "arc_authorization_expired",
+            "ARC authorization is expired or outside the allowed clock skew; volatile settings were not persisted.",
+        );
+    }
+    let result = match backend {
+        Backend::Live(client) => {
+            StreamCasterTransactionEngine::new(*client)
+                .confirm_and_persist(&prepared, now_ms)
+                .await
+        }
+        Backend::Simulator(simulator) => simulator.read_effective_settings(now_ms).await,
+        Backend::ContractOnly => {
+            Err(streamcaster_control::StreamCasterError::ActivationGatesFailed)
+        }
+    };
+    match result {
+        Ok(effective) => {
+            let mut mutable = state.write().await;
+            mutable.prepared = None;
+            mutable.pending_activation = None;
+            mutable.confirmation_deadline_ms = None;
+            drop(mutable);
+            StreamCasterOperationStatus {
+                schema_version: STREAMCASTER_CONTROL_SCHEMA_VERSION,
+                request_id: request.request_id,
+                node_id: request.assignment.node_id,
+                generation: request.fleet_plan.generation,
+                observed_at_ms: now_ms,
+                phase: StreamCasterApplyPhase::Effective,
+                gates: prepared.gates,
+                capabilities: None,
+                effective: Some(effective),
+                error_code: None,
+                message: Some("Radio settings verified and persisted to flash.".into()),
+            }
+        }
+        Err(error) => failed_status(&request, now_ms, "radio_persist_failed", error.to_string()),
+    }
+}
+
+async fn rollback_prepared(
+    state: &Arc<RwLock<ServiceState>>,
+    request: StreamCasterOperationRequest,
+    now_ms: u64,
+) -> StreamCasterOperationStatus {
+    let (backend, prepared) = {
+        let state = state.read().await;
+        (state.backend.clone(), state.prepared.clone())
+    };
+    let Some(prepared) = prepared else {
+        return blocked_status(
+            &request,
+            now_ms,
+            StreamCasterActivationGates::default(),
+            "prepare_required",
+            "No matching radio transaction is available to roll back.",
+        );
+    };
+    let result = match backend {
+        Backend::Live(client) => {
+            StreamCasterTransactionEngine::new(*client)
+                .rollback_live(&prepared, now_ms)
+                .await
+        }
+        Backend::Simulator(simulator) => {
+            use streamcaster_control::SimulatedStreamCasterWriteApi;
+            simulator
+                .restore_effective_settings(prepared.snapshot.clone())
+                .await
+                .map(|_| prepared.snapshot.clone())
+        }
+        Backend::ContractOnly => {
+            Err(streamcaster_control::StreamCasterError::ActivationGatesFailed)
+        }
+    };
+    match result {
+        Ok(effective) => {
+            let mut mutable = state.write().await;
+            mutable.prepared = None;
+            mutable.pending_activation = None;
+            mutable.confirmation_deadline_ms = None;
+            drop(mutable);
+            StreamCasterOperationStatus {
+                schema_version: STREAMCASTER_CONTROL_SCHEMA_VERSION,
+                request_id: request.request_id,
+                node_id: request.assignment.node_id,
+                generation: request.fleet_plan.generation,
+                observed_at_ms: now_ms,
+                phase: StreamCasterApplyPhase::RolledBack,
+                gates: prepared.gates,
+                capabilities: None,
+                effective: Some(effective),
+                error_code: None,
+                message: Some("Radio settings restored to the captured snapshot.".into()),
+            }
+        }
+        Err(error) => failed_status(&request, now_ms, "radio_rollback_failed", error.to_string()),
+    }
+}
+
+async fn rollback_expired_activation(
+    state: &Arc<RwLock<ServiceState>>,
+    now_ms: u64,
+) -> Option<StreamCasterOperationStatus> {
+    let request = {
+        let current = state.read().await;
+        let expired = current
+            .confirmation_deadline_ms
+            .is_some_and(|deadline| now_ms >= deadline);
+        if !expired {
+            return None;
+        }
+        current.pending_activation.clone()
+    }?;
+    {
+        // Claim the timeout so only one timer tick performs the rollback.
+        let mut current = state.write().await;
+        current.confirmation_deadline_ms = None;
+    }
+    let mut rollback = request;
+    rollback.intent = StreamCasterOperationIntent::Rollback;
+    rollback.request_id = format!("{}-deadman-rollback", rollback.request_id);
+    let mut status = rollback_prepared(state, rollback, now_ms).await;
+    status.message = Some(if status.phase == StreamCasterApplyPhase::RolledBack {
+        "Operator confirmation was not received within 60 seconds; volatile settings were rolled back automatically.".into()
+    } else {
+        "Operator confirmation timed out and automatic rollback did not complete; manual recovery is required.".into()
+    });
+    if status.phase != StreamCasterApplyPhase::RolledBack {
+        status.phase = StreamCasterApplyPhase::RecoveryRequired;
+        status.error_code = Some("deadman_rollback_failed".into());
+    }
+    Some(status)
 }
 
 fn arc_authorization_is_fresh(authorization: ArcActivationAuthorization, now_ms: u64) -> bool {
@@ -504,7 +743,7 @@ async fn read_capabilities(
 ) -> Result<StreamCasterCapabilities, streamcaster_control::StreamCasterError> {
     let state = state.read().await;
     match &state.backend {
-        Backend::LiveReadOnly(client) => client.read_capabilities(now_ms).await,
+        Backend::Live(client) => client.read_capabilities(now_ms).await,
         Backend::Simulator(simulator) => simulator.read_capabilities(now_ms).await,
         Backend::ContractOnly => unreachable!(),
     }
@@ -672,14 +911,10 @@ fn load_auth(path: Option<&Path>) -> anyhow::Result<StreamCasterAuth> {
         .with_context(|| format!("read StreamCaster credential file {}", path.display()))?;
     let credential: CredentialFile = serde_json::from_slice(&encoded)
         .with_context(|| format!("parse StreamCaster credential file {}", path.display()))?;
-    if credential.method.trim().is_empty()
-        || credential.username.trim().is_empty()
-        || credential.password.is_empty()
-    {
-        bail!("StreamCaster credential method, username, and password are required");
+    if credential.username.trim().is_empty() || credential.password.is_empty() {
+        bail!("StreamCaster credential username and password are required");
     }
-    Ok(StreamCasterAuth::PasswordRpc {
-        method: credential.method,
+    Ok(StreamCasterAuth::Password {
         username: credential.username,
         password: credential.password,
     })
@@ -801,22 +1036,32 @@ async fn observe_local_mesh(
         )
     };
 
-    let (capabilities, effective, error, simulated) = match backend {
+    let (capabilities, effective, rf_links, error, simulated) = match backend {
         Backend::ContractOnly => return None,
-        Backend::LiveReadOnly(api) => {
+        Backend::Live(api) => {
             let capabilities = api.read_capabilities(observed_at_ms).await;
             let effective = api.read_effective_settings(observed_at_ms).await;
+            let rf_links = api
+                .read_rf_links(
+                    effective
+                        .as_ref()
+                        .ok()
+                        .and_then(|settings| settings.node_id),
+                    observed_at_ms,
+                )
+                .await
+                .unwrap_or_default();
             let error = capabilities
                 .as_ref()
                 .err()
                 .map(ToString::to_string)
                 .or_else(|| effective.as_ref().err().map(ToString::to_string));
-            (capabilities.ok(), effective.ok(), error, false)
+            (capabilities.ok(), effective.ok(), rf_links, error, false)
         }
         Backend::Simulator(api) => {
             let capabilities = api.read_capabilities(observed_at_ms).await.ok();
             let effective = api.read_effective_settings(observed_at_ms).await.ok();
-            (capabilities, effective, None, true)
+            (capabilities, effective, Vec::new(), None, true)
         }
     };
 
@@ -892,6 +1137,7 @@ async fn observe_local_mesh(
             },
         },
         links,
+        rf_links,
         error,
     })
 }
@@ -1032,6 +1278,10 @@ fn simulator_for(
         bandwidth_mhz: plan.network.bandwidth_mhz,
         link_distance_m: plan.network.link_distance_m.unwrap_or(1),
         antenna_mask: group.antenna_mask,
+        max_power_enabled: Some(matches!(
+            group.transmit_power,
+            TransmitPowerMode::MaxSupported
+        )),
         transmit_power_dbm_per_port: match group.transmit_power {
             TransmitPowerMode::MaxSupported => None,
             TransmitPowerMode::TargetDbm { dbm } => Some(dbm),
@@ -1167,6 +1417,7 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/operation-request.v1.json"))
                 .unwrap();
         request.assignment.hardware_apply_enabled = true;
+        request.assignment.management_address = "10.0.0.52".into();
         let simulator = simulator_for(&request.fleet_plan, &request.assignment).unwrap();
         let state = Arc::new(RwLock::new(ServiceState {
             source: NodeId::from("sim-node"),
@@ -1176,6 +1427,8 @@ mod tests {
             installation_evidence_dir: Some(evidence.path().to_path_buf()),
             regulatory_evidence_file: Some(regulatory_path),
             prepared: None,
+            pending_activation: None,
+            confirmation_deadline_ms: None,
             latest_status: None,
             latest_plan_generation: None,
             latest_mesh_observation: None,
@@ -1211,8 +1464,33 @@ mod tests {
         let stale_position = observe_local_mesh(&state, 40_001).await.unwrap();
         assert!(stale_position.node.position.is_none());
 
+        let mut wrong_binding = request.clone();
+        wrong_binding.assignment.management_address = "10.0.0.99".into();
+        let blocked = process_operation(&state, wrong_binding, 9_500).await;
+        assert_eq!(blocked.phase, StreamCasterApplyPhase::Blocked);
+        assert_eq!(
+            blocked.error_code.as_deref(),
+            Some("management_binding_mismatch")
+        );
+
         let prepared = process_operation(&state, request.clone(), 10_000).await;
         assert_eq!(prepared.phase, StreamCasterApplyPhase::Prepared);
+
+        let mut unauthorized_confirmation = request.clone();
+        unauthorized_confirmation.intent = StreamCasterOperationIntent::Confirm;
+        unauthorized_confirmation.arc_authorization = Some(ArcActivationAuthorization {
+            maintenance_window_authorized: true,
+            known_landed: true,
+            preserves_control_bearer: true,
+            authorized_at_ms: 1,
+        });
+        let blocked_confirmation =
+            process_operation(&state, unauthorized_confirmation, 400_001).await;
+        assert_eq!(blocked_confirmation.phase, StreamCasterApplyPhase::Blocked);
+        assert_eq!(
+            blocked_confirmation.error_code.as_deref(),
+            Some("arc_authorization_expired")
+        );
 
         request.intent = StreamCasterOperationIntent::Activate;
         request.activation = FleetActivationMechanism::Scheduled {
@@ -1237,12 +1515,25 @@ mod tests {
             preserves_control_bearer: true,
             authorized_at_ms: 10_500,
         });
-        let effective = process_operation(&state, request, 11_000).await;
+        let effective = process_operation(&state, request.clone(), 11_000).await;
 
         assert_eq!(effective.phase, StreamCasterApplyPhase::Effective);
         assert_eq!(
             effective.effective.unwrap().network_id,
             "ARC-RADIO".to_owned()
         );
+
+        {
+            let mut current = state.write().await;
+            current.pending_activation = Some(request);
+            current.confirmation_deadline_ms = Some(12_000);
+        }
+        let deadman = rollback_expired_activation(&state, 12_000).await.unwrap();
+        assert_eq!(deadman.phase, StreamCasterApplyPhase::RolledBack);
+        assert!(deadman
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("confirmation was not received"));
     }
 }

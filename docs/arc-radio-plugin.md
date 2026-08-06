@@ -27,8 +27,8 @@ an ARC sidecar. The compatibility tool still validates legacy grouped planning
 documents, but groups, percentages, average spacing, and generated topology are
 not operational inventory.
 
-In `--serve` mode the sidecar polls its configured radio with the documented
-read-only `supported_frequency_profiles` and `print_all_settings` calls every
+In `--serve` mode the sidecar polls its configured radio with documented
+read-only capability, effective-setting, and neighbor telemetry calls every
 five seconds. It publishes a versioned observation containing:
 
 - the real local management IP, stripped of credentials and URL paths;
@@ -36,6 +36,7 @@ five seconds. It publishes a versioned observation containing:
   antenna mask, transmit power, firmware, and model when the radio reports them;
 - the local PEAT endpoint and actual connected-peer count; and
 - configured PEAT peer addresses with a live connected/disconnected state; and
+- direct RF neighbor SNR, RSSI, and transmit/receive MCS when reported; and
 - the current fused ARC `local/telemetry` position when it is no more than 30
   seconds old. Raw GPS is not substituted for missing fused position data.
 
@@ -136,13 +137,15 @@ instantaneous EIRP.
 
 ## Security and hardware gate
 
-PEAT records intentionally omit credentials and cryptographic keys. The
-eventual hardware executor must receive secrets from local Arc-managed secret
-storage, use the password-authenticated API session, refresh the expiring
-cookie, serialize disruptive calls, and re-read effective state after every
-reconnect.
+PEAT records intentionally omit credentials and cryptographic keys. The live
+adapter receives credentials only from local protected storage, authenticates
+through `/login.sh`, adopts rolling cookies, serializes its allowlisted calls,
+and re-reads effective state after reconnect. Encryption validation queries
+only the non-secret enabled/disabled state and never reads key material.
 
-This branch does not send commands to real radios. Live discovery is read-only.
-Hardware apply remains
-gated on representative 4200, 4400, and 5200 units, live capability captures,
-and radio-in-the-loop tests.
+The live adapter is implemented, but canonical hardware apply defaults off.
+An authorized apply changes volatile state first. Explicit confirmation is
+required before individual settings are persisted; a 60-second confirmation
+timeout attempts verified snapshot rollback. Hardware apply remains gated on
+representative 4200, 4400, and 5200 units, live capability captures, and
+radio-in-the-loop tests.

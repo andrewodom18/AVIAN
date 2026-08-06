@@ -1162,7 +1162,7 @@ fn ranked_probe_candidates(
 pub enum RelayRuntimeError {
     #[error("in-flight relay planning requires a positive mission generation")]
     InvalidMissionGeneration,
-    #[error("in-flight relay planning supports formations of 5-200 aircraft, got {0}")]
+    #[error("in-flight relay planning supports formations of 5-1024 aircraft, got {0}")]
     UnsupportedSwarmSize(usize),
     #[error("duplicate live relay candidate {0}")]
     DuplicateCandidate(NodeId),

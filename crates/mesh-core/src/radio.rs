@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{NodeId, MAX_SUPPORTED_SWARM_SIZE, MIN_SUPPORTED_SWARM_SIZE, SYSTEM_MAX_MSL_FT};
+use crate::{NodeId, MAX_SUPPORTED_SWARM_SIZE, SYSTEM_MAX_MSL_FT};
 
 pub const RADIO_CONFIG_SCHEMA_VERSION: u16 = 1;
 pub const RADIO_VALIDATION_TARGET_NODES: usize = 150;
@@ -842,7 +842,9 @@ impl StreamCasterNetworkSettings {
 
 impl RadioFleetDefinition {
     pub fn expand(&self) -> Result<Vec<RadioNodeAssignment>, RadioConfigError> {
-        if !(MIN_SUPPORTED_SWARM_SIZE..=MAX_SUPPORTED_SWARM_SIZE).contains(&self.total_nodes) {
+        // A real deployment may be commissioned incrementally. The 150-node
+        // requirement is a validation target, not a minimum live inventory.
+        if !(1..=MAX_SUPPORTED_SWARM_SIZE).contains(&self.total_nodes) {
             return Err(RadioConfigError::UnsupportedNodeCount(self.total_nodes));
         }
         if self.groups.is_empty() {
@@ -1167,7 +1169,7 @@ pub enum RadioConfigError {
     ZeroGeneration,
     #[error("only Arc may author the desired radio configuration")]
     WrongAuthority,
-    #[error("radio fleet must contain between 5 and 200 nodes, got {0}")]
+    #[error("radio fleet must contain between 1 and 1024 explicitly enrolled nodes, got {0}")]
     UnsupportedNodeCount(usize),
     #[error("radio fleet must contain at least one group")]
     EmptyGroups,
@@ -1474,11 +1476,11 @@ mod tests {
     }
 
     #[test]
-    fn supports_two_hundred_nodes_but_not_more() {
-        assert_eq!(config(200).assess().unwrap().node_count, 200);
+    fn supports_one_thousand_twenty_four_enrollments_but_not_more() {
+        assert_eq!(config(1_024).assess().unwrap().node_count, 1_024);
         assert_eq!(
-            config(201).assess().unwrap_err(),
-            RadioConfigError::UnsupportedNodeCount(201)
+            config(1_025).assess().unwrap_err(),
+            RadioConfigError::UnsupportedNodeCount(1_025)
         );
     }
 
