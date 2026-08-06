@@ -53,6 +53,57 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
 | `arc-radio-plugin` | Arc-authoritative StreamCaster validation, traffic assessment, PEAT encoding, and dry-run API sequencing |
 
+## ARC and StreamCaster integration
+
+ARC remains the authority for desired radio configuration. The AVIAN
+`arc-radio-plugin` validates that configuration, reads the effective state of
+the locally attached radio, publishes live observations to ARC, and
+synchronizes accepted configuration and mesh state through PEAT. It does not
+write ARC's canonical configuration or communicate with a flight controller.
+
+The current integration provides:
+
+- StreamCaster 4200, 4400, and SL5200-family profiles, including capability-
+  checked 5, 10, and 20 MHz operation;
+- live radio identity, frequency, bandwidth, network, power, firmware, and
+  direct-neighbor signal observations when the radio reports them;
+- real node enrollment and connected PEAT-peer inventory without generated
+  nodes, estimated spacing, or fabricated links;
+- a network capacity qualification target of at least 150 nodes, which is not
+  treated as a minimum active node count; and
+- guarded validate, activate, confirm, and rollback operations. Hardware apply
+  is disabled by default and confirmation is required before volatile settings
+  are persisted.
+
+Zero connected radios is a valid local state. ARC should show an empty live
+mesh instead of treating the absence of hardware as a service failure.
+
+Validate the integration without radio hardware:
+
+```sh
+cargo test --workspace
+cargo run -p arc-radio-plugin -- \
+  --input examples/arc-radio-plugin-request.sample.json
+```
+
+On Linux, or in an ARC development container with the ARC Zenoh socket mounted,
+the sidecar can use its in-process StreamCaster simulator:
+
+```sh
+cargo run -p arc-radio-plugin -- \
+  --serve \
+  --simulate-radio \
+  --source avian/local-sim \
+  --zenoh-endpoint unixsock-stream//run/arc/zenoh.sock
+```
+
+The complete local ARC application also requires ARC `comms`, Link Manager,
+`dev-bridge`, and the ARC UI. Docker Engine or Docker Desktop with Linux
+containers is the recommended Windows development environment. See the
+[radio-plugin guide](docs/arc-radio-plugin.md) and
+[deployment guide](docs/arc-radio-deployment.md) before connecting or changing
+physical radios.
+
 ## Run
 
 With Rust 1.91.1 installed:
