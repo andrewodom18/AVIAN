@@ -148,3 +148,5 @@ The [ARC UI relay-planning guide](docs/arc-ui-relay-planning.md) defines
 automatic relay reservation, manual overrides, and individual/group tasks.
 The [traffic-management guide](docs/traffic-management.md) defines routine,
 priority, radio-observation, and operator-summary traffic bounds.
+The [brand assets](assets/brand/README.md) contain the AVIAN mark in
+black-on-white and white-on-black variants.
