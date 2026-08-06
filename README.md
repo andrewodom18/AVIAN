@@ -80,6 +80,9 @@ The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
 The [Arc radio-plugin guide](docs/arc-radio-plugin.md) defines the local
 Arc-to-AVIAN ownership boundary and the 4200/4400/5200 configuration contract.
+The [radio mesh bootstrap guide](docs/arc-radio-bootstrap.md) generates
+deterministic PEAT identities and ARC-ready bounded peer maps before surrogate
+deployment.
 The [radio integration evidence checklist](docs/radio-integration-evidence.md)
 lists the radio, antenna, airframe, and traffic facts required before live
 hardware apply or mission-ready range claims.

@@ -56,6 +56,11 @@ valid. The response carries `capacity_requirement_nodes: 150` and
 `capacity_verification: not_yet_field_verified`; it never claims that the
 currently observed node count proves the capacity requirement.
 
+The offline [radio mesh bootstrap command](arc-radio-bootstrap.md) derives
+stable PEAT endpoint IDs from the protected formation key and inventory node
+names, then emits a reviewed, bounded peer map plus ARC Ansible host variables.
+It never scans the network, deploys a surrogate, or writes a radio.
+
 The compatibility tool:
 
 1. validates the Arc-owned network and grouped fleet configuration;

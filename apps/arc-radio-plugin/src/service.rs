@@ -36,6 +36,7 @@ const TOPIC_TELEMETRY: &str = "local/telemetry";
 const ARC_AUTHORIZATION_MAX_AGE_MS: u64 = 5 * 60 * 1_000;
 const ARC_AUTHORIZATION_MAX_CLOCK_SKEW_MS: u64 = 5_000;
 const POSITION_FRESH_MS: u64 = 30_000;
+const PEAT_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,8 +232,9 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     .await;
             }
             _ = peat_poll.tick(), if peat.is_some() => {
-                let peat_node = peat.as_deref().expect("guarded PEAT node");
-                if let Some(plan) = newest_peat_plan(peat_node).await? {
+                let peat_node = Arc::clone(peat.as_ref().expect("guarded PEAT node"));
+                reconnect_peat_peers(Arc::clone(&peat_node), &state).await;
+                if let Some(plan) = newest_peat_plan(peat_node.as_ref()).await? {
                     let generation = plan.generation;
                     let should_publish = state.read().await.latest_plan_generation
                         .is_none_or(|current| generation > current);
@@ -243,7 +245,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                             .await;
                     }
                 }
-                for observation in peat_mesh_observations(peat_node).await? {
+                for observation in peat_mesh_observations(peat_node.as_ref()).await? {
                     let _ = session
                         .put(
                             TOPIC_MESH_OBSERVATIONS,
@@ -730,10 +732,39 @@ async fn start_peat(args: &Args) -> anyhow::Result<(Option<Arc<PeatNode>>, Vec<P
     let mut peers = Vec::with_capacity(args.peat_peer.len());
     for peer in &args.peat_peer {
         let peer: PeerDescriptor = peer.parse()?;
-        peat.connect(&peer).await?;
         peers.push(peer);
     }
     Ok((Some(peat), peers))
+}
+
+async fn reconnect_peat_peers(peat: Arc<PeatNode>, state: &Arc<RwLock<ServiceState>>) {
+    let peers = state.read().await.peat_peers.clone();
+    let mut attempts = tokio::task::JoinSet::new();
+    for peer in peers {
+        if peat.is_peer_connected(&peer) {
+            continue;
+        }
+        let peat = Arc::clone(&peat);
+        attempts.spawn(async move {
+            let name = peer.name.clone();
+            let result = tokio::time::timeout(PEAT_RECONNECT_TIMEOUT, peat.connect(&peer)).await;
+            (name, result)
+        });
+    }
+    while let Some(attempt) = attempts.join_next().await {
+        match attempt {
+            Ok((_, Ok(Ok(_)))) => {}
+            Ok((peer, Ok(Err(error)))) => {
+                tracing::debug!(%peer, %error, "PEAT peer remains unavailable");
+            }
+            Ok((peer, Err(_))) => {
+                tracing::debug!(%peer, "PEAT peer connection attempt timed out");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "PEAT peer reconnect task failed");
+            }
+        }
+    }
 }
 
 fn management_host(url: &str) -> Option<String> {
@@ -1080,6 +1111,39 @@ mod tests {
             "airframe/u28-generic-v1"
         ));
         assert!(!antenna_evidence_matches(directory.path(), "../escape"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sidecar_start_does_not_require_static_peers_to_be_online() {
+        let storage = TempDir::new().unwrap();
+        let key_path = storage.path().join("formation.key");
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        std::fs::write(&key_path, key).unwrap();
+        let peer_endpoint = mesh_peat::derive_peat_endpoint_id(key, "peer-node").unwrap();
+        let args = Args {
+            command: None,
+            input: None,
+            output: None,
+            serve: true,
+            zenoh_endpoint: "unused".into(),
+            source: "local-node".into(),
+            radio_url: None,
+            simulate_radio: false,
+            credential_file: None,
+            installation_evidence_dir: None,
+            regulatory_evidence_file: None,
+            peat_formation_id: Some("arc-radio".into()),
+            peat_formation_key_file: Some(key_path),
+            peat_bind: Some("127.0.0.1:0".parse().unwrap()),
+            peat_storage: Some(storage.path().join("peat")),
+            peat_peer: vec![format!("peer-node={peer_endpoint}@127.0.0.1:9")],
+        };
+
+        let (peat, peers) = start_peat(&args).await.unwrap();
+
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name, "peer-node");
+        peat.unwrap().shutdown().await.unwrap();
     }
 
     #[tokio::test]

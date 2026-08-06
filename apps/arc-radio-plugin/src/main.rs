@@ -2,7 +2,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use anyhow::{bail, Context};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use mesh_core::{
     ArcRadioConfiguration, DeliveryClass, MeshPayload, NodeId, RadioPlanAssessment,
     SilvusGroupApplyTemplate,
@@ -10,7 +10,14 @@ use mesh_core::{
 use mesh_peat::AvianRecord;
 use serde::{Deserialize, Serialize};
 
+mod bootstrap;
 mod service;
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Generate deterministic PEAT identities and per-node Ansible peer variables.
+    Bootstrap(bootstrap::BootstrapArgs),
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,6 +26,9 @@ mod service;
     version
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// JSON request file. Omit to read JSON from standard input.
     #[arg(long)]
     input: Option<PathBuf>,
@@ -75,7 +85,7 @@ struct Args {
     #[arg(long)]
     peat_storage: Option<PathBuf>,
 
-    /// PEAT peer descriptor ENDPOINT_ID@IP:PORT[,IP:PORT...].
+    /// PEAT peer descriptor NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]. NAME= is optional.
     #[arg(long)]
     peat_peer: Vec<String>,
 }
@@ -99,6 +109,9 @@ pub(crate) struct ArcRadioPluginResponse {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(Command::Bootstrap(command)) = args.command.as_ref() {
+        return bootstrap::run(command);
+    }
     if args.serve {
         return service::serve(args).await;
     }

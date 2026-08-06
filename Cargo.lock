@@ -3004,6 +3004,7 @@ dependencies = [
  "anyhow",
  "base64",
  "hex",
+ "iroh",
  "mesh-core",
  "peat-mesh",
  "serde",

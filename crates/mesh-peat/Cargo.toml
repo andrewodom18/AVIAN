@@ -9,6 +9,7 @@ license.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 hex.workspace = true
+iroh.workspace = true
 mesh-core = { path = "../mesh-core" }
 peat-mesh.workspace = true
 serde.workspace = true

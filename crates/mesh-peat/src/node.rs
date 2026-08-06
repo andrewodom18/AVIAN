@@ -161,16 +161,35 @@ impl PeerDescriptor {
     pub fn addresses(&self) -> &[SocketAddr] {
         &self.addresses
     }
+
+    /// Deployment-safe peer form that preserves the stable node name.
+    pub fn named_spec(&self) -> String {
+        let addresses = self
+            .addresses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{}={}@{addresses}", self.name, self.endpoint_id_hex)
+    }
 }
 
 impl FromStr for PeerDescriptor {
     type Err = PeatNodeError;
 
-    /// Parses `ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]`.
+    /// Parses `NAME=ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]`. The legacy form
+    /// without `NAME=` remains accepted and receives a short endpoint label.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (endpoint_id_hex, addresses) = value
+        let (identity, addresses) = value
             .split_once('@')
             .ok_or_else(|| PeatNodeError::InvalidPeerSpec(value.to_owned()))?;
+        let (name, endpoint_id_hex) = match identity.split_once('=') {
+            Some((name, endpoint_id_hex)) if !name.trim().is_empty() => {
+                (Some(name.to_owned()), endpoint_id_hex)
+            }
+            Some(_) => return Err(PeatNodeError::InvalidPeerSpec(value.to_owned())),
+            None => (None, identity),
+        };
         validate_endpoint_id(endpoint_id_hex)?;
         let addresses = addresses
             .split(',')
@@ -182,7 +201,7 @@ impl FromStr for PeerDescriptor {
             .collect::<Result<Vec<_>, _>>()?;
         let short_length = endpoint_id_hex.len().min(12);
         Self::with_addresses(
-            format!("peer-{}", &endpoint_id_hex[..short_length]),
+            name.unwrap_or_else(|| format!("peer-{}", &endpoint_id_hex[..short_length])),
             endpoint_id_hex,
             addresses,
         )
@@ -374,6 +393,22 @@ fn normalized_formation_secret(value: &str) -> Result<[u8; 32], PeatNodeError> {
     Ok(Sha256::digest(decoded).into())
 }
 
+/// Derives the exact stable Iroh endpoint ID that [`PeatNode::start`] will use
+/// for a node, without opening a socket or creating persistent state.
+pub fn derive_peat_endpoint_id(
+    base64_shared_key: &str,
+    node_name: &str,
+) -> Result<String, PeatNodeError> {
+    if node_name.trim().is_empty() {
+        return Err(PeatNodeError::EmptyNodeName);
+    }
+    let formation_secret = normalized_formation_secret(base64_shared_key)?;
+    let identity_secret = derive_iroh_node_secret(&formation_secret, node_name);
+    Ok(iroh::SecretKey::from_bytes(&identity_secret)
+        .public()
+        .to_string())
+}
+
 fn validate_endpoint_id(value: &str) -> Result<(), PeatNodeError> {
     let decoded = hex::decode(value).map_err(|_| PeatNodeError::InvalidEndpointId)?;
     if decoded.len() != 32 {
@@ -399,7 +434,7 @@ pub enum PeatNodeError {
     InvalidFormationSecret,
     #[error("invalid PEAT endpoint ID")]
     InvalidEndpointId,
-    #[error("invalid peer specification {0:?}; expected ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]")]
+    #[error("invalid peer specification {0:?}; expected NAME=ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...] (NAME= is optional)")]
     InvalidPeerSpec(String),
     #[error("a peer must have between 1 and 8 unique addresses, got {0}")]
     InvalidPeerAddressCount(usize),
@@ -495,6 +530,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn named_peer_descriptor_round_trips_for_deployment() {
+        let endpoint_id = "02".repeat(32);
+        let descriptor = format!("drone-017={endpoint_id}@10.40.0.17:4747,172.20.0.17:4747")
+            .parse::<PeerDescriptor>()
+            .unwrap();
+
+        assert_eq!(descriptor.name, "drone-017");
+        assert_eq!(
+            descriptor.named_spec(),
+            format!("drone-017={endpoint_id}@10.40.0.17:4747,172.20.0.17:4747")
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_nodes_converge_over_real_peat_iroh() {
         let storage_a = TempDir::new().unwrap();
@@ -506,6 +555,11 @@ mod tests {
         let node_b = PeatNode::start(node_config("avian-test/node-b", &storage_b, &shared_key))
             .await
             .unwrap();
+
+        assert_eq!(
+            derive_peat_endpoint_id(&shared_key, "avian-test/node-a").unwrap(),
+            node_a.endpoint_id_hex()
+        );
 
         let node_b_descriptor = node_b.peer_descriptor().unwrap();
         let mut addresses = vec!["127.0.0.1:1".parse().unwrap()];

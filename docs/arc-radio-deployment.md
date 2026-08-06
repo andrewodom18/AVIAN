@@ -32,10 +32,15 @@ Start one sidecar per locally attached StreamCaster. Supply that radio's actual
 management URL with `--radio-url`; the observation publisher exposes only its
 sanitized host/IP. Set `--source` to the stable ARC device identity used for
 that companion. Supply each intended PEAT relationship with one or more
-`--peat-peer ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a PEAT
+`--peat-peer NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a PEAT
 link connected only when the transport reports that endpoint as connected.
 Configured but disconnected peers remain visible as disconnected; no link is
-fabricated for an unobserved relationship.
+fabricated for an unobserved relationship. Offline peers do not block sidecar
+startup; the sidecar retries missing sessions with a bounded connection timeout.
+
+Use [the radio mesh bootstrap command](arc-radio-bootstrap.md) to derive every
+endpoint ID and generate bounded, per-host Ansible peer variables without
+starting the sidecars first.
 
 The peer address is the PEAT/ARC reachability address, which may differ from the
 StreamCaster management IP. Fresh fused ARC `local/telemetry` supplies node
