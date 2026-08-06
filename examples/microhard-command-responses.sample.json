@@ -1,0 +1,9 @@
+{
+  "responses": {
+    "AT+MSSYSI": "MAC : 00:0F:92:04:1A:E0\nProduct : pMDDL2460\nSoftware : v1.4.0 build 1013-1\nOK",
+    "AT+MSGMR": "Hardware : Rev A\nOK",
+    "AT+MWRSSI": "+MWRSSI: -74 dBm\nOK",
+    "AT+MWTXPOWER?": "+MWTXPOWER: 30 dBm\nOK",
+    "AT+MSTR=0": "WIFI RX packets: 408\nRX bytes : 57.301KB\nTX packets: 12\nTX bytes : 3KB\nOK"
+  }
+}

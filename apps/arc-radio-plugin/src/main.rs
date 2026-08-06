@@ -11,12 +11,15 @@ use mesh_peat::AvianRecord;
 use serde::{Deserialize, Serialize};
 
 mod bootstrap;
+mod microhard_probe;
 mod service;
 
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Generate deterministic PEAT identities and per-node Ansible peer variables.
     Bootstrap(bootstrap::BootstrapArgs),
+    /// Normalize captured Microhard read-only AT responses without hardware.
+    MicrohardProbe(microhard_probe::MicrohardProbeArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -111,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(Command::Bootstrap(command)) = args.command.as_ref() {
         return bootstrap::run(command);
+    }
+    if let Some(Command::MicrohardProbe(command)) = args.command.as_ref() {
+        return microhard_probe::run(command).await;
     }
     if args.serve {
         return service::serve(args).await;

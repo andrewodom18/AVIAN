@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "observed_at_ms": 1000,
+  "source": "air-001",
+  "status": "online",
+  "simulated": true,
+  "management_ip": "192.168.168.1",
+  "identity": {
+    "vendor": "microhard",
+    "model": "pmddl2460",
+    "firmware_version": "v1.4.0-build-1013-1",
+    "mac_address": "00:0F:92:04:1A:E0"
+  },
+  "effective": {
+    "transmit_power_dbm": 30.0,
+    "reported_rssi_dbm": -74.0,
+    "wireless_rx_bytes": 58676,
+    "wireless_tx_bytes": 3072
+  },
+  "neighbors": []
+}

@@ -53,6 +53,10 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
 | `arc-radio-plugin` | Arc-authoritative StreamCaster validation, traffic assessment, PEAT encoding, and dry-run API sequencing |
 
+Radio integrations use an additive vendor-neutral observation contract. Silvus
+StreamCaster remains the first live control implementation; a read-only-first
+Microhard foundation is documented in the [Microhard integration guide](docs/microhard.md).
+
 ## ARC and StreamCaster integration
 
 ARC remains the authority for desired radio configuration. The AVIAN

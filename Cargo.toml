@@ -7,6 +7,7 @@ members = [
     "crates/mesh-core",
     "crates/mesh-peat",
     "crates/mesh-sim",
+    "crates/microhard-control",
     "crates/streamcaster-control",
     "crates/vehicle-adapters",
 ]
