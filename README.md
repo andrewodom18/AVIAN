@@ -1,4 +1,4 @@
-# AVIAN
+# <img src="assets/brand/avian-mark-white-on-black.png" alt="AVIAN logo" width="44" /> AVIAN
 
 **Autonomous Vehicle Interoperability and Networking**
 
