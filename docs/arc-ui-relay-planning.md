@@ -42,11 +42,13 @@ specification or an ideal path-loss calculation from being mistaken for a
 guaranteed field range.
 
 The SL5200 published data is useful as an input, not a final answer: its
-datasheet gives 2 W native transmit power, receive sensitivity of -101 dBm at
-5 MHz or -107 dBm at optional 1.25 MHz, selectable 1.25–20 MHz channels, and
-several frequency-band options. AVIAN includes an SL5200 5 MHz link-budget
-helper using the published 33 dBm native power and -101 dBm sensitivity, but
-the operator must provide the actual center frequency, antenna gain,
+datasheet gives a 2 W total radio power class, receive sensitivity of -101 dBm
+at 5 MHz or -107 dBm at optional 1.25 MHz, selectable 1.25–20 MHz channels,
+and several frequency-band options. The OEM guide clarifies that the 2 W
+SL5220 configuration is 1 W, or 30 dBm, per RF port. AVIAN's SL5200 5 MHz
+link-budget helper therefore uses 30 dBm per path with -101 dBm sensitivity;
+the 33 dBm aggregate value is metadata only. The operator must provide the
+actual center frequency, antenna gain,
 installation/terrain loss, and fade margin. [SL5200 datasheet](https://silvustechnologies.com/wp-content/uploads/2026/02/StreamCaster-LITE-5200-SL5200-OEM-Module-Datasheet.pdf)
 
 For each aircraft/radio/antenna configuration, calibration should collect
@@ -179,7 +181,7 @@ Range discovery is intentionally conservative. A live chain can be formed only
 from fresh bidirectional observations that meet the mission policy. If those
 observations do not exist, the system reports the gap, exposes candidates for
 probing, and waits for measured results to be shared; it does not claim that a
-radio specification, 25,000 ft MSL ceiling, or free-space calculation proves
+radio specification, 30,000 ft MSL planning ceiling, or free-space calculation proves
 an unobserved hop will work.
 
 ## Synthetic planner test

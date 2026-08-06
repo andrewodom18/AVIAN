@@ -9,10 +9,13 @@ use crate::{NodeId, MAX_SUPPORTED_SWARM_SIZE, MIN_SUPPORTED_SWARM_SIZE, SYSTEM_M
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 const FREE_SPACE_PATH_LOSS_CONSTANT_DB: f64 = 32.44;
 
-/// Native transmit power published for the StreamCaster LITE 5200 (SL5200).
-/// AVIAN does not add a beamforming credit here; that belongs in a measured
-/// antenna and installation model for the actual aircraft.
-pub const SILVUS_SL5200_NATIVE_TX_POWER_DBM: f64 = 33.0;
+/// Total RF power class published for the 2 W SL5220. This aggregate value is
+/// metadata only and must not be used as a single-path link-budget input.
+pub const SILVUS_SL5220_TOTAL_RF_POWER_DBM: f64 = 33.0;
+/// Conducted power for one of the two SL5220 RF ports in the documented 2 W
+/// configuration. AVIAN does not add beamforming credit here; installed-array
+/// gain belongs in measured antenna and airframe evidence.
+pub const SILVUS_SL5220_PER_PORT_TX_POWER_DBM: f64 = 30.0;
 /// Published SL5200 receive sensitivity at 5 MHz channel bandwidth.
 pub const SILVUS_SL5200_5_MHZ_SENSITIVITY_DBM: f64 = -101.0;
 /// Published SL5200 receive sensitivity at optional 1.25 MHz bandwidth.
@@ -37,7 +40,7 @@ impl RadioLinkBudget {
     pub fn silvus_sl5200_5_mhz(frequency_mhz: f64, fade_margin_db: f64) -> Self {
         Self {
             frequency_mhz,
-            transmitter_power_dbm: SILVUS_SL5200_NATIVE_TX_POWER_DBM,
+            transmitter_power_dbm: SILVUS_SL5220_PER_PORT_TX_POWER_DBM,
             transmitter_antenna_gain_dbi: 0.0,
             receiver_antenna_gain_dbi: 0.0,
             receiver_sensitivity_dbm: SILVUS_SL5200_5_MHZ_SENSITIVITY_DBM,
@@ -784,11 +787,11 @@ impl MissionAllocation {
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum RelayPlanError {
-    #[error("relay planning supports formations of 5-200 aircraft, got {0}")]
+    #[error("relay planning supports formations of 5-1024 aircraft, got {0}")]
     UnsupportedSwarmSize(usize),
     #[error("relay planning coordinate is non-finite or outside latitude/longitude bounds")]
     InvalidCoordinate,
-    #[error("relay altitude {0} m MSL exceeds the 7,620 m system ceiling")]
+    #[error("relay altitude {0} m MSL exceeds the 9,144 m system ceiling")]
     AboveSystemCeiling(f64),
     #[error("field-calibrated usable radio range must be finite and positive")]
     InvalidUsableRange,
@@ -1092,8 +1095,10 @@ mod tests {
     #[test]
     fn sl5200_free_space_budget_requires_calibration_before_activation() {
         let budget = RadioLinkBudget::silvus_sl5200_5_mhz(2_350.0, 20.0);
+        assert_eq!(budget.transmitter_power_dbm, 30.0);
+        assert_eq!(SILVUS_SL5220_TOTAL_RF_POWER_DBM, 33.0);
         let free_space_range_m = budget.max_free_space_range_m().unwrap();
-        assert!((4_500.0..=5_500.0).contains(&free_space_range_m));
+        assert!((3_000.0..=4_000.0).contains(&free_space_range_m));
 
         let mut request = synthetic_one_mile_request(RelayAllocationMode::Automatic);
         request.policy.range = RelayRangeModel::FreeSpaceLinkBudget { budget };

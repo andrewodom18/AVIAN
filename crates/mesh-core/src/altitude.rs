@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// System-wide operational ceiling: 25,000 feet MSL.
-pub const SYSTEM_MAX_MSL_FT: f64 = 25_000.0;
-/// Exact conversion of 25,000 feet to metres.
-pub const SYSTEM_MAX_MSL_M: f64 = 7_620.0;
+/// System-wide planning ceiling: 30,000 feet MSL.
+pub const SYSTEM_MAX_MSL_FT: f64 = 30_000.0;
+/// Exact conversion of 30,000 feet to metres.
+pub const SYSTEM_MAX_MSL_M: f64 = 9_144.0;
 
 /// Altitudes retain their reference datum instead of conflating MSL, AGL,
 /// and height above the launch point.
@@ -56,7 +56,7 @@ pub enum AltitudeError {
     NonFinite,
     #[error("AGL altitude cannot be negative: {0} m")]
     NegativeAgl(f64),
-    #[error("MSL altitude {0} m exceeds the system ceiling of 7,620 m")]
+    #[error("MSL altitude {0} m exceeds the system ceiling of 9,144 m")]
     AboveSystemCeiling(f64),
 }
 

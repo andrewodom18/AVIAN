@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "request_id": "radio-plan-7-air-017",
+  "node_id": "air-017",
+  "generation": 7,
+  "observed_at_ms": 1000,
+  "phase": "blocked",
+  "gates": {
+    "known_landed": true,
+    "hardware_apply_enabled": false,
+    "live_capability_match": true,
+    "regulatory_authorized": false,
+    "antenna_installation_resolved": true,
+    "credential_resolved": true,
+    "rollback_snapshot_staged": true,
+    "independent_management_reachable": false,
+    "scheduled_activation_supported": false,
+    "preserves_control_bearer": true
+  },
+  "capabilities": {
+    "observed_at_ms": 1000,
+    "model": "sl5200_lite_estimated",
+    "firmware_version": "5.0.1.12",
+    "supported_frequency_profiles": [
+      {
+        "center_frequency_mhz": 2440.0,
+        "bandwidth_mhz": "20",
+        "antenna_mask": 3
+      }
+    ],
+    "scheduled_activation_supported": false,
+    "dual_profile_supported": false
+  },
+  "error_code": "activation_evidence_incomplete",
+  "message": "Planning and read-only inspection are available; hardware apply is blocked."
+}

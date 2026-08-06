@@ -5,7 +5,9 @@ use thiserror::Error;
 use crate::NodeId;
 
 pub const MIN_SUPPORTED_SWARM_SIZE: usize = 5;
-pub const MAX_SUPPORTED_SWARM_SIZE: usize = 200;
+/// Software-side bound for explicitly enrolled nodes. This is not a claim that
+/// a particular RF profile has been field-validated at this population.
+pub const MAX_SUPPORTED_SWARM_SIZE: usize = 1024;
 pub const DEFAULT_MAX_NEIGHBORS: usize = 8;
 
 /// Deterministic bounded-degree overlay planning. Every node with the same
@@ -146,17 +148,30 @@ impl TopologyPlan {
 }
 
 fn connection_offsets(node_count: usize, pair_budget: usize) -> BTreeSet<usize> {
-    let mut offsets = BTreeSet::from([1]);
-    for divisor_power in 1..pair_budget {
-        let divisor = 1_usize << divisor_power.saturating_sub(1);
-        offsets.insert((node_count / (2 * divisor)).max(1));
+    // Balanced mixed-radix offsets keep diameter bounded as explicit
+    // enrollment grows. Using only n/2, n/4, ... leaves a long unit-step
+    // residual at 1024 nodes.
+    let radix = (node_count as f64)
+        .powf(1.0 / pair_budget as f64)
+        .ceil()
+        .max(2.0) as usize;
+    let mut offsets = BTreeSet::new();
+    let mut offset = 1_usize;
+    for _ in 0..pair_budget {
+        offsets.insert(offset.min(node_count / 2).max(1));
+        offset = offset.saturating_mul(radix);
+    }
+    let mut fallback = 2_usize;
+    while offsets.len() < pair_budget && fallback <= node_count / 2 {
+        offsets.insert(fallback);
+        fallback += 1;
     }
     offsets
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TopologyError {
-    #[error("AVIAN supports swarms of 5-200 aircraft, got {0}")]
+    #[error("AVIAN supports swarms of 5-1024 aircraft, got {0}")]
     UnsupportedSwarmSize(usize),
     #[error("maximum neighbors must be an even value of at least two, got {0}")]
     InvalidMaxNeighbors(usize),
@@ -178,7 +193,7 @@ mod tests {
 
     #[test]
     fn scale_profiles_are_connected_and_bounded() {
-        for count in [5, 25, 100, 200] {
+        for count in [5, 25, 100, 200, 1_024] {
             let plan = TopologyPlanner::default().plan(&members(count)).unwrap();
             assert_eq!(plan.node_count(), count);
             assert!(plan.is_connected(), "{count}-node overlay disconnected");
@@ -213,7 +228,7 @@ mod tests {
 
     #[test]
     fn rejects_sizes_outside_contract() {
-        for count in [4, 201] {
+        for count in [4, 1_025] {
             assert_eq!(
                 TopologyPlanner::default().plan(&members(count)),
                 Err(TopologyError::UnsupportedSwarmSize(count))

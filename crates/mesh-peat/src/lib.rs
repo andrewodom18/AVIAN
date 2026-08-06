@@ -3,7 +3,8 @@
 mod node;
 
 pub use node::{
-    AvianRecord, PeatNode, PeatNodeConfig, PeatNodeError, PeerDescriptor, AVIAN_SCHEMA_VERSION,
+    derive_peat_endpoint_id, AvianRecord, PeatNode, PeatNodeConfig, PeatNodeError, PeerDescriptor,
+    AVIAN_SCHEMA_VERSION,
 };
 
 use std::time::Duration;

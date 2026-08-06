@@ -120,6 +120,28 @@ vehicle position or radio measurement: companions construct their own live
 request from this policy plus synchronized telemetry and relay-link
 observations.
 
+## Arc radio configuration
+
+The radio configuration is durable PEAT mission state whose desired-value
+authority is always Arc. It carries a positive generation, shared network
+settings, percentage-based 4200/4400/5200 node groups, the 30,000 ft planning
+ceiling, antenna/power intent, routine traffic assumptions, and a single-source
+5.5 MB priority transfer to a 4000-series control station. The priority model
+caps planned radio airtime at 80%, reserves the other 20%, and requires measured
+end-to-end goodput before it estimates transfer duration. AVIAN validates and
+distributes this state; it does not write Arc's canonical configuration.
+
+Antenna gain and installation losses remain explicit unknowns. The configuration
+may carry the current approximate installed-system values of 34.44 dBm airborne
+EIRP and 33 dBm ground EIRP for planning, but requires the underlying conducted
+power and installed-antenna evidence before either value or a link budget is
+accepted as calibrated or activation-ready.
+
+The payload contains no radio password, session cookie, encryption key, HMAC
+key, or TLS private material. Those remain local secret inputs to the eventual
+hardware adapter. A real apply must query `supported_frequency_profiles`,
+verify effective values after reconnect, and report status back to Arc.
+
 ## Delivery classes
 
 | Class | Durable | Reliable | Redundancy | Lifetime |

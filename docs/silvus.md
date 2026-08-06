@@ -56,19 +56,21 @@ application session and synchronization overhead.
 
 ## Altitude and aircraft variety
 
-The radio type does not change AVIAN's 25,000 ft MSL system ceiling. Link
+The radio type does not change AVIAN's 30,000 ft MSL planning ceiling. This is
+a software planning ceiling, not evidence that an SL5200 installation is
+environmentally qualified for 30,000 ft. Link
 selection uses current measurements and geometry rather than assuming that a
 higher aircraft always has a better path. Platform profiles will include
 antenna placement, radio power/thermal limits, energy cost, usable interfaces,
-and a platform-specific ceiling. The lower of the platform ceiling and 25,000
+and a platform-specific ceiling. The lower of the platform ceiling and 30,000
 ft MSL applies.
 
 ## Range calibration for relay planning
 
 Do not use a single published “radio range” to space the swarm. The SL5200
-datasheet specifies parameters such as 2 W native power, -101 dBm sensitivity
-at 5 MHz, -107 dBm at optional 1.25 MHz, selectable bandwidth, and several
-frequency bands. Those values are inputs to a link budget, but they do not
+datasheet specifies parameters such as a 2 W total power class, -101 dBm
+sensitivity at 5 MHz, -107 dBm at optional 1.25 MHz, selectable bandwidth, and
+several frequency bands. Those values are inputs to a link budget, but they do not
 capture the installed antennas, selected center frequency, vehicle attitude,
 terrain, clutter, interference, traffic demand, or required availability.
 [SL5200 OEM datasheet](https://silvustechnologies.com/wp-content/uploads/2026/02/StreamCaster-LITE-5200-SL5200-OEM-Module-Datasheet.pdf)
@@ -90,16 +92,36 @@ claiming that a data-sheet range proves a new chain will work.
 
 ## Vendor telemetry boundary
 
-AVIAN currently recognizes `silvus` as a transport type and can give PEAT
-multiple IP addresses. It does not yet read StreamCaster neighbor, signal,
-throughput, or route statistics. Silvus publishes a StreamCaster API manual
-entry, but the public page does not provide enough schema detail to implement
-and verify a client without the manual or hardware.
+AVIAN recognizes `silvus` as a transport type and can give PEAT multiple IP
+addresses. The supplied StreamCaster 4000-series user and API manuals now
+ground the radio configuration contract, dry-run JSON-RPC sequence, and the
+available neighbor, signal, throughput, route, queue, airtime, and spectrum
+measurements. Hardware execution remains disabled until the adapter can check
+the target radio's live capabilities and effective settings.
+
+The current operational workload assumption is one 5.5 MB priority payload
+from an airborne StreamCaster to a 4000-series control station over a 20 MHz
+channel, with no more than 80% airtime allocated. This is not a Silvus standard
+or vendor throughput claim. End-to-end goodput, route depth, retries, queues,
+and installed antenna characteristics must be measured before delivery time can
+be accepted. Approximate installed-system inputs are currently 34.44 dBm EIRP
+airborne and 33 dBm EIRP ground; they remain planning estimates until the
+underlying conducted power, gain, loss, array method, and calibration are
+captured.
+
+The SL5200/LC5200 OEM Integration Manual v1.1 confirms the two-port SL5220
+power split as 1 W (30 dBm) per port. Its FCC 2.4 GHz modular profile permits
+20 MHz at 2440 MHz with no more than 27 dBm conducted power per antenna. AVIAN
+models total radio power separately from per-path conducted power and rejects
+other 20 MHz center frequencies when `fcc_sl52_245_oem` is selected for an
+exact SL5210 or SL5220. Generic/estimated 5200 profiles cannot claim that
+grant. Other bands, countries, and radio families remain live-capability and
+operator-authorization dependent.
 
 - [StreamCaster API manual access page](https://silvustechnologies.com/resources/downloads/api-manual/)
 
-When the supported API and a representative radio are available, a Silvus
-adapter will normalize vendor measurements into AVIAN's existing latency,
+When representative radios are available, the Silvus adapter will normalize
+vendor measurements into AVIAN's existing latency,
 loss, goodput, signal quality, stability, energy cost, line-of-sight, and
 Fresnel-clearance model. Until then, the integration stays standards-based and
 does not invent proprietary endpoints.
@@ -123,6 +145,13 @@ one directional RSSI sample. Its required JSON shape is shown in
 AVIAN checks endpoint shape, sample window, finite metrics, and geometry at
 ingress; mission evaluation then checks membership, freshness, and the
 mission-specific health policy.
+
+Desired radio settings come only from Arc. `arc-radio-plugin` validates the
+grouped 4200/4400/5200 fleet, expands it to deterministic node assignments,
+computes routine load and the single-source priority-transfer assessment,
+produces a PEAT mission-class record, and emits a dry-run StreamCaster API
+sequence. It never includes passwords or encryption keys in the PEAT payload. See
+[the Arc radio-plugin guide](arc-radio-plugin.md).
 
 ## Remaining handoff work
 

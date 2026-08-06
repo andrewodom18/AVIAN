@@ -22,7 +22,7 @@ are not required for continued operation.
 - Signed, expiring, replay-resistant emergency commands.
 - Deterministic pre-mission relay reservation plus live-observation relay
   chaining, range discovery, and exact manual relay overrides.
-- A system ceiling of 25,000 ft MSL (7,620 m), with MSL, AGL, and
+- A system planning ceiling of 30,000 ft MSL (9,144 m), with MSL, AGL, and
   above-launch altitude kept separate.
 - Deterministic four-node simulation covering partitions, a crashed node,
   recovery, state convergence, and a Betaflight emergency action.
@@ -51,6 +51,7 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mesh-sim` | Deterministic failure and recovery simulation |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
+| `arc-radio-plugin` | Arc-authoritative StreamCaster validation, traffic assessment, PEAT encoding, and dry-run API sequencing |
 
 ## Run
 
@@ -77,6 +78,14 @@ The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
 The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
+The [Arc radio-plugin guide](docs/arc-radio-plugin.md) defines the local
+Arc-to-AVIAN ownership boundary and the 4200/4400/5200 configuration contract.
+The [radio mesh bootstrap guide](docs/arc-radio-bootstrap.md) generates
+deterministic PEAT identities and ARC-ready bounded peer maps before surrogate
+deployment.
+The [radio integration evidence checklist](docs/radio-integration-evidence.md)
+lists the radio, antenna, airframe, and traffic facts required before live
+hardware apply or mission-ready range claims.
 The [membership guide](docs/membership.md) shows how a formation is provisioned
 without selecting a leader.
 The [ARC UI relay-planning guide](docs/arc-ui-relay-planning.md) defines

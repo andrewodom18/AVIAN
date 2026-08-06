@@ -1,26 +1,21 @@
 [package]
-name = "mesh-peat"
+name = "streamcaster-control"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-base64.workspace = true
-hex.workspace = true
-iroh.workspace = true
+async-trait.workspace = true
 mesh-core = { path = "../mesh-core" }
-peat-mesh.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
-uuid.workspace = true
+axum = "0.8"
 
 [lints]
 workspace = true

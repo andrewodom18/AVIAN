@@ -1,11 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/arc-radio-plugin",
     "apps/mesh-agent",
     "apps/mission-planner",
     "crates/mesh-core",
     "crates/mesh-peat",
     "crates/mesh-sim",
+    "crates/streamcaster-control",
     "crates/vehicle-adapters",
 ]
 
@@ -22,6 +24,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 hex = "0.4"
+iroh = "1.0.3"
 mavlink = { version = "=0.18.0", default-features = false, features = ["std", "dialect-common", "transport-tcp", "transport-udp"] }
 peat-mesh = { version = "=0.9.0-rc.60", default-features = false, features = ["automerge-backend"] }
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +34,10 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zenoh = { version = "1", features = ["unstable"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

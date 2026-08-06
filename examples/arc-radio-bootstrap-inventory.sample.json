@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "generation": 1,
+  "peat_bind": "0.0.0.0:4747",
+  "nodes": [
+    {
+      "name": "surrogate-a",
+      "radio_url": "http://192.168.169.11",
+      "addresses": ["10.40.0.11:4747"]
+    },
+    {
+      "name": "surrogate-b",
+      "radio_url": "http://192.168.169.11",
+      "addresses": ["10.40.0.12:4747"]
+    },
+    {
+      "name": "surrogate-c",
+      "radio_url": "http://192.168.169.11",
+      "addresses": ["10.40.0.13:4747"]
+    }
+  ]
+}

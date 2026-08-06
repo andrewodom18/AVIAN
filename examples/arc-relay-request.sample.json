@@ -59,7 +59,7 @@
         "source": "free_space_link_budget",
         "budget": {
           "frequency_mhz": 2350.0,
-          "transmitter_power_dbm": 33.0,
+          "transmitter_power_dbm": 30.0,
           "transmitter_antenna_gain_dbi": 0.0,
           "receiver_antenna_gain_dbi": 0.0,
           "receiver_sensitivity_dbm": -101.0,
