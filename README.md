@@ -51,33 +51,35 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mesh-sim` | Deterministic failure and recovery simulation |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
-| `arc-radio-plugin` | Arc-authoritative StreamCaster validation, traffic assessment, PEAT encoding, and dry-run API sequencing |
+| `arc-radio-plugin` | Hardware-independent radio planning validation, traffic assessment, PEAT encoding, and observations |
 
 Radio integrations use an additive vendor-neutral observation contract. Silvus
 StreamCaster remains the first live control implementation; a read-only-first
 Microhard foundation is documented in the [Microhard integration guide](docs/microhard.md).
 
+TrellisWare TW-950 bench integration is documented in the [TrellisWare integration guide](docs/trellisware.md).
+
 ## ARC and StreamCaster integration
 
-ARC remains the authority for desired radio configuration. The AVIAN
-`arc-radio-plugin` validates that configuration, reads the effective state of
-the locally attached radio, publishes live observations to ARC, and
-synchronizes accepted configuration and mesh state through PEAT. It does not
-write ARC's canonical configuration or communicate with a flight controller.
+CHUD is the authority for desired and effective physical radio configuration.
+Its own UI/API is the only physical radio configuration path. ARC renders
+read-only topology and opens a selected hardware MAC in CHUD; it does not
+render settings or proxy configuration transactions. The AVIAN
+`arc-radio-plugin` validates planning intent and synchronizes PEAT mesh state.
+It does not call CHUD or StreamCaster configuration methods and does not
+communicate with a flight controller.
 
 The current integration provides:
 
 - StreamCaster 4200, 4400, and SL5200-family profiles, including capability-
   checked 5, 10, and 20 MHz operation;
-- live radio identity, frequency, bandwidth, network, power, firmware, and
-  direct-neighbor signal observations when the radio reports them;
+- live radio identity supplied to ARC by CHUD's read-only device inventory;
 - real node enrollment and connected PEAT-peer inventory without generated
   nodes, estimated spacing, or fabricated links;
 - a network capacity qualification target of at least 150 nodes, which is not
   treated as a minimum active node count; and
-- guarded validate, activate, confirm, and rollback operations. Hardware apply
-  is disabled by default and confirmation is required before volatile settings
-  are persisted.
+- planning validation in AVIAN and guarded snapshot, apply, verify, confirm,
+  persist, and rollback transactions entirely within CHUD.
 
 Zero connected radios is a valid local state. ARC should show an empty live
 mesh instead of treating the absence of hardware as a service failure.

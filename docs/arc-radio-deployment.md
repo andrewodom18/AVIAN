@@ -1,16 +1,28 @@
 # ARC StreamCaster plugin deployment
 
-The ARC radio plugin is a local edge sidecar. It connects only to the ARC
-Zenoh Unix socket, reads the local protected credential/evidence mounts, and
-uses PEAT for the durable fleet-plan record. The live vendor adapter is
-implemented but remains disabled by canonical configuration until bench and
-radio-in-the-loop qualification are complete.
+The ARC radio plugin is a local PEAT/planning sidecar. It connects to the ARC
+Zenoh Unix socket, reads non-secret planning evidence, and uses PEAT for the
+durable fleet-plan record. It does not receive a radio management URL or radio
+credentials and cannot configure a physical Silvus radio. Operators perform
+physical transactions in CHUD's own UI/API; ARC only links to that UI.
 
-Prepare requests contain no ARC flight-safety claims. Activation requires a
-fresh, timestamped authorization from Link Manager for the same prepared
-generation. The sidecar accepts only an explicitly authorized maintenance
-window with known-landed state and a preserved alternate control bearer, then
-combines those ARC-owned facts with its local capability and evidence gates.
+## CHUD prerequisite
+
+The ground-side ARC bridge reads `GET /api/radio/devices` from CHUD. A
+successful empty `devices` array is a healthy zero-radio bench, not a failure.
+CHUD discovery state is translated into vendor-neutral ARC topology; in
+particular, `auth-failed` remains visible as an online/reachable radio whose
+management access requires a client certificate.
+
+For a known TrellisWare factory address, prefer a static CHUD probe such as
+`tw_probe: 10.1.0.2`. Bridge-mode subnet scans can use
+`tw_probe_subnet: 10.1.0.0/16`, but require appropriate local routes/interfaces
+and raw-network privileges. Linux CHUD deployments performing full passive or
+off-subnet discovery require root or `CAP_NET_RAW` plus `CAP_NET_ADMIN`.
+
+Mount approved radio client identities only into CHUD's certificate directory.
+CHUD accepts PEM certificate/key pairs, bundled PEM identities, and PKCS#12
+bundles. Do not mount those identities into ARC or AVIAN.
 
 Build the deployment image from the AVIAN repository root:
 
@@ -22,40 +34,30 @@ docker save -o avian-arc-radio-plugin.tar avian-arc-radio-plugin:latest
 Place the tarball in ARC's `infra/images/` before running the normal ARC
 deployment. Enable `arc_streamcaster_plugin_enabled` only after provisioning:
 
-- `/etc/arc/streamcaster-credentials/radio.json` as root-owned mode 0600;
 - `/etc/arc/radio-evidence/regulatory.json` for the exact frequency/width;
 - `/etc/arc/radio-evidence/installations/<profile>.json` for approved antenna
   installation/calibration evidence;
 - `/etc/arc/keys/peat-radio.key` as the out-of-band PEAT formation key;
-- an isolated management interface and a separate operational data interface.
+- a protected PEAT/ARC operational data interface.
 
-Start one sidecar per locally attached StreamCaster. Supply that radio's actual
-management URL with `--radio-url`; the observation publisher exposes only its
-sanitized host/IP. Set `--source` to the stable ARC device identity used for
-that companion. Supply each intended PEAT relationship with one or more
+Start one sidecar per ARC/PEAT node. Set `--source` to its stable ARC device
+identity. Supply each intended PEAT relationship with one or more
 `--peat-peer NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a PEAT
 link connected only when the transport reports that endpoint as connected.
 Configured but disconnected peers remain visible as disconnected; no link is
 fabricated for an unobserved relationship. Offline peers do not block sidecar
 startup; the sidecar retries missing sessions with a bounded connection timeout.
-The `--radio-url` host must exactly match the canonical per-device management
-address or the sidecar blocks the generation as a binding mismatch.
 
 Use [the radio mesh bootstrap command](arc-radio-bootstrap.md) to derive every
 endpoint ID and generate bounded, per-host Ansible peer variables without
 starting the sidecars first.
 
-The peer address is the PEAT/ARC reachability address, which may differ from the
-StreamCaster management IP. Fresh fused ARC `local/telemetry` supplies node
-position when available. Documented `network_status`, `nbr_rssi`, `nbr_mcs`,
-and `nbr_mcs_rx` calls supply direct RF SNR/RSSI/MCS. Throughput is not probed
-periodically because the vendor test adds traffic. Operators must not treat the
-logical PEAT topology as a radio propagation map.
+The peer address is the PEAT/ARC reachability address, not a StreamCaster
+management endpoint. Fresh fused ARC `local/telemetry` supplies node position
+when available. Physical RF telemetry comes from the external management API.
+Operators must not treat the logical PEAT topology as a radio propagation map.
 
-Activation requires independent management reachability, complete capability,
-regulatory, installation, credential, landed, and alternate-control-bearer
-gates. It applies volatile state first. Persist only through the separate
-confirm operation after effective-state verification; lack of confirmation for
-60 seconds triggers an automatic rollback attempt.
-
-Do not put credentials in ARC config, PEAT, compose variables, or logs.
+The external management service owns enrollment, credentials, live capability
+inspection, volatile apply, verification, confirmation, persistence, and
+rollback. Do not put radio credentials in AVIAN, ARC canonical configuration,
+PEAT, compose variables, or logs.

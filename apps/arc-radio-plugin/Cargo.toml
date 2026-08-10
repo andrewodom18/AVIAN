@@ -12,6 +12,7 @@ mesh-core = { path = "../../crates/mesh-core" }
 mesh-peat = { path = "../../crates/mesh-peat" }
 microhard-control = { path = "../../crates/microhard-control" }
 streamcaster-control = { path = "../../crates/streamcaster-control" }
+trellisware-control = { path = "../../crates/trellisware-control" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

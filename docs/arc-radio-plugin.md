@@ -2,23 +2,26 @@
 
 ## Ownership
 
-Arc owns desired radio configuration. AVIAN supplies a PEAT-backed radio
-integration layer around that authority:
+CHUD owns desired and effective physical radio configuration. AVIAN supplies a
+PEAT-backed planning and observation layer that is independent of that
+authority:
 
 ```mermaid
 flowchart LR
-    UI["Arc UI"] --> CFG["Arc configd\ndesired generation"]
-    CFG --> LM["Arc link-manager\napply coordinator"]
-    LM --> PLUGIN["AVIAN radio plugin\nvalidate + PEAT"]
-    PLUGIN --> RADIO["StreamCaster JSON-RPC\n4200 / 4400 / 5200"]
-    PLUGIN --> PEAT["PEAT durable config\nand latest observations"]
-    RADIO --> PLUGIN
+    UI["ARC Devices\nread-only topology"] -. "open selected MAC" .-> CHUD["CHUD radio manager\nconfiguration authority"]
+    CHUD --> RADIO["Physical radios"]
+    CHUD -- "read-only device inventory" --> BRIDGE["ARC dev-bridge"]
+    BRIDGE --> UI
+    PLAN["ARC planning + identity refs"] --> LM["ARC link-manager"]
+    LM --> PLUGIN["AVIAN radio plugin\nplanning validation + PEAT"]
+    PLUGIN --> PEAT["PEAT planning records\nand latest observations"]
     PLUGIN --> LM
 ```
 
-The plugin never writes the canonical Arc configuration and never talks to a
-flight controller. PEAT distributes the accepted Arc generation and radio
-observations; it does not become a competing configuration authority.
+The plugin never writes CHUD or ARC configuration, never configures a physical
+radio, and never talks to a flight controller. PEAT distributes planning and
+observed logical mesh state; it does not become a competing hardware
+configuration authority.
 
 ## Current executable and live inventory
 
@@ -27,18 +30,17 @@ an ARC sidecar. The compatibility tool still validates legacy grouped planning
 documents, but groups, percentages, average spacing, and generated topology are
 not operational inventory.
 
-In `--serve` mode the sidecar polls its configured radio with documented
-read-only capability, effective-setting, and neighbor telemetry calls every
-five seconds. It publishes a versioned observation containing:
+In `--serve` mode the sidecar publishes a versioned PEAT observation containing:
 
-- the real local management IP, stripped of credentials and URL paths;
-- the effective radio node ID, system name, network ID, frequency, bandwidth,
-  antenna mask, transmit power, firmware, and model when the radio reports them;
-- the local PEAT endpoint and actual connected-peer count; and
+- the local PEAT endpoint and actual connected-peer count;
 - configured PEAT peer addresses with a live connected/disconnected state; and
-- direct RF neighbor SNR, RSSI, and transmit/receive MCS when reported; and
 - the current fused ARC `local/telemetry` position when it is no more than 30
   seconds old. Raw GPS is not substituted for missing fused position data.
+
+ARC obtains physical radio identity for topology from CHUD's read-only device
+inventory. Configuration capabilities, effective settings, and transaction
+state remain in CHUD's UI/API. AVIAN has no CHUD URL, radio URL, credential
+mount, or vendor mutation interface.
 
 Each sidecar stores one stable, latest-value PEAT telemetry record for its own
 observation. PEAT synchronizes those records across the formation, and the
@@ -100,8 +102,9 @@ The implementation encodes these StreamCaster 5.0 behaviors from the supplied
 - `freq_bw` is used for an atomic change, while persistence uses the individual
   `freq` and `bw` values because `freq_bw` cannot be passed to
   `setenvlinsingle`;
-- all hardware applies begin by reading `supported_frequency_profiles` and end
-  by comparing `print_all_settings` with the Arc desired generation; and
+- the CHUD transaction begins by reading
+  `supported_frequency_profiles` and ends by comparing `print_all_settings`
+  with the CHUD desired transaction; and
 - routing beacon overhead grows with node count, so the default sample uses a
   500 ms beacon period rather than the 100 ms minimum.
 
@@ -112,8 +115,8 @@ polarity protection, power-consumption envelopes, and thermal limits. The
 or SL5220 model listed by the grant. It permits 10 MHz from 2416–2457 MHz and
 20 MHz at 2440 MHz only, with respective 24 and 27 dBm per-port conducted-power
 caps. Generic and estimated 5200 profiles remain capability-only. These limits
-constrain planning; the radio's live capability response and the operator's
-authorization still constrain hardware apply.
+constrain planning; the external management API's live capability response and
+the operator's authorization still constrain hardware apply.
 
 Published peak data rate is never treated as usable mission capacity. Each
 radio/antenna/airframe/environment group can carry a field-calibrated UDP
@@ -137,15 +140,10 @@ instantaneous EIRP.
 
 ## Security and hardware gate
 
-PEAT records intentionally omit credentials and cryptographic keys. The live
-adapter receives credentials only from local protected storage, authenticates
-through `/login.sh`, adopts rolling cookies, serializes its allowlisted calls,
-and re-reads effective state after reconnect. Encryption validation queries
-only the non-secret enabled/disabled state and never reads key material.
-
-The live adapter is implemented, but canonical hardware apply defaults off.
-An authorized apply changes volatile state first. Explicit confirmation is
-required before individual settings are persisted; a 60-second confirmation
-timeout attempts verified snapshot rollback. Hardware apply remains gated on
-representative 4200, 4400, and 5200 units, live capability captures, and
-radio-in-the-loop tests.
+PEAT records intentionally omit credentials and cryptographic keys. AVIAN has
+no physical-radio credential input and its StreamCaster client API is read-only.
+All authorized mutation is performed by the external CHUD-backed management
+service, which owns login, allowlisted calls, live snapshot verification,
+volatile apply, explicit persistence confirmation, and rollback. Hardware apply
+remains gated on representative 4200, 4400, and 5200 units, live capability
+captures, and radio-in-the-loop tests.

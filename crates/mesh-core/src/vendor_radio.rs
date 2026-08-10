@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::NodeId;
 
 pub const RADIO_DEVICE_SCHEMA_VERSION: u16 = 1;
+pub const RADIO_DISCOVERY_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RadioVendorId(String);
@@ -27,6 +28,10 @@ impl RadioVendorId {
 
     pub fn microhard() -> Self {
         Self("microhard".to_owned())
+    }
+
+    pub fn trellisware() -> Self {
+        Self("trellisware".to_owned())
     }
 
     pub fn as_str(&self) -> &str {
@@ -79,6 +84,93 @@ pub enum RadioEvidenceLevel {
     Published,
     DeviceReported,
     FieldMeasured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioDiscoveryMethod {
+    NeighborTable,
+    Oui,
+    Mdns,
+    Dhcp,
+    TlsFingerprint,
+    TcpReachability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioReachabilityStatus {
+    Reachable,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioManagementAuthentication {
+    Unknown,
+    ClientCertificateRequired,
+    Authenticated,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioManagementEndpoint {
+    pub address: String,
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioDiscoveryObservation {
+    pub schema_version: u16,
+    pub observed_at_ms: u64,
+    pub source: NodeId,
+    pub vendor: RadioVendorId,
+    pub model_hint: String,
+    pub mac_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    pub reachability: RadioReachabilityStatus,
+    pub management_authentication: RadioManagementAuthentication,
+    pub management_endpoints: Vec<RadioManagementEndpoint>,
+    pub discovery_methods: Vec<RadioDiscoveryMethod>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+impl RadioDiscoveryObservation {
+    pub fn validate(&self) -> Result<(), VendorRadioError> {
+        if self.schema_version != RADIO_DISCOVERY_SCHEMA_VERSION {
+            return Err(VendorRadioError::UnsupportedDiscoverySchemaVersion(
+                self.schema_version,
+            ));
+        }
+        validate_token("model_hint", &self.model_hint)?;
+        if self.mac_address.trim().is_empty() {
+            return Err(VendorRadioError::MissingMacAddress);
+        }
+        if self.management_endpoints.is_empty() {
+            return Err(VendorRadioError::MissingManagementEndpoints);
+        }
+        if self
+            .management_endpoints
+            .iter()
+            .any(|endpoint| endpoint.address.trim().is_empty() || endpoint.port == 0)
+        {
+            return Err(VendorRadioError::InvalidManagementEndpoint);
+        }
+        if self.discovery_methods.is_empty() {
+            return Err(VendorRadioError::MissingDiscoveryMethods);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,6 +286,8 @@ pub struct RadioIdentity {
     pub firmware_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -215,6 +309,10 @@ pub struct RadioEffectiveState {
     pub wireless_rx_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireless_tx_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -257,6 +355,8 @@ pub struct RadioDeviceObservation {
 pub enum VendorRadioError {
     #[error("unsupported vendor-radio schema version {0}")]
     UnsupportedSchemaVersion(u16),
+    #[error("unsupported radio-discovery schema version {0}")]
+    UnsupportedDiscoverySchemaVersion(u16),
     #[error("invalid {field} token {value:?}")]
     InvalidToken { field: &'static str, value: String },
     #[error("invalid radio frequency range {minimum_mhz}..={maximum_mhz} MHz")]
@@ -273,6 +373,14 @@ pub enum VendorRadioError {
     NonPositive { field: &'static str },
     #[error("antenna port count must be positive when supplied")]
     InvalidAntennaPortCount,
+    #[error("radio discovery requires a MAC address")]
+    MissingMacAddress,
+    #[error("radio discovery requires at least one management endpoint")]
+    MissingManagementEndpoints,
+    #[error("radio discovery contains an invalid management endpoint")]
+    InvalidManagementEndpoint,
+    #[error("radio discovery requires at least one evidence method")]
+    MissingDiscoveryMethods,
 }
 
 fn validate_token(field: &'static str, value: &str) -> Result<(), VendorRadioError> {
@@ -319,6 +427,7 @@ mod tests {
     #[test]
     fn vendor_ids_are_extensible_but_safe_for_topics_and_records() {
         assert_eq!(RadioVendorId::microhard().as_str(), "microhard");
+        assert_eq!(RadioVendorId::trellisware().as_str(), "trellisware");
         assert!(RadioVendorId::new("future-radio_1").is_ok());
         assert!(RadioVendorId::new("future radio").is_err());
         assert!(serde_json::from_str::<RadioVendorId>(r#""future radio""#).is_err());
@@ -349,5 +458,42 @@ mod tests {
         };
 
         capabilities.validate().unwrap();
+    }
+
+    #[test]
+    fn discovery_record_preserves_reachable_but_certificate_required_state() {
+        let discovery = RadioDiscoveryObservation {
+            schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
+            observed_at_ms: 1,
+            source: NodeId::from("radio/trellisware/001e3f209a10"),
+            vendor: RadioVendorId::trellisware(),
+            model_hint: "tw-950".into(),
+            mac_address: "00:1e:3f:20:9a:10".into(),
+            serial_number: None,
+            hostname: None,
+            reachability: RadioReachabilityStatus::Reachable,
+            management_authentication: RadioManagementAuthentication::ClientCertificateRequired,
+            management_endpoints: vec![RadioManagementEndpoint {
+                address: "10.1.0.2".into(),
+                port: 443,
+                interface: Some("Ethernet 2".into()),
+                interface_index: Some(6),
+            }],
+            discovery_methods: vec![
+                RadioDiscoveryMethod::NeighborTable,
+                RadioDiscoveryMethod::Oui,
+                RadioDiscoveryMethod::TcpReachability,
+            ],
+            error_code: Some("client_certificate_required".into()),
+        };
+
+        discovery.validate().unwrap();
+        let encoded = serde_json::to_value(&discovery).unwrap();
+        assert_eq!(encoded["reachability"], "reachable");
+        assert_eq!(
+            encoded["management_authentication"],
+            "client_certificate_required"
+        );
+        assert_eq!(encoded["management_endpoints"][0]["interface_index"], 6);
     }
 }

@@ -5,21 +5,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use mesh_core::{
-    ArcActivationAuthorization, ArcRadioConfiguration, DeliveryClass, MeshPayload, NodeId,
-    StreamCasterActivationGates, StreamCasterApplyPhase, StreamCasterCapabilities,
-    StreamCasterDeviceAssignment, StreamCasterEffectiveSettings, StreamCasterFrequencyProfile,
-    StreamCasterMeshObservation, StreamCasterObservedNode, StreamCasterObservedPosition,
-    StreamCasterObservedRadio, StreamCasterObservedStatus, StreamCasterOperationIntent,
-    StreamCasterOperationRequest, StreamCasterOperationStatus, StreamCasterPeerLink,
-    TransmitPowerMode, STREAMCASTER_CAPACITY_REQUIREMENT_NODES,
-    STREAMCASTER_CONTROL_SCHEMA_VERSION, STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
+    ArcRadioConfiguration, DeliveryClass, MeshPayload, NodeId, StreamCasterActivationGates,
+    StreamCasterApplyPhase, StreamCasterCapabilities, StreamCasterDeviceAssignment,
+    StreamCasterEffectiveSettings, StreamCasterFrequencyProfile, StreamCasterMeshObservation,
+    StreamCasterObservedNode, StreamCasterObservedPosition, StreamCasterObservedRadio,
+    StreamCasterObservedStatus, StreamCasterOperationIntent, StreamCasterOperationRequest,
+    StreamCasterOperationStatus, StreamCasterPeerLink, TransmitPowerMode,
+    STREAMCASTER_CAPACITY_REQUIREMENT_NODES, STREAMCASTER_CONTROL_SCHEMA_VERSION,
+    STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use serde::Deserialize;
 use serde_json::json;
 use streamcaster_control::{
-    PreparedStreamCasterTransaction, SimulatedStreamCaster, StreamCasterAuth, StreamCasterClient,
-    StreamCasterReadApi, StreamCasterTransactionEngine,
+    SimulatedStreamCaster, StreamCasterReadApi, StreamCasterTransactionEngine,
 };
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
@@ -33,22 +32,9 @@ const TOPIC_EFFECTIVE_OBSERVATIONS: &str = "local/link/radio/streamcaster/observ
 const TOPIC_MESH_OBSERVATIONS: &str = "local/link/radio/streamcaster/mesh-observations/v1";
 const TOPIC_HEALTH: &str = "local/link/radio/streamcaster/plugin-health";
 const TOPIC_TELEMETRY: &str = "local/telemetry";
-const ARC_AUTHORIZATION_MAX_AGE_MS: u64 = 5 * 60 * 1_000;
-const ARC_AUTHORIZATION_MAX_CLOCK_SKEW_MS: u64 = 5_000;
+const POSITION_MAX_CLOCK_SKEW_MS: u64 = 5_000;
 const POSITION_FRESH_MS: u64 = 30_000;
 const PEAT_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-const VOLATILE_CONFIRMATION_WINDOW_MS: u64 = 60_000;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CredentialFile {
-    /// Accepted for compatibility with the v1 credential file. StreamCaster
-    /// password authentication is always performed through /login.sh.
-    #[serde(default, rename = "method")]
-    _method: Option<String>,
-    username: String,
-    password: String,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,7 +63,6 @@ struct AntennaEvidence {
 #[derive(Clone)]
 enum Backend {
     ContractOnly,
-    Live(Box<StreamCasterClient>),
     Simulator(SimulatedStreamCaster),
 }
 
@@ -85,12 +70,8 @@ struct ServiceState {
     source: NodeId,
     sequence: AtomicU64,
     backend: Backend,
-    credential_resolved: bool,
     installation_evidence_dir: Option<PathBuf>,
     regulatory_evidence_file: Option<PathBuf>,
-    prepared: Option<PreparedStreamCasterTransaction>,
-    pending_activation: Option<StreamCasterOperationRequest>,
-    confirmation_deadline_ms: Option<u64>,
     latest_status: Option<StreamCasterOperationStatus>,
     latest_plan_generation: Option<u64>,
     latest_mesh_observation: Option<serde_json::Value>,
@@ -106,20 +87,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .try_init()
         .ok();
-    if args.radio_url.is_some() && args.simulate_radio {
-        bail!("--radio-url and --simulate-radio are mutually exclusive");
-    }
-
-    let auth = load_auth(args.credential_file.as_deref())?;
-    let credential_resolved = !matches!(auth, StreamCasterAuth::None);
-    let management_address = args.radio_url.as_deref().and_then(management_host);
-    let backend = if args.simulate_radio {
-        Backend::ContractOnly
-    } else if let Some(url) = args.radio_url.as_deref() {
-        Backend::Live(Box::new(StreamCasterClient::new(url, auth)?))
-    } else {
-        Backend::ContractOnly
-    };
+    let backend = Backend::ContractOnly;
     let (peat, peat_peers) = start_peat(&args).await?;
 
     let mut zenoh_config = zenoh::Config::default();
@@ -158,27 +126,25 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         source: NodeId::from(args.source),
         sequence: AtomicU64::new(1),
         backend,
-        credential_resolved,
         installation_evidence_dir: args.installation_evidence_dir,
         regulatory_evidence_file: args.regulatory_evidence_file,
-        prepared: None,
-        pending_activation: None,
-        confirmation_deadline_ms: None,
         latest_status: None,
         latest_plan_generation: None,
         latest_mesh_observation: None,
         peat: peat.clone(),
         peat_peers,
-        management_address,
+        management_address: None,
         simulate_radio: args.simulate_radio,
         latest_position: None,
     }));
 
     if args.simulate_radio {
-        tracing::warn!("StreamCaster simulator enabled; no physical radio writes are possible");
+        tracing::warn!(
+            "StreamCaster planning simulator enabled; no physical radio writes are possible"
+        );
     } else {
         tracing::info!(
-            "StreamCaster sidecar started; live writes require every ARC and hardware evidence gate"
+            "AVIAN PEAT/planning sidecar started; Silvus hardware configuration is owned by the external radio-management API"
         );
     }
 
@@ -222,15 +188,14 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     let state = state.read().await;
                     let backend = match &state.backend {
                         Backend::ContractOnly => "contract_only",
-                        Backend::Live(_) => "live_gated",
                         Backend::Simulator(_) => "simulator",
                     };
                     json!({
                         "status": "healthy",
                         "schema_version": STREAMCASTER_CONTROL_SCHEMA_VERSION,
                         "backend": backend,
-                        "live_write_adapter_available": matches!(state.backend, Backend::Live(_)),
-                        "credential_resolved": state.credential_resolved,
+                        "live_write_adapter_available": false,
+                        "hardware_configuration_authority": "external_radio_management_api",
                         "peat_enabled": state.peat.is_some(),
                         "fleet_generation": state.latest_plan_generation,
                         "latest_status": state.latest_status,
@@ -265,12 +230,6 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                 }
             }
             _ = mesh_poll.tick() => {
-                if let Some(status) = rollback_expired_activation(&state, now_unix_ms()).await {
-                    state.write().await.latest_status = Some(status.clone());
-                    let _ = session
-                        .put(TOPIC_STATUS, serde_json::to_vec(&status).unwrap_or_default())
-                        .await;
-                }
                 if let Some(observation) = observe_local_mesh(&state, now_unix_ms()).await {
                     state.write().await.latest_mesh_observation = serde_json::to_value(&observation).ok();
                     let _ = session
@@ -305,21 +264,23 @@ async fn process_operation(
     request: StreamCasterOperationRequest,
     now_ms: u64,
 ) -> StreamCasterOperationStatus {
-    if let Err(error) = request.validate() {
-        return failed_status(&request, now_ms, "invalid_operation", error.to_string());
+    if matches!(
+        request.intent,
+        StreamCasterOperationIntent::Activate
+            | StreamCasterOperationIntent::Confirm
+            | StreamCasterOperationIntent::Rollback
+    ) {
+        return blocked_status(
+            &request,
+            now_ms,
+            StreamCasterActivationGates::default(),
+            "external_management_required",
+            "Silvus hardware configuration is owned by the external radio-management API; AVIAN validates and distributes planning state only.",
+        );
     }
 
-    match request.intent {
-        StreamCasterOperationIntent::Activate => {
-            return activate_prepared(state, request, now_ms).await;
-        }
-        StreamCasterOperationIntent::Confirm => {
-            return confirm_prepared(state, request, now_ms).await;
-        }
-        StreamCasterOperationIntent::Rollback => {
-            return rollback_prepared(state, request, now_ms).await;
-        }
-        StreamCasterOperationIntent::Validate | StreamCasterOperationIntent::Prepare => {}
+    if let Err(error) = request.validate() {
+        return failed_status(&request, now_ms, "invalid_operation", error.to_string());
     }
 
     let configured_management = state.read().await.management_address.clone();
@@ -360,7 +321,6 @@ async fn process_operation(
         let state = state.read().await;
         match &state.backend {
             Backend::ContractOnly => 0,
-            Backend::Live(_) => 1,
             Backend::Simulator(_) => 2,
         }
     };
@@ -378,22 +338,6 @@ async fn process_operation(
     let prepared = {
         let state_guard = state.read().await;
         match &state_guard.backend {
-            Backend::Live(client) => {
-                let prepared = StreamCasterTransactionEngine::new(client.as_ref().clone())
-                    .prepare(&request.fleet_plan, &request.assignment, evidence, now_ms)
-                    .await;
-                match prepared {
-                    Ok(mut prepared) => {
-                        if request.fleet_plan.network.encryption_required
-                            && !matches!(client.encryption_enabled().await, Ok(true))
-                        {
-                            prepared.gates.live_capability_match = false;
-                        }
-                        Ok(prepared)
-                    }
-                    Err(error) => Err(error),
-                }
-            }
             Backend::Simulator(simulator) => {
                 StreamCasterTransactionEngine::new(simulator.clone())
                     .prepare(&request.fleet_plan, &request.assignment, evidence, now_ms)
@@ -421,7 +365,7 @@ async fn process_operation(
         && prepared.gates.antenna_installation_resolved
         && prepared.gates.credential_resolved
         && prepared.gates.rollback_snapshot_staged;
-    let status = StreamCasterOperationStatus {
+    StreamCasterOperationStatus {
         schema_version: STREAMCASTER_CONTROL_SCHEMA_VERSION,
         request_id: request.request_id.clone(),
         node_id: request.assignment.node_id.clone(),
@@ -439,11 +383,10 @@ async fn process_operation(
         message: (!plugin_ready).then(|| {
             "Read-only inspection succeeded; regulatory, antenna, credential, or capability evidence is incomplete.".into()
         }),
-    };
-    state.write().await.prepared = Some(prepared);
-    status
+    }
 }
 
+#[cfg(any())]
 async fn activate_prepared(
     state: &Arc<RwLock<ServiceState>>,
     request: StreamCasterOperationRequest,
@@ -552,6 +495,7 @@ async fn activate_prepared(
     }
 }
 
+#[cfg(any())]
 async fn confirm_prepared(
     state: &Arc<RwLock<ServiceState>>,
     request: StreamCasterOperationRequest,
@@ -633,6 +577,7 @@ async fn confirm_prepared(
     }
 }
 
+#[cfg(any())]
 async fn rollback_prepared(
     state: &Arc<RwLock<ServiceState>>,
     request: StreamCasterOperationRequest,
@@ -693,6 +638,7 @@ async fn rollback_prepared(
     }
 }
 
+#[cfg(any())]
 async fn rollback_expired_activation(
     state: &Arc<RwLock<ServiceState>>,
     now_ms: u64,
@@ -728,6 +674,7 @@ async fn rollback_expired_activation(
     Some(status)
 }
 
+#[cfg(any())]
 fn arc_authorization_is_fresh(authorization: ArcActivationAuthorization, now_ms: u64) -> bool {
     authorization.maintenance_window_authorized
         && authorization.known_landed
@@ -743,7 +690,6 @@ async fn read_capabilities(
 ) -> Result<StreamCasterCapabilities, streamcaster_control::StreamCasterError> {
     let state = state.read().await;
     match &state.backend {
-        Backend::Live(client) => client.read_capabilities(now_ms).await,
         Backend::Simulator(simulator) => simulator.read_capabilities(now_ms).await,
         Backend::ContractOnly => unreachable!(),
     }
@@ -863,7 +809,9 @@ async fn evidence_gates(
                     .as_deref(),
             )
             .is_some_and(|(directory, profile)| antenna_evidence_matches(directory, profile)),
-        credential_resolved: state.credential_resolved,
+        // AVIAN does not resolve radio credentials. The simulator marks this
+        // gate so it can validate the remaining planning inputs in isolation.
+        credential_resolved: state.simulate_radio,
         ..Default::default()
     }
 }
@@ -902,6 +850,7 @@ fn antenna_evidence_matches(directory: &Path, profile_id: &str) -> bool {
         && evidence.calibrated_at_ms > 0
 }
 
+#[cfg(any())]
 fn load_auth(path: Option<&Path>) -> anyhow::Result<StreamCasterAuth> {
     let Some(path) = path else {
         return Ok(StreamCasterAuth::None);
@@ -921,6 +870,7 @@ fn load_auth(path: Option<&Path>) -> anyhow::Result<StreamCasterAuth> {
 }
 
 #[cfg(unix)]
+#[cfg(any())]
 fn validate_secret_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(path)?.permissions().mode();
@@ -931,6 +881,7 @@ fn validate_secret_permissions(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[cfg(any())]
 fn validate_secret_permissions(path: &Path) -> anyhow::Result<()> {
     if !path.is_file() {
         bail!("StreamCaster credential path must be a regular file");
@@ -1037,27 +988,7 @@ async fn observe_local_mesh(
     };
 
     let (capabilities, effective, rf_links, error, simulated) = match backend {
-        Backend::ContractOnly => return None,
-        Backend::Live(api) => {
-            let capabilities = api.read_capabilities(observed_at_ms).await;
-            let effective = api.read_effective_settings(observed_at_ms).await;
-            let rf_links = api
-                .read_rf_links(
-                    effective
-                        .as_ref()
-                        .ok()
-                        .and_then(|settings| settings.node_id),
-                    observed_at_ms,
-                )
-                .await
-                .unwrap_or_default();
-            let error = capabilities
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .or_else(|| effective.as_ref().err().map(ToString::to_string));
-            (capabilities.ok(), effective.ok(), rf_links, error, false)
-        }
+        Backend::ContractOnly => (None, None, Vec::new(), None, false),
         Backend::Simulator(api) => {
             let capabilities = api.read_capabilities(observed_at_ms).await.ok();
             let effective = api.read_effective_settings(observed_at_ms).await.ok();
@@ -1109,8 +1040,7 @@ async fn observe_local_mesh(
             peat_endpoint_id: endpoint_id,
             peat_connected_peers: peat.as_ref().map_or(0, |node| node.peer_count()),
             position: latest_position.filter(|position| {
-                position.observed_at_ms
-                    <= observed_at_ms.saturating_add(ARC_AUTHORIZATION_MAX_CLOCK_SKEW_MS)
+                position.observed_at_ms <= observed_at_ms.saturating_add(POSITION_MAX_CLOCK_SKEW_MS)
                     && observed_at_ms.saturating_sub(position.observed_at_ms) <= POSITION_FRESH_MS
             }),
             radio: StreamCasterObservedRadio {
@@ -1292,7 +1222,6 @@ fn simulator_for(
 
 #[cfg(test)]
 mod tests {
-    use mesh_core::FleetActivationMechanism;
     use tempfile::TempDir;
 
     use super::*;
@@ -1377,9 +1306,7 @@ mod tests {
             serve: true,
             zenoh_endpoint: "unused".into(),
             source: "local-node".into(),
-            radio_url: None,
             simulate_radio: false,
-            credential_file: None,
             installation_evidence_dir: None,
             regulatory_evidence_file: None,
             peat_formation_id: Some("arc-radio".into()),
@@ -1397,7 +1324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simulator_prepares_and_applies_only_with_fresh_arc_authorization() {
+    async fn simulator_prepares_plans_but_blocks_all_hardware_intents() {
         let evidence = TempDir::new().unwrap();
         let regulatory_path = evidence.path().join("regulatory.json");
         std::fs::write(
@@ -1423,12 +1350,8 @@ mod tests {
             source: NodeId::from("sim-node"),
             sequence: AtomicU64::new(1),
             backend: Backend::Simulator(simulator),
-            credential_resolved: true,
             installation_evidence_dir: Some(evidence.path().to_path_buf()),
             regulatory_evidence_file: Some(regulatory_path),
-            prepared: None,
-            pending_activation: None,
-            confirmation_deadline_ms: None,
             latest_status: None,
             latest_plan_generation: None,
             latest_mesh_observation: None,
@@ -1476,64 +1399,19 @@ mod tests {
         let prepared = process_operation(&state, request.clone(), 10_000).await;
         assert_eq!(prepared.phase, StreamCasterApplyPhase::Prepared);
 
-        let mut unauthorized_confirmation = request.clone();
-        unauthorized_confirmation.intent = StreamCasterOperationIntent::Confirm;
-        unauthorized_confirmation.arc_authorization = Some(ArcActivationAuthorization {
-            maintenance_window_authorized: true,
-            known_landed: true,
-            preserves_control_bearer: true,
-            authorized_at_ms: 1,
-        });
-        let blocked_confirmation =
-            process_operation(&state, unauthorized_confirmation, 400_001).await;
-        assert_eq!(blocked_confirmation.phase, StreamCasterApplyPhase::Blocked);
-        assert_eq!(
-            blocked_confirmation.error_code.as_deref(),
-            Some("arc_authorization_expired")
-        );
-
-        request.intent = StreamCasterOperationIntent::Activate;
-        request.activation = FleetActivationMechanism::Scheduled {
-            activate_at_ms: 20_000,
-        };
-        request.arc_authorization = Some(ArcActivationAuthorization {
-            maintenance_window_authorized: true,
-            known_landed: true,
-            preserves_control_bearer: true,
-            authorized_at_ms: 1,
-        });
-        let stale = process_operation(&state, request.clone(), 400_001).await;
-        assert_eq!(stale.phase, StreamCasterApplyPhase::Blocked);
-        assert_eq!(
-            stale.error_code.as_deref(),
-            Some("arc_authorization_expired")
-        );
-
-        request.arc_authorization = Some(ArcActivationAuthorization {
-            maintenance_window_authorized: true,
-            known_landed: true,
-            preserves_control_bearer: true,
-            authorized_at_ms: 10_500,
-        });
-        let effective = process_operation(&state, request.clone(), 11_000).await;
-
-        assert_eq!(effective.phase, StreamCasterApplyPhase::Effective);
-        assert_eq!(
-            effective.effective.unwrap().network_id,
-            "ARC-RADIO".to_owned()
-        );
-
-        {
-            let mut current = state.write().await;
-            current.pending_activation = Some(request);
-            current.confirmation_deadline_ms = Some(12_000);
+        for intent in [
+            StreamCasterOperationIntent::Activate,
+            StreamCasterOperationIntent::Confirm,
+            StreamCasterOperationIntent::Rollback,
+        ] {
+            let mut hardware_request = request.clone();
+            hardware_request.intent = intent;
+            let blocked = process_operation(&state, hardware_request, 11_000).await;
+            assert_eq!(blocked.phase, StreamCasterApplyPhase::Blocked);
+            assert_eq!(
+                blocked.error_code.as_deref(),
+                Some("external_management_required")
+            );
         }
-        let deadman = rollback_expired_activation(&state, 12_000).await.unwrap();
-        assert_eq!(deadman.phase, StreamCasterApplyPhase::RolledBack);
-        assert!(deadman
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("confirmation was not received"));
     }
 }

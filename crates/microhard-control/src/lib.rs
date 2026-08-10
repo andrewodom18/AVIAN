@@ -254,6 +254,7 @@ impl<T: MicrohardCommandTransport> MicrohardReader<T> {
             serial_number: first_field(&fields, &["serial", "serial number"]).map(str::to_owned),
             firmware_version,
             mac_address: first_field(&fields, &["mac"]).map(str::to_owned),
+            system_name: None,
         };
 
         let rssi = self

@@ -78,7 +78,8 @@ pub use traffic::{
 };
 pub use vendor_radio::{
     RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
-    RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange, RadioIdentity,
-    RadioManagementInterface, RadioNeighborObservation, RadioNetworkMode, RadioVendorId,
-    VendorRadioError, RADIO_DEVICE_SCHEMA_VERSION,
+    RadioDiscoveryMethod, RadioDiscoveryObservation, RadioEffectiveState, RadioEvidenceLevel,
+    RadioFrequencyRange, RadioIdentity, RadioManagementAuthentication, RadioManagementEndpoint,
+    RadioManagementInterface, RadioNeighborObservation, RadioNetworkMode, RadioReachabilityStatus,
+    RadioVendorId, VendorRadioError, RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION,
 };

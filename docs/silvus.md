@@ -96,8 +96,9 @@ AVIAN recognizes `silvus` as a transport type and can give PEAT multiple IP
 addresses. The supplied StreamCaster 4000-series user and API manuals now
 ground the radio configuration contract, dry-run JSON-RPC sequence, and the
 available neighbor, signal, throughput, route, queue, airtime, and spectrum
-measurements. Hardware execution remains disabled until the adapter can check
-the target radio's live capabilities and effective settings.
+measurements. Physical execution belongs to the external CHUD-backed
+radio-management API, which must check the target radio's live capabilities
+and effective settings before accepting a transaction.
 
 The current operational workload assumption is one 5.5 MB priority payload
 from an airborne StreamCaster to a 4000-series control station over a 20 MHz
