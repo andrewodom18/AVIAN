@@ -27,14 +27,25 @@ Before the test, configure CHUD with the known bench address:
 tw_probe: 10.1.0.2
 ```
 
-If CHUD reports the radio as `auth-failed`, discovery succeeded but protected
-management requires an approved TrellisWare client certificate. Configure that
-identity in CHUD using `radio_cert_TW_<N>_cert` plus `_key`, a bundled PEM, or
-`_p12` plus `_password`. Do not copy the certificate or password into this
-repository, ARC configuration, AVIAN arguments, PEAT, or test logs.
+If CHUD reports the radio as `auth-failed`, discovery succeeded but the supplied
+management authentication was rejected. Inspect CHUD's detailed TLS/API evidence
+before deciding whether a client certificate, different credential, or firmware
+configuration is required. Do not copy credentials into this repository, ARC
+configuration, AVIAN arguments, PEAT, or test logs.
 
 The monitor writes a timestamped CSV timeline, before/after Windows network snapshots, and a summary under `Desktop\Radio Test Results`. All checks use local Windows and localhost endpoints, so collection continues if Wi-Fi or the internet connection drops.
 
 Press **Q** in the monitoring window to finish cleanly and generate the summary. `Ctrl+C` also stops the loop, although **Q** is preferred.
 
-If the onboard `Ethernet 2` adapter is disabled, run `Enable-RadioEthernet.ps1`. It requests Windows administrator approval, enables only that adapter, assigns `10.1.0.20/24`, and deliberately installs no gateway so Wi-Fi remains the internet path.
+Each run builds the current AVIAN plugin and ARC service images and writes a
+bench manifest containing the ARC and AVIAN commits, plugin SHA-256, Compose
+file SHA-256, and Link Manager image ID. Run `Stop-RadioBenchTest.ps1` after a
+test to stop only the recorded AVIAN process and the dedicated Link Manager
+container.
+
+If the onboard `Ethernet 2` adapter is disabled, run `Enable-RadioEthernet.ps1`.
+It requests Windows administrator approval, records a CLIXML recovery snapshot,
+preserves existing addresses and routes, and adds `10.1.0.20/24`. It refuses to
+continue when the adapter already has a default route. Use
+`Restore-RadioEthernet.ps1 -SnapshotPath <path>` to remove the added bench
+address and restore the recorded DHCP, metric, addresses, and disabled state.

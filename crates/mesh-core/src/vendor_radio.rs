@@ -5,6 +5,8 @@
 //! ARC remains the authority for desired configuration and activation policy.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeSet;
+use std::net::IpAddr;
 use thiserror::Error;
 
 use crate::NodeId;
@@ -351,6 +353,58 @@ pub struct RadioDeviceObservation {
     pub error: Option<String>,
 }
 
+impl RadioDeviceObservation {
+    pub fn validate(&self) -> Result<(), VendorRadioError> {
+        if self.schema_version != RADIO_DEVICE_SCHEMA_VERSION {
+            return Err(VendorRadioError::UnsupportedSchemaVersion(
+                self.schema_version,
+            ));
+        }
+        if self.observed_at_ms == 0 {
+            return Err(VendorRadioError::InvalidObservationTimestamp);
+        }
+        if let Some(management_ip) = self.management_ip.as_deref() {
+            validate_ip("management_ip", management_ip)?;
+        }
+        if self.status == RadioDeviceStatus::Online && self.identity.is_none() {
+            return Err(VendorRadioError::MissingOnlineIdentity);
+        }
+        if let Some(identity) = &self.identity {
+            validate_token("model", &identity.model)?;
+            if let Some(mac) = identity.mac_address.as_deref() {
+                validate_mac(mac)?;
+            }
+        }
+        validate_optional_positive("center_frequency_mhz", self.effective.center_frequency_mhz)?;
+        validate_optional_positive("bandwidth_mhz", self.effective.bandwidth_mhz)?;
+        validate_optional_finite("transmit_power_dbm", self.effective.transmit_power_dbm)?;
+        validate_optional_finite("reported_rssi_dbm", self.effective.reported_rssi_dbm)?;
+        if self
+            .effective
+            .battery_percent
+            .is_some_and(|value| value > 100)
+        {
+            return Err(VendorRadioError::InvalidBatteryPercent);
+        }
+
+        let mut peer_ids = BTreeSet::new();
+        for neighbor in &self.neighbors {
+            validate_token("peer_id", &neighbor.peer_id)?;
+            if !peer_ids.insert(neighbor.peer_id.as_str()) {
+                return Err(VendorRadioError::DuplicatePeerId(neighbor.peer_id.clone()));
+            }
+            if let Some(peer_ip) = neighbor.peer_ip.as_deref() {
+                validate_ip("peer_ip", peer_ip)?;
+            }
+            validate_optional_finite("neighbor_rssi_dbm", neighbor.rssi_dbm)?;
+            validate_optional_finite("neighbor_snr_db", neighbor.snr_db)?;
+            validate_optional_positive("neighbor_tx_rate_mbps", neighbor.tx_rate_mbps)?;
+            validate_optional_positive("neighbor_rx_rate_mbps", neighbor.rx_rate_mbps)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error, PartialEq)]
 pub enum VendorRadioError {
     #[error("unsupported vendor-radio schema version {0}")]
@@ -381,6 +435,45 @@ pub enum VendorRadioError {
     InvalidManagementEndpoint,
     #[error("radio discovery requires at least one evidence method")]
     MissingDiscoveryMethods,
+    #[error("radio observation timestamp must be positive")]
+    InvalidObservationTimestamp,
+    #[error("online radio observation requires an identity")]
+    MissingOnlineIdentity,
+    #[error("invalid {field} IP address {value:?}")]
+    InvalidIpAddress { field: &'static str, value: String },
+    #[error("invalid radio MAC address {0:?}")]
+    InvalidMacAddress(String),
+    #[error("radio battery percent must be between 0 and 100")]
+    InvalidBatteryPercent,
+    #[error("duplicate radio neighbor peer ID {0:?}")]
+    DuplicatePeerId(String),
+}
+
+fn validate_ip(field: &'static str, value: &str) -> Result<(), VendorRadioError> {
+    value
+        .parse::<IpAddr>()
+        .map(|_| ())
+        .map_err(|_| VendorRadioError::InvalidIpAddress {
+            field,
+            value: value.to_owned(),
+        })
+}
+
+fn validate_mac(value: &str) -> Result<(), VendorRadioError> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 17
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 2 | 5 | 8 | 11 | 14) {
+                *byte == b':'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(VendorRadioError::InvalidMacAddress(value.to_owned()))
+    }
 }
 
 fn validate_token(field: &'static str, value: &str) -> Result<(), VendorRadioError> {
@@ -495,5 +588,41 @@ mod tests {
             "client_certificate_required"
         );
         assert_eq!(encoded["management_endpoints"][0]["interface_index"], 6);
+    }
+
+    #[test]
+    fn device_observation_rejects_invalid_identity_and_telemetry() {
+        let mut observation = RadioDeviceObservation {
+            schema_version: RADIO_DEVICE_SCHEMA_VERSION,
+            observed_at_ms: 1,
+            source: NodeId::from("radio/trellisware/001e3f209a10"),
+            status: RadioDeviceStatus::Online,
+            simulated: false,
+            management_ip: Some("10.1.0.2".into()),
+            identity: Some(RadioIdentity {
+                vendor: RadioVendorId::trellisware(),
+                model: "tw-950".into(),
+                serial_number: None,
+                firmware_version: None,
+                mac_address: Some("00:1e:3f:20:9a:10".into()),
+                system_name: None,
+            }),
+            effective: RadioEffectiveState::default(),
+            neighbors: vec![],
+            error: None,
+        };
+        observation.validate().unwrap();
+
+        observation.effective.battery_percent = Some(101);
+        assert_eq!(
+            observation.validate(),
+            Err(VendorRadioError::InvalidBatteryPercent)
+        );
+        observation.effective.battery_percent = None;
+        observation.identity.as_mut().unwrap().mac_address = Some("not-a-mac".into());
+        assert!(matches!(
+            observation.validate(),
+            Err(VendorRadioError::InvalidMacAddress(_))
+        ));
     }
 }

@@ -38,9 +38,9 @@ pub struct TrellisWareDiscoveryArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct NeighborEntry {
-    #[serde(alias = "IPAddress", alias = "ip")]
+    #[serde(alias = "IPAddress", alias = "ip", alias = "dst")]
     ip_address: String,
-    #[serde(alias = "LinkLayerAddress", alias = "mac")]
+    #[serde(alias = "LinkLayerAddress", alias = "mac", alias = "lladdr")]
     link_layer_address: String,
     #[serde(default, alias = "InterfaceAlias", alias = "dev")]
     interface_alias: Option<String>,
@@ -54,6 +54,7 @@ struct NeighborEntry {
 #[serde(untagged)]
 enum NeighborState {
     Name(String),
+    Names(Vec<String>),
     Code(u8),
 }
 
@@ -67,16 +68,26 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
     };
 
     loop {
-        stimulate_neighbors(&args.probe_ips).await;
-        let discoveries = discover().await?;
-        emit(&discoveries, args.output.as_deref())?;
-        if let Some(session) = session.as_ref() {
-            for discovery in &discoveries {
-                session
-                    .put(RADIO_DISCOVERY_TOPIC, serde_json::to_vec(discovery)?)
-                    .await
-                    .map_err(|error| anyhow::anyhow!("publishing TW-950 discovery: {error}"))?;
+        let iteration = async {
+            stimulate_neighbors(&args.probe_ips).await;
+            let discoveries = discover().await?;
+            emit(&discoveries, args.output.as_deref())?;
+            if let Some(session) = session.as_ref() {
+                for discovery in &discoveries {
+                    session
+                        .put(RADIO_DISCOVERY_TOPIC, serde_json::to_vec(discovery)?)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("publishing TW-950 discovery: {error}"))?;
+                }
             }
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(error) = iteration {
+            if !args.watch {
+                return Err(error);
+            }
+            eprintln!("TW-950 discovery iteration failed; retrying: {error:#}");
         }
         if !args.watch {
             break;
@@ -148,18 +159,16 @@ async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscov
         } else {
             RadioReachabilityStatus::Unreachable
         },
-        management_authentication: if reachable {
-            RadioManagementAuthentication::ClientCertificateRequired
-        } else {
-            RadioManagementAuthentication::Unknown
-        },
+        // A TCP handshake proves only reachability. Authentication requirements
+        // must come from an actual TLS/application-layer exchange.
+        management_authentication: RadioManagementAuthentication::Unknown,
         management_endpoints: endpoints,
         discovery_methods: vec![
             RadioDiscoveryMethod::NeighborTable,
             RadioDiscoveryMethod::Oui,
             RadioDiscoveryMethod::TcpReachability,
         ],
-        error_code: reachable.then_some("client_certificate_required".into()),
+        error_code: None,
     };
     observation.validate().ok()?;
     Some(observation)
@@ -273,6 +282,12 @@ fn neighbor_state_is_inactive(state: Option<&NeighborState>) -> bool {
             state.to_ascii_lowercase().as_str(),
             "unreachable" | "incomplete" | "failed"
         ),
+        NeighborState::Names(states) => states.iter().any(|state| {
+            matches!(
+                state.to_ascii_lowercase().as_str(),
+                "unreachable" | "incomplete" | "failed"
+            )
+        }),
         NeighborState::Code(state) => matches!(state, 0 | 1),
     })
 }
@@ -311,11 +326,26 @@ fn eui64_link_local(mac: &str) -> Option<Ipv6Addr> {
 fn emit(discoveries: &[RadioDiscoveryObservation], output: Option<&Path>) -> anyhow::Result<()> {
     let encoded = serde_json::to_string_pretty(discoveries)?;
     if let Some(path) = output {
-        std::fs::write(path, format!("{encoded}\n"))
-            .with_context(|| format!("writing TW-950 discoveries to {}", path.display()))?;
+        atomic_write(path, format!("{encoded}\n").as_bytes())?;
     } else {
         println!("{encoded}");
     }
+    Ok(())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating temporary output beside {}", path.display()))?;
+    std::io::Write::write_all(&mut temporary, contents)
+        .with_context(|| format!("writing temporary output for {}", path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing {} atomically", path.display()))?;
     Ok(())
 }
 
@@ -361,6 +391,15 @@ mod tests {
             Some("00:1e:3f:20:9a:10")
         );
         assert!(is_trellisware_mac("00:1e:3f:20:9a:10"));
+    }
+
+    #[test]
+    fn parses_linux_iproute2_neighbor_shape() {
+        let encoded = br#"[{"dst":"10.1.0.2","dev":"eth0","lladdr":"00:1e:3f:20:9a:10","state":["REACHABLE"]}]"#;
+        let entries = parse_neighbor_json(encoded).unwrap();
+        assert_eq!(entries[0].ip_address, "10.1.0.2");
+        assert_eq!(entries[0].link_layer_address, "00:1e:3f:20:9a:10");
+        assert!(!neighbor_state_is_inactive(entries[0].state.as_ref()));
     }
 
     #[test]
