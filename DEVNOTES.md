@@ -26,6 +26,14 @@ avian_cargo() {
 
 ## Build and verify everything
 
+The shared local/CI entrypoint is:
+
+```zsh
+just verify
+```
+
+The equivalent individual commands are:
+
 ```zsh
 cargo fmt --all --check
 cargo test --workspace
