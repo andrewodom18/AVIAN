@@ -1,0 +1,110 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avian-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-quality:
+    name: Rust quality and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: "1.57.0"
+
+      - name: Cache Cargo inputs and build output
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Report toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Run the local verification contract
+        run: just verify
+
+  container-build:
+    name: arc-radio-plugin container
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+        with:
+          just-version: "1.57.0"
+
+      - name: Build container without publishing
+        run: just docker-build
+
+  powershell-parse:
+    name: PowerShell bench scripts
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Parse every radio bench script
+        shell: pwsh
+        run: |
+          $parseErrors = @()
+          Get-ChildItem scripts/radio-bench -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            $parseErrors += $errors
+          }
+
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | Format-List
+            throw "$($parseErrors.Count) PowerShell parse error(s) found."
+          }
+
+  required:
+    name: AVIAN CI required
+    if: always()
+    needs: [rust-quality, container-build, powershell-parse]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every pipeline lane
+        env:
+          RUST_RESULT: ${{ needs.rust-quality.result }}
+          CONTAINER_RESULT: ${{ needs.container-build.result }}
+          POWERSHELL_RESULT: ${{ needs.powershell-parse.result }}
+        run: |
+          test "$RUST_RESULT" = success
+          test "$CONTAINER_RESULT" = success
+          test "$POWERSHELL_RESULT" = success
