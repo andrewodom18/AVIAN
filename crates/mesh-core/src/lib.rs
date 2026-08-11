@@ -12,6 +12,7 @@ mod relay;
 mod relay_runtime;
 mod topology;
 mod traffic;
+mod vendor_radio;
 
 pub use altitude::{Altitude, AltitudeError, SYSTEM_MAX_MSL_FT, SYSTEM_MAX_MSL_M};
 pub use command::{CommandError, EmergencyAction, EmergencyCommand, ReplayGuard};
@@ -74,4 +75,11 @@ pub use topology::{
 pub use traffic::{
     RelayObservationPublication, RelayObservationTrafficGovernor, SwarmStatusSummary,
     SwarmTrafficPolicy, TelemetryPublication, TelemetryTrafficGovernor, TrafficPolicyError,
+};
+pub use vendor_radio::{
+    RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
+    RadioDiscoveryMethod, RadioDiscoveryObservation, RadioEffectiveState, RadioEvidenceLevel,
+    RadioFrequencyRange, RadioIdentity, RadioManagementAuthentication, RadioManagementEndpoint,
+    RadioManagementInterface, RadioNeighborObservation, RadioNetworkMode, RadioReachabilityStatus,
+    RadioVendorId, VendorRadioError, RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION,
 };

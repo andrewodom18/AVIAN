@@ -1,7 +1,8 @@
 //! StreamCaster management boundary for AVIAN.
 //!
-//! Hardware mutation remains gated by ARC policy and radio-in-the-loop evidence,
-//! but the vendor boundary itself is implemented and contract-tested here.
+//! This crate is read-only for physical hardware. Silvus mutation is owned by
+//! the external radio-management API; only the in-process simulator can mutate
+//! settings for isolated planning tests.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,7 +102,7 @@ impl StreamCasterClient {
         })
     }
 
-    pub async fn rpc(&self, method: &str, params: Vec<String>) -> Result<Value, StreamCasterError> {
+    async fn rpc(&self, method: &str, params: Vec<String>) -> Result<Value, StreamCasterError> {
         self.rpc_params(
             method,
             Value::Array(params.into_iter().map(Value::String).collect()),
@@ -109,11 +110,7 @@ impl StreamCasterClient {
         .await
     }
 
-    pub async fn rpc_params(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, StreamCasterError> {
+    async fn rpc_params(&self, method: &str, params: Value) -> Result<Value, StreamCasterError> {
         self.ensure_authenticated().await?;
         let first = self.send_rpc(method, params.clone()).await?;
         if !matches!(first.status, 401 | 403) {
@@ -733,6 +730,7 @@ pub trait SimulatedStreamCasterWriteApi: StreamCasterReadApi {
 }
 
 #[async_trait]
+#[cfg(any())]
 pub trait LiveStreamCasterWriteApi: StreamCasterReadApi {
     async fn apply_effective_settings(
         &self,
@@ -757,12 +755,14 @@ pub trait LiveStreamCasterWriteApi: StreamCasterReadApi {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any())]
 pub enum StreamCasterChangeEffect {
     Runtime,
     SoftBoot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any())]
 pub struct StreamCasterParameterMetadata {
     pub command: &'static str,
     pub change_effect: StreamCasterChangeEffect,
@@ -773,6 +773,7 @@ pub struct StreamCasterParameterMetadata {
 
 /// Auditable allowlist for the settings the live adapter is permitted to
 /// mutate. Encryption key material is intentionally absent.
+#[cfg(any())]
 pub const STREAMCASTER_MUTABLE_PARAMETERS: &[StreamCasterParameterMetadata] = &[
     StreamCasterParameterMetadata {
         command: "system_name",
@@ -840,6 +841,7 @@ pub const STREAMCASTER_MUTABLE_PARAMETERS: &[StreamCasterParameterMetadata] = &[
 ];
 
 #[async_trait]
+#[cfg(any())]
 impl LiveStreamCasterWriteApi for StreamCasterClient {
     async fn apply_effective_settings(
         &self,
@@ -876,6 +878,7 @@ impl LiveStreamCasterWriteApi for StreamCasterClient {
     }
 }
 
+#[cfg(any())]
 impl StreamCasterClient {
     async fn apply_delta(
         &self,
@@ -961,6 +964,7 @@ impl StreamCasterClient {
     }
 }
 
+#[cfg(any())]
 fn changed_persist_commands(
     snapshot: &StreamCasterEffectiveSettings,
     desired: &StreamCasterEffectiveSettings,
@@ -995,6 +999,7 @@ fn changed_persist_commands(
     commands
 }
 
+#[cfg(any())]
 fn format_frequency(value: f64) -> String {
     if value.fract().abs() < 0.000_1 {
         format!("{value:.0}")
@@ -1003,6 +1008,7 @@ fn format_frequency(value: f64) -> String {
     }
 }
 
+#[cfg(any())]
 fn format_bandwidth(value: ChannelBandwidthMhz) -> String {
     bandwidth_number(value).to_string()
 }
@@ -1228,6 +1234,7 @@ impl<A: SimulatedStreamCasterWriteApi> StreamCasterTransactionEngine<A> {
     }
 }
 
+#[cfg(any())]
 impl<A: LiveStreamCasterWriteApi> StreamCasterTransactionEngine<A> {
     /// Applies only to volatile runtime state. Persistence is a separate,
     /// explicitly confirmed operation.
@@ -1666,6 +1673,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any())]
     fn mutable_parameter_metadata_excludes_secret_and_unsupported_settings() {
         let commands: Vec<_> = STREAMCASTER_MUTABLE_PARAMETERS
             .iter()
@@ -1681,6 +1689,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any())]
     fn persistence_tracks_max_power_mode_separately_from_observed_power() {
         let snapshot = effective();
         let mut maximum = snapshot.clone();

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "observed_at_ms": 10000,
+  "source": "radio/trellisware/001e3f209a10",
+  "vendor": "trellisware",
+  "model_hint": "tw-950",
+  "mac_address": "00:1e:3f:20:9a:10",
+  "reachability": "reachable",
+  "management_authentication": "client_certificate_required",
+  "management_endpoints": [
+    {
+      "address": "10.1.0.2",
+      "port": 443,
+      "interface": "Ethernet 2",
+      "interface_index": 6
+    },
+    {
+      "address": "fe80::21e:3fff:fe20:9a10",
+      "port": 443,
+      "interface": "Ethernet 2",
+      "interface_index": 6
+    }
+  ],
+  "discovery_methods": [
+    "neighbor_table",
+    "oui",
+    "tcp_reachability"
+  ],
+  "error_code": "client_certificate_required"
+}

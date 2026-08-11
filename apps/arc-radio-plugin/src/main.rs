@@ -11,12 +11,21 @@ use mesh_peat::AvianRecord;
 use serde::{Deserialize, Serialize};
 
 mod bootstrap;
+mod microhard_probe;
 mod service;
+mod trellisware_discovery;
+mod trellisware_probe;
 
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Generate deterministic PEAT identities and per-node Ansible peer variables.
     Bootstrap(bootstrap::BootstrapArgs),
+    /// Normalize captured Microhard read-only AT responses without hardware.
+    MicrohardProbe(microhard_probe::MicrohardProbeArgs),
+    /// Read a TW-950 over its HTTPS TNC agent API and optionally publish it to ARC.
+    TrelliswareProbe(trellisware_probe::TrellisWareProbeArgs),
+    /// Discover reachable TW-950 radios without requiring management credentials.
+    TrelliswareDiscover(trellisware_discovery::TrellisWareDiscoveryArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -49,17 +58,10 @@ struct Args {
     #[arg(long, default_value = "arc-radio-plugin/local")]
     source: String,
 
-    /// Optional StreamCaster management base URL. Omit for contract-only mode.
-    #[arg(long)]
-    radio_url: Option<String>,
-
-    /// Use the in-process StreamCaster simulator. Mutually exclusive with --radio-url.
+    /// Use the in-process StreamCaster simulator for planning validation only.
+    /// Physical Silvus configuration is owned by the external radio-management API.
     #[arg(long)]
     simulate_radio: bool,
-
-    /// Optional protected JSON credential file for authenticated read-only API calls.
-    #[arg(long)]
-    credential_file: Option<PathBuf>,
 
     /// Directory containing signed/approved antenna installation evidence JSON.
     #[arg(long)]
@@ -111,6 +113,15 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(Command::Bootstrap(command)) = args.command.as_ref() {
         return bootstrap::run(command);
+    }
+    if let Some(Command::MicrohardProbe(command)) = args.command.as_ref() {
+        return microhard_probe::run(command).await;
+    }
+    if let Some(Command::TrelliswareProbe(command)) = args.command.as_ref() {
+        return trellisware_probe::run(command).await;
+    }
+    if let Some(Command::TrelliswareDiscover(command)) = args.command.as_ref() {
+        return trellisware_discovery::run(command).await;
     }
     if args.serve {
         return service::serve(args).await;
