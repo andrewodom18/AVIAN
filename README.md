@@ -1,4 +1,4 @@
-# AVIAN
+# AVIAN <img src="assets/brand/avian-mark-white-on-black.png" alt="AVIAN logo" width="36" align="right" />
 
 **Autonomous Vehicle Interoperability and Networking**
 
@@ -33,8 +33,11 @@ persistent state, and static peer bootstrap. `mesh-agent` can ingest live
 ArduPilot/PX4 MAVLink telemetry over UDP or TCP; direct serial is an optional
 build feature. Silvus StreamCaster is modeled as an IP MANET underlay, and each
 PEAT peer can have multiple underlay addresses for reconnection across Silvus,
-Wi-Fi, cellular, or other paths. Emergency flight-controller output and live
-radio-specific metrics are not implemented yet.
+Wi-Fi, cellular, or other paths. MAVLink emergency-command transmission is not
+enabled yet. The ARC radio sidecar now collects read-only StreamCaster
+observations when a radio reports them; hardware configuration apply remains
+disabled by default until its evidence, maintenance-window, and confirmation
+gates are satisfied.
 
 When supplied a shared relay-runtime configuration, `mesh-agent` also combines
 mesh telemetry and relay-link observations into leaderless in-flight chain
@@ -51,7 +54,10 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mesh-sim` | Deterministic failure and recovery simulation |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
-| `arc-radio-plugin` | Hardware-independent radio planning validation, traffic assessment, PEAT encoding, and observations |
+| `arc-radio-plugin` | Vendor-neutral radio planning, traffic assessment, PEAT encoding, observations, and guarded StreamCaster sidecar integration |
+| `streamcaster-control` | Allowlisted StreamCaster JSON-RPC client with guarded read, validate, apply, confirm, and rollback flows |
+| `microhard-control` | Read-only-first Microhard management queries and normalized observations |
+| `trellisware-control` | Read-only TW-950 management queries and normalized observations |
 
 Radio integrations use an additive vendor-neutral observation contract. Silvus
 StreamCaster remains the first live control implementation; a read-only-first
@@ -118,6 +124,7 @@ With Rust 1.91.1 installed:
 cargo test --workspace
 cargo run -p mesh-sim
 cargo run -p mesh-agent -- --help
+cargo run -p arc-radio-plugin -- --help
 ```
 
 With Docker:
@@ -135,8 +142,8 @@ The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
 The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
-The [Arc radio-plugin guide](docs/arc-radio-plugin.md) defines the local
-Arc-to-AVIAN ownership boundary and the 4200/4400/5200 configuration contract.
+The [ARC radio-plugin guide](docs/arc-radio-plugin.md) defines the local
+ARC-to-AVIAN ownership boundary and the 4200/4400/5200 configuration contract.
 The [radio mesh bootstrap guide](docs/arc-radio-bootstrap.md) generates
 deterministic PEAT identities and ARC-ready bounded peer maps before surrogate
 deployment.
@@ -149,3 +156,5 @@ The [ARC UI relay-planning guide](docs/arc-ui-relay-planning.md) defines
 automatic relay reservation, manual overrides, and individual/group tasks.
 The [traffic-management guide](docs/traffic-management.md) defines routine,
 priority, radio-observation, and operator-summary traffic bounds.
+The [brand assets](assets/brand/README.md) contain the AVIAN mark in
+black-on-white and white-on-black variants.
