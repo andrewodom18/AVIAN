@@ -154,19 +154,22 @@ impl RadioDiscoveryObservation {
                 self.schema_version,
             ));
         }
+        if self.observed_at_ms == 0 {
+            return Err(VendorRadioError::InvalidObservationTimestamp);
+        }
         validate_token("model_hint", &self.model_hint)?;
         if self.mac_address.trim().is_empty() {
             return Err(VendorRadioError::MissingMacAddress);
         }
+        validate_mac(&self.mac_address)?;
         if self.management_endpoints.is_empty() {
             return Err(VendorRadioError::MissingManagementEndpoints);
         }
-        if self
-            .management_endpoints
-            .iter()
-            .any(|endpoint| endpoint.address.trim().is_empty() || endpoint.port == 0)
-        {
-            return Err(VendorRadioError::InvalidManagementEndpoint);
+        for endpoint in &self.management_endpoints {
+            if endpoint.address.trim().is_empty() || endpoint.port == 0 {
+                return Err(VendorRadioError::InvalidManagementEndpoint);
+            }
+            validate_ip("management_endpoint", &endpoint.address)?;
         }
         if self.discovery_methods.is_empty() {
             return Err(VendorRadioError::MissingDiscoveryMethods);
@@ -517,6 +520,28 @@ fn validate_optional_positive(
 mod tests {
     use super::*;
 
+    fn valid_device_observation() -> RadioDeviceObservation {
+        RadioDeviceObservation {
+            schema_version: RADIO_DEVICE_SCHEMA_VERSION,
+            observed_at_ms: 1,
+            source: NodeId::from("radio/trellisware/001e3f209a10"),
+            status: RadioDeviceStatus::Online,
+            simulated: false,
+            management_ip: Some("10.1.0.2".into()),
+            identity: Some(RadioIdentity {
+                vendor: RadioVendorId::trellisware(),
+                model: "tw-950".into(),
+                serial_number: None,
+                firmware_version: None,
+                mac_address: Some("00:1e:3f:20:9a:10".into()),
+                system_name: None,
+            }),
+            effective: RadioEffectiveState::default(),
+            neighbors: vec![],
+            error: None,
+        }
+    }
+
     #[test]
     fn vendor_ids_are_extensible_but_safe_for_topics_and_records() {
         assert_eq!(RadioVendorId::microhard().as_str(), "microhard");
@@ -591,26 +616,86 @@ mod tests {
     }
 
     #[test]
-    fn device_observation_rejects_invalid_identity_and_telemetry() {
-        let mut observation = RadioDeviceObservation {
-            schema_version: RADIO_DEVICE_SCHEMA_VERSION,
+    fn discovery_record_accepts_ipv4_and_ipv6_management_endpoints() {
+        let discovery = RadioDiscoveryObservation {
+            schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
             observed_at_ms: 1,
             source: NodeId::from("radio/trellisware/001e3f209a10"),
-            status: RadioDeviceStatus::Online,
-            simulated: false,
-            management_ip: Some("10.1.0.2".into()),
-            identity: Some(RadioIdentity {
-                vendor: RadioVendorId::trellisware(),
-                model: "tw-950".into(),
-                serial_number: None,
-                firmware_version: None,
-                mac_address: Some("00:1e:3f:20:9a:10".into()),
-                system_name: None,
-            }),
-            effective: RadioEffectiveState::default(),
-            neighbors: vec![],
-            error: None,
+            vendor: RadioVendorId::trellisware(),
+            model_hint: "tw-950".into(),
+            mac_address: "00:1e:3f:20:9a:10".into(),
+            serial_number: None,
+            hostname: None,
+            reachability: RadioReachabilityStatus::Reachable,
+            management_authentication: RadioManagementAuthentication::Unknown,
+            management_endpoints: vec![
+                RadioManagementEndpoint {
+                    address: "10.1.0.2".into(),
+                    port: 443,
+                    interface: Some("Ethernet 2".into()),
+                    interface_index: Some(6),
+                },
+                RadioManagementEndpoint {
+                    address: "fe80::21e:3fff:fe20:9a10".into(),
+                    port: 443,
+                    interface: Some("Ethernet 2".into()),
+                    interface_index: Some(6),
+                },
+            ],
+            discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
+            error_code: None,
         };
+
+        discovery.validate().unwrap();
+    }
+
+    #[test]
+    fn discovery_record_rejects_invalid_timestamp_mac_and_endpoint_address() {
+        let mut discovery = RadioDiscoveryObservation {
+            schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
+            observed_at_ms: 0,
+            source: NodeId::from("radio/trellisware/001e3f209a10"),
+            vendor: RadioVendorId::trellisware(),
+            model_hint: "tw-950".into(),
+            mac_address: "00:1e:3f:20:9a:10".into(),
+            serial_number: None,
+            hostname: None,
+            reachability: RadioReachabilityStatus::Reachable,
+            management_authentication: RadioManagementAuthentication::Unknown,
+            management_endpoints: vec![RadioManagementEndpoint {
+                address: "10.1.0.2".into(),
+                port: 443,
+                interface: None,
+                interface_index: None,
+            }],
+            discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
+            error_code: None,
+        };
+
+        assert_eq!(
+            discovery.validate(),
+            Err(VendorRadioError::InvalidObservationTimestamp)
+        );
+        discovery.observed_at_ms = 1;
+        discovery.mac_address = "not-a-mac".into();
+        assert!(matches!(
+            discovery.validate(),
+            Err(VendorRadioError::InvalidMacAddress(_))
+        ));
+        discovery.mac_address = "00:1e:3f:20:9a:10".into();
+        discovery.management_endpoints[0].address = "10.1.0.999".into();
+        assert!(matches!(
+            discovery.validate(),
+            Err(VendorRadioError::InvalidIpAddress {
+                field: "management_endpoint",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn device_observation_rejects_invalid_identity_and_telemetry() {
+        let mut observation = valid_device_observation();
         observation.validate().unwrap();
 
         observation.effective.battery_percent = Some(101);
@@ -624,5 +709,60 @@ mod tests {
             observation.validate(),
             Err(VendorRadioError::InvalidMacAddress(_))
         ));
+    }
+
+    #[test]
+    fn device_observation_rejects_invalid_network_and_neighbor_evidence() {
+        let mut observation = valid_device_observation();
+        observation.management_ip = Some("not-an-ip".into());
+        assert!(matches!(
+            observation.validate(),
+            Err(VendorRadioError::InvalidIpAddress {
+                field: "management_ip",
+                ..
+            })
+        ));
+
+        observation.management_ip = Some("fe80::21e:3fff:fe20:9a10".into());
+        observation.neighbors = vec![
+            RadioNeighborObservation {
+                peer_id: "peer-1".into(),
+                peer_ip: Some("10.1.0.3".into()),
+                rssi_dbm: Some(-60.0),
+                snr_db: Some(18.0),
+                tx_rate_mbps: Some(5.0),
+                rx_rate_mbps: Some(5.0),
+            },
+            RadioNeighborObservation {
+                peer_id: "peer-1".into(),
+                peer_ip: Some("fe80::21e:3fff:fe17:abf0".into()),
+                rssi_dbm: Some(-61.0),
+                snr_db: Some(17.0),
+                tx_rate_mbps: Some(4.0),
+                rx_rate_mbps: Some(4.0),
+            },
+        ];
+        assert_eq!(
+            observation.validate(),
+            Err(VendorRadioError::DuplicatePeerId("peer-1".into()))
+        );
+
+        observation.neighbors.pop();
+        observation.neighbors[0].peer_ip = Some("invalid".into());
+        assert!(matches!(
+            observation.validate(),
+            Err(VendorRadioError::InvalidIpAddress {
+                field: "peer_ip",
+                ..
+            })
+        ));
+        observation.neighbors[0].peer_ip = Some("10.1.0.3".into());
+        observation.neighbors[0].tx_rate_mbps = Some(0.0);
+        assert_eq!(
+            observation.validate(),
+            Err(VendorRadioError::NonPositive {
+                field: "neighbor_tx_rate_mbps"
+            })
+        );
     }
 }
