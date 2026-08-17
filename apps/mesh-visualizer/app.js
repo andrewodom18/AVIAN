@@ -235,6 +235,7 @@ function render() {
     ? step.formation_summary.simulated_aircraft + step.formation_summary.control_stations
     : step.nodes.length;
   elements.missionSync.textContent = `${step.metrics.mission_synced_nodes}/${formationSize}`;
+  elements.missionSync.nextElementSibling.hidden = Boolean(step.formation_summary);
   elements.continuity.textContent = step.metrics.continuity.toUpperCase();
   renderTopology(step); renderDetails(step); renderTimeline();
 }
