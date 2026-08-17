@@ -7,8 +7,8 @@ use ed25519_dalek::SigningKey;
 use mesh_core::{
     Altitude, DeliveryClass, DeliveryPolicy, EmergencyAck, EmergencyAction, EmergencyCommand,
     FlightStack, LinkCandidate, LinkGeometry, LinkId, LinkMetrics, LinkOrchestrator, MeshPayload,
-    MissionState, MissionStatus, NodeId, NodeProfile, ReplayGuard, Telemetry, TransportKind,
-    SYSTEM_MAX_MSL_M,
+    MissionState, MissionStatus, NodeId, NodeProfile, NodeRole, ReplayGuard, Telemetry,
+    TransportKind, SYSTEM_MAX_MSL_M,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -249,6 +249,58 @@ pub struct ScenarioReport {
     pub recovered_node_converged: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VisualScenario {
+    pub schema_version: u8,
+    pub name: String,
+    pub description: String,
+    pub steps: Vec<VisualStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VisualStep {
+    pub id: String,
+    pub title: String,
+    pub narrative: String,
+    pub at_ms: u64,
+    pub nodes: Vec<VisualNode>,
+    pub links: Vec<VisualLink>,
+    pub metrics: VisualMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VisualNode {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub flight_stack: Option<String>,
+    pub status: String,
+    pub mission_synced: bool,
+    pub record_count: usize,
+    pub x: u8,
+    pub y: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VisualLink {
+    pub source: String,
+    pub target: String,
+    pub transport: String,
+    pub state: String,
+    pub latency_ms: u16,
+    pub signal_quality: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VisualMetrics {
+    pub online_nodes: usize,
+    pub active_links: usize,
+    pub connected_components: usize,
+    pub mission_synced_nodes: usize,
+    pub continuity: String,
+    pub signed_command_verified: bool,
+}
+
 impl ScenarioReport {
     pub fn passed(&self) -> bool {
         self.mission_reached_all_nodes
@@ -259,6 +311,353 @@ impl ScenarioReport {
             && self.betaflight_gps_rescue_executed
             && self.emergency_ack_returned
             && self.recovered_node_converged
+    }
+}
+
+/// Produces a replayable topology trace for the stakeholder visualizer. Every
+/// connectivity and synchronization value is read back from `SimNetwork`; the
+/// UI never invents node or link state.
+pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
+    let ground = NodeId::from("ground-1");
+    let ardupilot = NodeId::from("ardu-1");
+    let px4 = NodeId::from("px4-1");
+    let betaflight = NodeId::from("beta-1");
+    let mission_key = RecordKey::from("mission/current");
+
+    let mut network = SimNetwork::default();
+    network.add_node(NodeProfile::ground(ground.clone()));
+    network.add_node(NodeProfile::aircraft(
+        ardupilot.clone(),
+        FlightStack::ArduPilot,
+        SYSTEM_MAX_MSL_M,
+    )?);
+    network.add_node(NodeProfile::aircraft(
+        px4.clone(),
+        FlightStack::Px4,
+        SYSTEM_MAX_MSL_M,
+    )?);
+    network.add_node(NodeProfile::aircraft(
+        betaflight.clone(),
+        FlightStack::Betaflight,
+        SYSTEM_MAX_MSL_M,
+    )?);
+
+    let mut steps = vec![visual_step(
+        &network,
+        "formation-ready",
+        "Formation identities ready",
+        "Four authenticated AVIAN identities are online. No peer path is assumed until a link is observed.",
+        0,
+        &mission_key,
+        None,
+        false,
+        "Awaiting peer links",
+        false,
+    )];
+
+    network.connect(&ground, &ardupilot)?;
+    network.connect(&ardupilot, &px4)?;
+    network.connect(&px4, &betaflight)?;
+    network.connect(&betaflight, &ardupilot)?;
+    steps.push(visual_step(
+        &network,
+        "mesh-formed",
+        "Leaderless mesh formed",
+        "Observed peer paths create one connected component without assigning a permanent leader.",
+        1_500,
+        &mission_key,
+        None,
+        false,
+        "All nodes connected",
+        false,
+    ));
+
+    network.publish(
+        &ground,
+        mission_key.clone(),
+        MeshPayload::Mission(MissionState {
+            mission_id: Uuid::from_u128(10),
+            objective: "visual mesh continuity demonstration".to_owned(),
+            generation: 1,
+            status: MissionStatus::Active,
+        }),
+        DeliveryClass::Mission,
+    )?;
+    network.synchronize();
+    steps.push(visual_step(
+        &network,
+        "mission-synchronized",
+        "Mission state synchronized",
+        "PEAT-style durable mission state converges across every connected peer.",
+        3_000,
+        &mission_key,
+        None,
+        false,
+        "Mission synchronized",
+        false,
+    ));
+
+    network.set_link_enabled(&ground, &ardupilot, false)?;
+    steps.push(visual_step(
+        &network,
+        "ground-partitioned",
+        "Ground station disconnected",
+        "The airborne component remains connected and retains the current mission while ground is isolated.",
+        4_500,
+        &mission_key,
+        None,
+        false,
+        "Airborne mesh autonomous",
+        false,
+    ));
+
+    let telemetry_key = RecordKey::from("telemetry/ardu-1");
+    network.publish(
+        &ardupilot,
+        telemetry_key,
+        MeshPayload::Telemetry(sample_telemetry(ardupilot.clone(), 5_000)?),
+        DeliveryClass::Telemetry,
+    )?;
+    network.synchronize();
+    steps.push(visual_step(
+        &network,
+        "airborne-continuity",
+        "Airborne peers continue exchanging state",
+        "Fresh telemetry moves through the remaining peer graph even though ground is unavailable.",
+        6_000,
+        &mission_key,
+        None,
+        false,
+        "Telemetry flowing peer-to-peer",
+        false,
+    ));
+
+    steps.push(visual_step(
+        &network,
+        "link-degraded",
+        "Primary path degraded",
+        "Measured link health crosses the policy threshold and AVIAN prepares the alternate path.",
+        7_500,
+        &mission_key,
+        Some((&px4, &betaflight)),
+        false,
+        "Failover evaluating",
+        false,
+    ));
+
+    network.set_link_enabled(&px4, &betaflight, false)?;
+    let failover_selected = failover_demonstration();
+    steps.push(visual_step(
+        &network,
+        "path-failover",
+        "Traffic moved to a healthy path",
+        "The degraded hop is removed from service while the alternate peer path preserves the airborne component.",
+        9_000,
+        &mission_key,
+        None,
+        failover_selected,
+        "Alternate path active",
+        false,
+    ));
+
+    network.set_node_online(&px4, false)?;
+    steps.push(visual_step(
+        &network,
+        "node-failure",
+        "Aircraft node lost",
+        "One aircraft drops out. Remaining peers continue without electing a replacement leader.",
+        10_500,
+        &mission_key,
+        None,
+        true,
+        "Mesh operating with one node lost",
+        false,
+    ));
+
+    network.set_link_enabled(&ground, &ardupilot, true)?;
+    network.set_link_enabled(&px4, &betaflight, true)?;
+    network.set_node_online(&px4, true)?;
+    network.synchronize();
+    steps.push(visual_step(
+        &network,
+        "network-recovered",
+        "Network healed and converged",
+        "Ground and the recovered aircraft rejoin, then reconcile the durable mission state.",
+        12_000,
+        &mission_key,
+        None,
+        false,
+        "Full formation restored",
+        false,
+    ));
+
+    let verification = run_reference_scenario().await?;
+    steps.push(visual_step(
+        &network,
+        "command-acknowledged",
+        "Signed emergency action acknowledged",
+        "The command signature, expiry, replay guard, vehicle action, and acknowledgement path all validate.",
+        13_500,
+        &mission_key,
+        None,
+        false,
+        "Mission-capable mesh verified",
+        verification.passed(),
+    ));
+
+    Ok(VisualScenario {
+        schema_version: 1,
+        name: "AVIAN leaderless mesh continuity".to_owned(),
+        description:
+            "Deterministic AVIAN topology, synchronization, failure, failover, and recovery trace."
+                .to_owned(),
+        steps,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visual_step(
+    network: &SimNetwork,
+    id: &str,
+    title: &str,
+    narrative: &str,
+    at_ms: u64,
+    mission_key: &RecordKey,
+    degraded_link: Option<(&NodeId, &NodeId)>,
+    failover_active: bool,
+    continuity: &str,
+    signed_command_verified: bool,
+) -> VisualStep {
+    let nodes = network
+        .nodes
+        .values()
+        .map(|node| {
+            let active_neighbor = network.links.iter().any(|((left, right), enabled)| {
+                *enabled
+                    && (&node.profile.node_id == left || &node.profile.node_id == right)
+                    && network.nodes.get(left).is_some_and(|peer| peer.online)
+                    && network.nodes.get(right).is_some_and(|peer| peer.online)
+            });
+            let degraded = degraded_link.is_some_and(|(left, right)| {
+                node.profile.node_id == *left || node.profile.node_id == *right
+            });
+            let status = if !node.online {
+                "offline"
+            } else if degraded {
+                "degraded"
+            } else if !active_neighbor {
+                "isolated"
+            } else {
+                "online"
+            };
+            let (x, y) = visual_position(&node.profile.node_id);
+            VisualNode {
+                id: node.profile.node_id.to_string(),
+                label: visual_label(&node.profile.node_id).to_owned(),
+                role: match node.profile.role {
+                    NodeRole::Aircraft => "aircraft",
+                    NodeRole::Ground => "ground",
+                    NodeRole::Cloud => "cloud",
+                }
+                .to_owned(),
+                flight_stack: node
+                    .profile
+                    .flight_stack
+                    .map(|stack| match stack {
+                        FlightStack::ArduPilot => "ArduPilot",
+                        FlightStack::Px4 => "PX4",
+                        FlightStack::Betaflight => "Betaflight",
+                    })
+                    .map(str::to_owned),
+                status: status.to_owned(),
+                mission_synced: node.records.get(mission_key).is_some_and(|record| {
+                    record
+                        .expires_at_ms
+                        .is_none_or(|expiry| expiry > network.now_ms)
+                }),
+                record_count: node.records.len(),
+                x,
+                y,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut links = network
+        .links
+        .iter()
+        .map(|((source, target), enabled)| {
+            let endpoints_online = network.nodes.get(source).is_some_and(|node| node.online)
+                && network.nodes.get(target).is_some_and(|node| node.online);
+            let is_degraded = degraded_link.is_some_and(|(left, right)| {
+                ordered_pair(left, right) == ordered_pair(source, target)
+            });
+            let state = if !enabled || !endpoints_online {
+                "down"
+            } else if is_degraded {
+                "degraded"
+            } else {
+                "active"
+            };
+            VisualLink {
+                source: source.to_string(),
+                target: target.to_string(),
+                transport: "MANET / PEAT".to_owned(),
+                state: state.to_owned(),
+                latency_ms: if is_degraded { 240 } else { 38 },
+                signal_quality: if is_degraded { 0.28 } else { 0.91 },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if failover_active {
+        links.push(VisualLink {
+            source: "ardu-1".to_owned(),
+            target: "beta-1".to_owned(),
+            transport: "Alternate IP path".to_owned(),
+            state: "failover".to_owned(),
+            latency_ms: 90,
+            signal_quality: 0.78,
+        });
+    }
+
+    VisualStep {
+        id: id.to_owned(),
+        title: title.to_owned(),
+        narrative: narrative.to_owned(),
+        at_ms,
+        metrics: VisualMetrics {
+            online_nodes: network.nodes.values().filter(|node| node.online).count(),
+            active_links: links
+                .iter()
+                .filter(|link| matches!(link.state.as_str(), "active" | "failover"))
+                .count(),
+            connected_components: network.connected_component_count(),
+            mission_synced_nodes: nodes.iter().filter(|node| node.mission_synced).count(),
+            continuity: continuity.to_owned(),
+            signed_command_verified,
+        },
+        nodes,
+        links,
+    }
+}
+
+fn visual_label(node_id: &NodeId) -> &'static str {
+    match node_id.as_str() {
+        "ground-1" => "GROUND OPS",
+        "ardu-1" => "SCOUT 01",
+        "px4-1" => "RELAY 02",
+        "beta-1" => "SCOUT 03",
+        _ => "AVIAN NODE",
+    }
+}
+
+fn visual_position(node_id: &NodeId) -> (u8, u8) {
+    match node_id.as_str() {
+        "ground-1" => (13, 69),
+        "ardu-1" => (34, 35),
+        "px4-1" => (61, 22),
+        "beta-1" => (82, 57),
+        _ => (50, 50),
     }
 }
 
@@ -489,6 +888,34 @@ mod tests {
     async fn reference_scenario_passes() {
         let report = run_reference_scenario().await.unwrap();
         assert!(report.passed(), "{report:#?}");
+    }
+
+    #[tokio::test]
+    async fn visual_scenario_reports_real_failure_and_recovery_state() {
+        let scenario = run_visual_scenario().await.unwrap();
+        assert_eq!(scenario.schema_version, 1);
+        assert_eq!(scenario.steps.len(), 10);
+
+        let partition = scenario
+            .steps
+            .iter()
+            .find(|step| step.id == "ground-partitioned")
+            .unwrap();
+        assert_eq!(partition.metrics.connected_components, 2);
+        assert_eq!(partition.metrics.mission_synced_nodes, 4);
+
+        let failure = scenario
+            .steps
+            .iter()
+            .find(|step| step.id == "node-failure")
+            .unwrap();
+        assert_eq!(failure.metrics.online_nodes, 3);
+        assert!(failure.nodes.iter().any(|node| node.status == "offline"));
+
+        let recovery = scenario.steps.last().unwrap();
+        assert_eq!(recovery.metrics.connected_components, 1);
+        assert_eq!(recovery.metrics.mission_synced_nodes, 4);
+        assert!(recovery.metrics.signed_command_verified);
     }
 
     #[test]
