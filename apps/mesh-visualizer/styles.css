@@ -38,6 +38,7 @@ main { padding: 18px 22px 0; }
 .metric { display: grid; align-content: center; grid-template-columns: auto 1fr; }
 .metric > span { grid-column: 1 / -1; color: #708897; font: 700 9px ui-monospace, monospace; letter-spacing: .12em; }
 .metric strong { font: 650 28px/1.1 ui-monospace, monospace; color: #f2f8fb; }
+#missionSync { font-size: 21px; letter-spacing: -.04em; }
 .metric small { align-self: end; padding-bottom: 4px; color: #6f8795; }
 .workspace { display: grid; grid-template-columns: minmax(720px, 1fr) 320px; gap: 14px; margin-top: 14px; }
 .panel { border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(145deg, rgba(13,24,34,.94), rgba(7,13,20,.96)); box-shadow: 0 20px 70px rgba(0,0,0,.22); overflow: hidden; }
