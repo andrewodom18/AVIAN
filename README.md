@@ -55,6 +55,7 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mesh-peat` | PEAT Automerge/Iroh node, AVIAN record store, delivery policy, and PACE configuration |
 | `vehicle-adapters` | Hardware-neutral ArduPilot, PX4, and Betaflight adapter contract |
 | `mesh-sim` | Deterministic failure and recovery simulation |
+| `mesh-visualizer` | Local stakeholder console driven by a verified `mesh-sim` topology trace |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
 | `arc-radio-plugin` | Vendor-neutral radio planning, traffic assessment, PEAT encoding, observations, and guarded StreamCaster sidecar integration |
@@ -126,6 +127,7 @@ With Rust 1.91.1 installed:
 ```sh
 cargo test --workspace
 cargo run -p mesh-sim
+node apps/mesh-visualizer/server.mjs
 cargo run -p mesh-agent -- --help
 cargo run -p arc-radio-plugin -- --help
 ```
@@ -169,6 +171,8 @@ See [the architecture](docs/architecture.md) and
 The [scalability contract](docs/scalability.md) describes the 5-200 aircraft
 overlay and what remains to validate on real radios.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
+The [visual mesh simulation](docs/visual-simulation.md) replays verified node,
+link, partition, failover, and recovery state in a local browser console.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
 The [field runbooks](docs/field-runbooks.md) cover Pi-to-Mac, Pi-to-Pi, real
 Cube metadata, Silvus, and ZeroTier-over-Starshield recovery checks.
