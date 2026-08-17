@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [int]$Port = 3211
+    [int]$Port = 3211,
+    [switch]$NoOpen
 )
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -21,7 +22,7 @@ if (-not $health.ok) {
     $environment = @{ AVIAN_VISUALIZER_PORT = "$Port" }
     Start-Process `
         -FilePath $node `
-        -ArgumentList @($server) `
+        -ArgumentList @("`"$server`"") `
         -WorkingDirectory $repoRoot `
         -WindowStyle Hidden `
         -Environment $environment `
@@ -46,5 +47,8 @@ if (-not $health.ok) {
     }
 }
 
-Start-Process $baseUrl
+if (-not $NoOpen) {
+    Start-Process $baseUrl
+}
 
+Write-Output $baseUrl
