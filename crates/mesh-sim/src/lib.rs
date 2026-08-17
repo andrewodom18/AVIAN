@@ -8,7 +8,7 @@ use mesh_core::{
     Altitude, DeliveryClass, DeliveryPolicy, EmergencyAck, EmergencyAction, EmergencyCommand,
     FlightStack, LinkCandidate, LinkGeometry, LinkId, LinkMetrics, LinkOrchestrator, MeshPayload,
     MissionState, MissionStatus, NodeId, NodeProfile, NodeRole, ReplayGuard, Telemetry,
-    TransportKind, SYSTEM_MAX_MSL_M,
+    TransportKind, DEFAULT_MAX_NEIGHBORS, MAX_SUPPORTED_SWARM_SIZE, SYSTEM_MAX_MSL_M,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -268,6 +268,20 @@ pub struct VisualStep {
     pub nodes: Vec<VisualNode>,
     pub links: Vec<VisualLink>,
     pub metrics: VisualMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formation_summary: Option<VisualFormationSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VisualFormationSummary {
+    pub mission_id: String,
+    pub simulated_aircraft: usize,
+    pub control_stations: usize,
+    pub direct_peer_limit: usize,
+    pub maximum_overlay_links: usize,
+    pub documented_design_target_aircraft: usize,
+    pub capacity_basis: String,
+    pub field_validated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -607,6 +621,38 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         verification.passed(),
     ));
 
+    let maximum_overlay_links = MAX_SUPPORTED_SWARM_SIZE * DEFAULT_MAX_NEIGHBORS / 2;
+    steps.push(VisualStep {
+        id: "maximum-formation-mission".to_owned(),
+        title: "Maximum software formation mission".to_owned(),
+        narrative: format!(
+            "A separate development mission summarizes {MAX_SUPPORTED_SWARM_SIZE} simulated aircraft plus one control station at the current software-planner ceiling. The documented design target remains 200 aircraft, and physical-radio/RF validation is still pending."
+        ),
+        at_ms: 22_500,
+        phase: "LARGE-FORMATION SIMULATION".to_owned(),
+        control_event: None,
+        nodes: Vec::new(),
+        links: Vec::new(),
+        metrics: VisualMetrics {
+            online_nodes: MAX_SUPPORTED_SWARM_SIZE + 1,
+            active_links: maximum_overlay_links,
+            connected_components: 1,
+            mission_synced_nodes: MAX_SUPPORTED_SWARM_SIZE + 1,
+            continuity: "Software topology ceiling represented".to_owned(),
+            signed_command_verified: verification.passed(),
+        },
+        formation_summary: Some(VisualFormationSummary {
+            mission_id: "DEMO-LARGE-FORMATION-01".to_owned(),
+            simulated_aircraft: MAX_SUPPORTED_SWARM_SIZE,
+            control_stations: 1,
+            direct_peer_limit: DEFAULT_MAX_NEIGHBORS,
+            maximum_overlay_links,
+            documented_design_target_aircraft: 200,
+            capacity_basis: "Software planner ceiling".to_owned(),
+            field_validated: false,
+        }),
+    });
+
     Ok(VisualScenario {
         schema_version: 1,
         name: "AVIAN leaderless mesh continuity".to_owned(),
@@ -742,6 +788,7 @@ fn visual_step(
             continuity: continuity.to_owned(),
             signed_command_verified,
         },
+        formation_summary: None,
         nodes,
         links,
     }
@@ -1010,7 +1057,7 @@ mod tests {
     async fn visual_scenario_reports_real_failure_and_recovery_state() {
         let scenario = run_visual_scenario().await.unwrap();
         assert_eq!(scenario.schema_version, 1);
-        assert_eq!(scenario.steps.len(), 15);
+        assert_eq!(scenario.steps.len(), 16);
 
         let connected = &scenario.steps[0];
         assert_eq!(connected.id, "radio-connected");
@@ -1044,10 +1091,22 @@ mod tests {
         assert_eq!(failure.metrics.online_nodes, 3);
         assert!(failure.nodes.iter().any(|node| node.status == "offline"));
 
-        let recovery = scenario.steps.last().unwrap();
+        let recovery = scenario
+            .steps
+            .iter()
+            .find(|step| step.id == "command-acknowledged")
+            .unwrap();
         assert_eq!(recovery.metrics.connected_components, 1);
         assert_eq!(recovery.metrics.mission_synced_nodes, 4);
         assert!(recovery.metrics.signed_command_verified);
+
+        let maximum = scenario.steps.last().unwrap();
+        let summary = maximum.formation_summary.as_ref().unwrap();
+        assert_eq!(maximum.id, "maximum-formation-mission");
+        assert_eq!(summary.simulated_aircraft, MAX_SUPPORTED_SWARM_SIZE);
+        assert_eq!(summary.control_stations, 1);
+        assert_eq!(summary.direct_peer_limit, DEFAULT_MAX_NEIGHBORS);
+        assert!(!summary.field_validated);
     }
 
     #[test]

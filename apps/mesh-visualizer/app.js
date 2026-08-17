@@ -20,8 +20,65 @@ function position(step, id) {
   return node ? { x: node.x, y: node.y } : null;
 }
 
+function renderFormationSummary(step) {
+  const summary = step.formation_summary;
+  const aircraftPerCluster = summary.simulated_aircraft / 8;
+  const center = { x: 50, y: 44 };
+  const clusters = [
+    { x: 25, y: 24 }, { x: 50, y: 18 }, { x: 75, y: 24 }, { x: 82, y: 44 },
+    { x: 75, y: 64 }, { x: 50, y: 70 }, { x: 25, y: 64 }, { x: 18, y: 44 },
+  ];
+
+  const title = svgElement("text", { x: 50, y: 7, class: "formation-title" });
+  title.textContent = `${summary.simulated_aircraft.toLocaleString()} SIMULATED AIRCRAFT + ${summary.control_stations} CONTROL STATION`;
+  const subtitle = svgElement("text", { x: 50, y: 11.2, class: "formation-subtitle" });
+  subtitle.textContent = `SOFTWARE CEILING · ${summary.direct_peer_limit} DIRECT PEERS MAX · RF VALIDATION PENDING`;
+  elements.topology.append(title, subtitle);
+
+  for (const [index, cluster] of clusters.entries()) {
+    const next = clusters[(index + 1) % clusters.length];
+    elements.topology.append(svgElement("path", {
+      d: `M ${cluster.x} ${cluster.y} L ${next.x} ${next.y}`,
+      class: "formation-link",
+    }));
+    elements.topology.append(svgElement("path", {
+      d: `M ${center.x} ${center.y} L ${cluster.x} ${cluster.y}`,
+      class: "formation-spoke",
+    }));
+  }
+
+  for (const [index, cluster] of clusters.entries()) {
+    const group = svgElement("g", { class: "formation-cluster", transform: `translate(${cluster.x} ${cluster.y})` });
+    group.append(svgElement("circle", { r: 6.2, class: "cluster-halo" }));
+    group.append(svgElement("circle", { r: 4.7, class: "cluster-core" }));
+    const count = svgElement("text", { x: 0, y: .6, class: "cluster-count" });
+    count.textContent = aircraftPerCluster.toLocaleString();
+    const label = svgElement("text", { x: 0, y: 8.2, class: "cluster-label" });
+    label.textContent = `SECTOR ${String(index + 1).padStart(2, "0")}`;
+    group.append(count, label);
+    elements.topology.append(group);
+  }
+
+  const control = svgElement("g", { class: "formation-control", transform: `translate(${center.x} ${center.y})` });
+  control.append(svgElement("rect", { x: -6.2, y: -4.2, width: 12.4, height: 8.4, rx: 1.3, class: "control-core" }));
+  const controlGlyph = svgElement("text", { x: 0, y: .7, class: "control-glyph" });
+  controlGlyph.textContent = "GCS 01";
+  const controlLabel = svgElement("text", { x: 0, y: 7.2, class: "cluster-label" });
+  controlLabel.textContent = "UNIVERSAL COCKPIT";
+  control.append(controlGlyph, controlLabel);
+  elements.topology.append(control);
+
+  const note = svgElement("text", { x: 50, y: 79, class: "formation-note" });
+  note.textContent = `8 summarized sectors × ${aircraftPerCluster.toLocaleString()} aircraft · ${summary.documented_design_target_aircraft}-aircraft design target · not a radio-range claim`;
+  elements.topology.append(note);
+}
+
 function renderTopology(step) {
   elements.topology.replaceChildren();
+  if (step.formation_summary) {
+    renderFormationSummary(step);
+    return;
+  }
   const defs = svgElement("defs");
   const glow = svgElement("filter", { id: "packet-glow", x: "-200%", y: "-200%", width: "500%", height: "500%" });
   glow.append(svgElement("feGaussianBlur", { stdDeviation: "0.7", result: "blur" }));
@@ -97,6 +154,17 @@ function renderTopology(step) {
 }
 
 function detailRows(step, node) {
+  if (step.formation_summary) {
+    const summary = step.formation_summary;
+    return [
+      ["Mission", summary.mission_id],
+      ["Simulated aircraft", summary.simulated_aircraft.toLocaleString()],
+      ["Control stations", summary.control_stations],
+      ["Direct peers / node", `≤ ${summary.direct_peer_limit}`],
+      ["Documented target", `${summary.documented_design_target_aircraft} aircraft`],
+      ["Validation", summary.field_validated ? "field validated" : "simulation only"],
+    ];
+  }
   if (!node) {
     return [
       ["Formation", state.scenario.name],
@@ -120,7 +188,7 @@ function detailRows(step, node) {
 
 function renderDetails(step) {
   const node = nodeById(step, state.selectedNodeId);
-  elements.nodeLabel.textContent = node?.label ?? "Formation overview";
+  elements.nodeLabel.textContent = step.formation_summary ? "Large-formation summary" : node?.label ?? "Formation overview";
   elements.nodeStatus.textContent = (node?.status ?? "ready").toUpperCase();
   elements.nodeStatus.className = `status-chip ${node?.status ?? "neutral"}`;
   elements.nodeDetails.replaceChildren(...detailRows(step, node).map(([label, value]) => {
@@ -163,7 +231,10 @@ function render() {
   elements.onlineNodes.textContent = step.metrics.online_nodes;
   elements.activeLinks.textContent = step.metrics.active_links;
   elements.components.textContent = step.metrics.connected_components;
-  elements.missionSync.textContent = `${step.metrics.mission_synced_nodes}/${step.nodes.length}`;
+  const formationSize = step.formation_summary
+    ? step.formation_summary.simulated_aircraft + step.formation_summary.control_stations
+    : step.nodes.length;
+  elements.missionSync.textContent = `${step.metrics.mission_synced_nodes}/${formationSize}`;
   elements.continuity.textContent = step.metrics.continuity.toUpperCase();
   renderTopology(step); renderDetails(step); renderTimeline();
 }

@@ -75,6 +75,17 @@ main { padding: 18px 22px 0; }
 .mission-ring { fill: none; stroke: var(--green); stroke-width: .45; stroke-dasharray: 1.1 1.1; opacity: .8; transform-box: fill-box; transform-origin: center; animation: rotate 7s linear infinite; }
 .node-label { fill: #eaf5fa; font: 700 2.05px ui-monospace, monospace; text-anchor: middle; letter-spacing: .04em; }
 .node-sub { fill: #7593a3; font: 1.55px ui-monospace, monospace; text-anchor: middle; }
+.formation-title { fill: #effaff; font: 700 3.1px ui-monospace, monospace; letter-spacing: .08em; text-anchor: middle; }
+.formation-subtitle { fill: var(--amber); font: 700 1.55px ui-monospace, monospace; letter-spacing: .08em; text-anchor: middle; }
+.formation-link { fill: none; stroke: rgba(82,240,165,.8); stroke-width: .65; stroke-dasharray: 1.5 1.1; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 3px rgba(82,240,165,.35)); }
+.formation-spoke { fill: none; stroke: rgba(65,217,255,.22); stroke-width: .45; vector-effect: non-scaling-stroke; }
+.formation-cluster .cluster-halo { fill: rgba(65,217,255,.04); stroke: rgba(65,217,255,.24); stroke-width: .45; }
+.formation-cluster .cluster-core { fill: #0c2734; stroke: var(--cyan); stroke-width: .75; filter: drop-shadow(0 0 4px rgba(65,217,255,.4)); }
+.cluster-count { fill: #effaff; font: 750 2.45px ui-monospace, monospace; text-anchor: middle; }
+.cluster-label { fill: #82a8ba; font: 700 1.45px ui-monospace, monospace; letter-spacing: .06em; text-anchor: middle; }
+.formation-control .control-core { fill: #182a48; stroke: #7aa0ff; stroke-width: .85; filter: drop-shadow(0 0 5px rgba(91,140,255,.55)); }
+.control-glyph { fill: #f2f6ff; font: 750 2.25px ui-monospace, monospace; letter-spacing: .05em; text-anchor: middle; }
+.formation-note { fill: #7894a3; font: 1.45px ui-monospace, monospace; text-anchor: middle; }
 .status-chip { padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; color: #91a8b7; font: 750 9px ui-monospace, monospace; letter-spacing: .08em; }
 .status-chip.online { color: var(--green); border-color: rgba(82,240,165,.28); }
 .status-chip.degraded { color: var(--amber); border-color: rgba(255,191,75,.3); }

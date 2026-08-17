@@ -24,7 +24,7 @@ test("mesh-sim emits the visualizer schema", () => {
   assert.equal(result.status, 0, result.stderr);
   const scenario = JSON.parse(result.stdout);
   assert.equal(scenario.schema_version, 1);
-  assert.equal(scenario.steps.length, 15);
+  assert.equal(scenario.steps.length, 16);
   assert.deepEqual(scenario.steps.slice(0, 5).map((step) => step.id), [
     "radio-connected",
     "radios-discovered",
@@ -38,6 +38,12 @@ test("mesh-sim emits the visualizer schema", () => {
   assert.equal(scenario.steps[3].control_event.path, "/api/radio/apply");
   assert.equal(scenario.steps[4].control_event.path, "/api/radio/confirm");
   assert.equal(scenario.steps[4].control_event.simulated, true);
-  assert.equal(scenario.steps.at(-1).metrics.signed_command_verified, true);
+  assert.equal(scenario.steps.find((step) => step.id === "command-acknowledged").metrics.signed_command_verified, true);
   assert.equal(scenario.steps.find((step) => step.id === "ground-partitioned").metrics.connected_components, 2);
+  const maximum = scenario.steps.at(-1);
+  assert.equal(maximum.id, "maximum-formation-mission");
+  assert.equal(maximum.formation_summary.simulated_aircraft, 1024);
+  assert.equal(maximum.formation_summary.control_stations, 1);
+  assert.equal(maximum.formation_summary.direct_peer_limit, 8);
+  assert.equal(maximum.formation_summary.field_validated, false);
 });
