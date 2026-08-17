@@ -263,9 +263,20 @@ pub struct VisualStep {
     pub title: String,
     pub narrative: String,
     pub at_ms: u64,
+    pub phase: String,
+    pub control_event: Option<VisualControlEvent>,
     pub nodes: Vec<VisualNode>,
     pub links: Vec<VisualLink>,
     pub metrics: VisualMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VisualControlEvent {
+    pub authority: String,
+    pub method: String,
+    pub path: String,
+    pub status: String,
+    pub simulated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -326,6 +337,21 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
 
     let mut network = SimNetwork::default();
     network.add_node(NodeProfile::ground(ground.clone()));
+    let mut steps = vec![visual_step(
+        &network,
+        "radio-connected",
+        "Radio connected to the CHUD host",
+        "A physical radio is plugged into the management network. CHUD begins a vendor-aware inventory refresh without exposing credentials to AVIAN.",
+        0,
+        "RADIO DISCOVERY",
+        Some(chud_event("GET", "/api/radio/devices", "LOCAL RADIO DETECTED")),
+        &mission_key,
+        None,
+        false,
+        "Management link detected",
+        false,
+    )];
+
     network.add_node(NodeProfile::aircraft(
         ardupilot.clone(),
         FlightStack::ArduPilot,
@@ -341,19 +367,77 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         FlightStack::Betaflight,
         SYSTEM_MAX_MSL_M,
     )?);
+    steps.push(visual_step(
+        &network,
+        "radios-discovered",
+        "New radio nodes discovered",
+        "CHUD returns the reachable radio inventory. Each physical MAC becomes a distinct candidate node before any mesh path is assumed.",
+        1_500,
+        "RADIO DISCOVERY",
+        Some(chud_event("GET", "/api/radio/devices", "4 RADIOS DISCOVERED")),
+        &mission_key,
+        None,
+        false,
+        "Inventory discovered",
+        false,
+    ));
+    steps.push(visual_step(
+        &network,
+        "radio-snapshot",
+        "Current radio settings captured",
+        "CHUD snapshots the live configuration and capabilities so the desired mesh plan can be checked before any change is applied.",
+        3_000,
+        "CHUD CONFIGURATION",
+        Some(chud_event("GET", "/api/radio/snapshot", "SNAPSHOT VERIFIED")),
+        &mission_key,
+        None,
+        false,
+        "Pre-change snapshot captured",
+        false,
+    ));
+    steps.push(visual_step(
+        &network,
+        "radio-config-applied",
+        "Mesh configuration applied through CHUD",
+        "CHUD applies the validated desired configuration to the discovered radios while retaining the pre-change snapshot for recovery.",
+        4_500,
+        "CHUD CONFIGURATION",
+        Some(chud_event("POST", "/api/radio/apply", "APPLY COMPLETE")),
+        &mission_key,
+        None,
+        false,
+        "Radio configuration applied",
+        false,
+    ));
+    steps.push(visual_step(
+        &network,
+        "radio-config-confirmed",
+        "Radio configuration verified and confirmed",
+        "CHUD reads the effective settings back, confirms the guarded transaction, and releases the radios for AVIAN formation startup.",
+        6_000,
+        "CHUD CONFIGURATION",
+        Some(chud_event("POST", "/api/radio/confirm", "READBACK CONFIRMED")),
+        &mission_key,
+        None,
+        false,
+        "Radios ready for formation",
+        false,
+    ));
 
-    let mut steps = vec![visual_step(
+    steps.push(visual_step(
         &network,
         "formation-ready",
         "Formation identities ready",
         "Four authenticated AVIAN identities are online. No peer path is assumed until a link is observed.",
-        0,
+        7_500,
+        "AVIAN FORMATION",
+        None,
         &mission_key,
         None,
         false,
         "Awaiting peer links",
         false,
-    )];
+    ));
 
     network.connect(&ground, &ardupilot)?;
     network.connect(&ardupilot, &px4)?;
@@ -364,7 +448,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "mesh-formed",
         "Leaderless mesh formed",
         "Observed peer paths create one connected component without assigning a permanent leader.",
-        1_500,
+        9_000,
+        "AVIAN FORMATION",
+        None,
         &mission_key,
         None,
         false,
@@ -389,7 +475,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "mission-synchronized",
         "Mission state synchronized",
         "PEAT-style durable mission state converges across every connected peer.",
-        3_000,
+        10_500,
+        "MISSION SYNCHRONIZATION",
+        None,
         &mission_key,
         None,
         false,
@@ -403,7 +491,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "ground-partitioned",
         "Ground station disconnected",
         "The airborne component remains connected and retains the current mission while ground is isolated.",
-        4_500,
+        12_000,
+        "CONTINUITY TEST",
+        None,
         &mission_key,
         None,
         false,
@@ -424,7 +514,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "airborne-continuity",
         "Airborne peers continue exchanging state",
         "Fresh telemetry moves through the remaining peer graph even though ground is unavailable.",
-        6_000,
+        13_500,
+        "CONTINUITY TEST",
+        None,
         &mission_key,
         None,
         false,
@@ -437,7 +529,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "link-degraded",
         "Primary path degraded",
         "Measured link health crosses the policy threshold and AVIAN prepares the alternate path.",
-        7_500,
+        15_000,
+        "FAILOVER TEST",
+        None,
         &mission_key,
         Some((&px4, &betaflight)),
         false,
@@ -452,7 +546,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "path-failover",
         "Traffic moved to a healthy path",
         "The degraded hop is removed from service while the alternate peer path preserves the airborne component.",
-        9_000,
+        16_500,
+        "FAILOVER TEST",
+        None,
         &mission_key,
         None,
         failover_selected,
@@ -466,7 +562,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "node-failure",
         "Aircraft node lost",
         "One aircraft drops out. Remaining peers continue without electing a replacement leader.",
-        10_500,
+        18_000,
+        "NODE FAILURE TEST",
+        None,
         &mission_key,
         None,
         true,
@@ -483,7 +581,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "network-recovered",
         "Network healed and converged",
         "Ground and the recovered aircraft rejoin, then reconcile the durable mission state.",
-        12_000,
+        19_500,
+        "RECOVERY TEST",
+        None,
         &mission_key,
         None,
         false,
@@ -497,7 +597,9 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         "command-acknowledged",
         "Signed emergency action acknowledged",
         "The command signature, expiry, replay guard, vehicle action, and acknowledgement path all validate.",
-        13_500,
+        21_000,
+        "COMMAND VERIFICATION",
+        None,
         &mission_key,
         None,
         false,
@@ -509,7 +611,7 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         schema_version: 1,
         name: "AVIAN leaderless mesh continuity".to_owned(),
         description:
-            "Deterministic AVIAN topology, synchronization, failure, failover, and recovery trace."
+            "Deterministic CHUD radio discovery/configuration and AVIAN topology, synchronization, failure, failover, and recovery trace."
                 .to_owned(),
         steps,
     })
@@ -522,6 +624,8 @@ fn visual_step(
     title: &str,
     narrative: &str,
     at_ms: u64,
+    phase: &str,
+    control_event: Option<VisualControlEvent>,
     mission_key: &RecordKey,
     degraded_link: Option<(&NodeId, &NodeId)>,
     failover_active: bool,
@@ -625,6 +729,8 @@ fn visual_step(
         title: title.to_owned(),
         narrative: narrative.to_owned(),
         at_ms,
+        phase: phase.to_owned(),
+        control_event,
         metrics: VisualMetrics {
             online_nodes: network.nodes.values().filter(|node| node.online).count(),
             active_links: links
@@ -638,6 +744,16 @@ fn visual_step(
         },
         nodes,
         links,
+    }
+}
+
+fn chud_event(method: &str, path: &str, status: &str) -> VisualControlEvent {
+    VisualControlEvent {
+        authority: "CHUD".to_owned(),
+        method: method.to_owned(),
+        path: path.to_owned(),
+        status: status.to_owned(),
+        simulated: true,
     }
 }
 
@@ -894,7 +1010,23 @@ mod tests {
     async fn visual_scenario_reports_real_failure_and_recovery_state() {
         let scenario = run_visual_scenario().await.unwrap();
         assert_eq!(scenario.schema_version, 1);
-        assert_eq!(scenario.steps.len(), 10);
+        assert_eq!(scenario.steps.len(), 15);
+
+        let connected = &scenario.steps[0];
+        assert_eq!(connected.id, "radio-connected");
+        assert_eq!(connected.nodes.len(), 1);
+        assert_eq!(
+            connected.control_event.as_ref().unwrap().path,
+            "/api/radio/devices"
+        );
+
+        let configured = scenario
+            .steps
+            .iter()
+            .find(|step| step.id == "radio-config-confirmed")
+            .unwrap();
+        assert_eq!(configured.nodes.len(), 4);
+        assert!(configured.control_event.as_ref().unwrap().simulated);
 
         let partition = scenario
             .steps
