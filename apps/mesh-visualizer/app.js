@@ -5,7 +5,7 @@ const elements = Object.fromEntries([
   "traceVersion", "stepTitle", "stepNarrative", "onlineNodes", "activeLinks", "components",
   "missionSync", "continuity", "topology", "nodeLabel", "nodeStatus", "nodeDetails",
   "commandState", "integrityBar", "operatorReadout", "timeline", "playButton", "stepButton",
-  "resetButton", "speedSelect", "errorBanner",
+  "resetButton", "speedSelect", "errorBanner", "controlActivity", "controlRequest", "controlStatus",
 ].map((id) => [id, document.getElementById(id)]));
 
 function svgElement(name, attributes = {}) {
@@ -100,6 +100,7 @@ function detailRows(step, node) {
   if (!node) {
     return [
       ["Formation", state.scenario.name],
+      ["Current phase", step.phase],
       ["Scenario step", `${state.stepIndex + 1} / ${state.scenario.steps.length}`],
       ["Connected components", step.metrics.connected_components],
       ["Continuity", step.metrics.continuity],
@@ -129,6 +130,10 @@ function renderDetails(step) {
     row.append(term, description); return row;
   }));
   const verified = step.metrics.signed_command_verified;
+  const control = step.control_event;
+  elements.controlActivity.hidden = !control;
+  elements.controlRequest.textContent = control ? `${control.method} ${control.path}` : "";
+  elements.controlStatus.textContent = control ? control.status : "";
   elements.commandState.textContent = verified ? "VERIFIED + ACKNOWLEDGED" : "GUARDS ACTIVE";
   elements.commandState.style.color = verified ? "#52f0a5" : "#d2e2ea";
   elements.integrityBar.style.width = verified ? "100%" : `${22 + state.stepIndex * 6}%`;

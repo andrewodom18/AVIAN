@@ -6,19 +6,26 @@ come from `SimNetwork`; the browser does not invent operational topology.
 
 ## Demonstrated behavior
 
-1. Stable AVIAN identities come online without assuming peer reachability.
-2. Observed paths form a connected, leaderless topology.
-3. Durable mission state synchronizes to every peer.
-4. Loss of the ground node does not stop the airborne component.
-5. Airborne peers continue exchanging latest-value telemetry.
-6. A degraded link is detected and traffic moves to an alternate IP path.
-7. Loss of one aircraft does not halt the remaining component.
-8. Rejoining peers reconcile the current mission state.
-9. The existing signed-command, replay-guard, vehicle-action, and acknowledgement
+1. A radio is connected to the management host and becomes visible to CHUD.
+2. CHUD discovers the remaining physical radio inventory through
+   `GET /api/radio/devices` without exposing credentials to AVIAN.
+3. CHUD captures the current settings through `GET /api/radio/snapshot`, applies
+   the desired mesh configuration through `POST /api/radio/apply`, and confirms
+   verified readback through `POST /api/radio/confirm`.
+4. Stable AVIAN identities come online without assuming peer reachability.
+5. Observed paths form a connected, leaderless topology.
+6. Durable mission state synchronizes to every peer.
+7. Loss of the ground node does not stop the airborne component.
+8. Airborne peers continue exchanging latest-value telemetry.
+9. A degraded link is detected and traffic moves to an alternate IP path.
+10. Loss of one aircraft does not halt the remaining component.
+11. Rejoining peers reconcile the current mission state.
+12. The existing signed-command, replay-guard, vehicle-action, and acknowledgement
    checks complete before the final verified state is displayed.
 
-The simulation demonstrates application behavior. It does not claim measured
-RF range, live hardware validation, or certification of a specific radio.
+The CHUD calls and their results are simulated workflow events, not live writes.
+The simulation demonstrates application behavior. It does not claim measured RF
+range, live hardware validation, or certification of a specific radio.
 
 ## Run on Windows
 
@@ -43,4 +50,3 @@ access can replace simulated radio observations after certificate-backed bench
 validation, without changing the visual trace schema. ARC integration should
 consume the same schema or translate its `/api/radio/mesh` snapshot into it;
 the standalone simulator remains the deadline-safe demonstration path.
-

@@ -19,15 +19,25 @@ try {
 
 if (-not $health.ok) {
     $node = (Get-Command node -ErrorAction Stop).Source
-    $environment = @{ AVIAN_VISUALIZER_PORT = "$Port" }
-    Start-Process `
-        -FilePath $node `
-        -ArgumentList @("`"$server`"") `
-        -WorkingDirectory $repoRoot `
-        -WindowStyle Hidden `
-        -Environment $environment `
-        -RedirectStandardOutput (Join-Path $logRoot 'server-output.log') `
-        -RedirectStandardError (Join-Path $logRoot 'server-error.log')
+    $previousVisualizerPort = $env:AVIAN_VISUALIZER_PORT
+    try {
+        # Windows PowerShell 5 has no Start-Process -Environment parameter.
+        # Set the variable only long enough for the child process to inherit it.
+        $env:AVIAN_VISUALIZER_PORT = "$Port"
+        Start-Process `
+            -FilePath $node `
+            -ArgumentList @("`"$server`"") `
+            -WorkingDirectory $repoRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $logRoot 'server-output.log') `
+            -RedirectStandardError (Join-Path $logRoot 'server-error.log')
+    } finally {
+        if ($null -eq $previousVisualizerPort) {
+            Remove-Item Env:AVIAN_VISUALIZER_PORT -ErrorAction SilentlyContinue
+        } else {
+            $env:AVIAN_VISUALIZER_PORT = $previousVisualizerPort
+        }
+    }
 
     $ready = $false
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
