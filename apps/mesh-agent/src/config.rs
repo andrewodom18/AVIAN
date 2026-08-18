@@ -55,6 +55,14 @@ pub enum CommandMode {
     Execute,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandEnvironment {
+    #[default]
+    Hardware,
+    Sitl,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "mesh-agent",
@@ -179,6 +187,7 @@ pub struct SocketConfig {
 #[derive(Debug, Clone)]
 pub struct CommandConfig {
     pub mode: CommandMode,
+    pub environment: CommandEnvironment,
     pub signing_key_file: Option<PathBuf>,
     pub issuers: Vec<IssuerConfig>,
     pub state_file: PathBuf,
@@ -314,6 +323,7 @@ impl Default for FileSockets {
 #[serde(deny_unknown_fields, default)]
 struct FileCommands {
     mode: CommandMode,
+    environment: CommandEnvironment,
     signing_key_file: Option<PathBuf>,
     issuers: Vec<IssuerConfig>,
     state_file: PathBuf,
@@ -327,6 +337,7 @@ impl Default for FileCommands {
     fn default() -> Self {
         Self {
             mode: CommandMode::Disabled,
+            environment: CommandEnvironment::Hardware,
             signing_key_file: None,
             issuers: Vec::new(),
             state_file: PathBuf::from("command-state.json"),
@@ -459,6 +470,7 @@ impl ResolvedConfig {
             .as_ref()
             .map_or_else(FileCommands::default, |value| FileCommands {
                 mode: value.commands.mode,
+                environment: value.commands.environment,
                 signing_key_file: value.commands.signing_key_file.clone(),
                 issuers: value.commands.issuers.clone(),
                 state_file: value.commands.state_file.clone(),
@@ -527,6 +539,7 @@ impl ResolvedConfig {
             },
             commands: CommandConfig {
                 mode: commands.mode,
+                environment: commands.environment,
                 signing_key_file: commands
                     .signing_key_file
                     .map(|path| resolve_path(base, path)),
@@ -592,6 +605,14 @@ impl ResolvedConfig {
             && self.commands.issuers.is_empty()
         {
             bail!("enabled commands require a signing key or at least one allowed issuer");
+        }
+        if self.commands.mode == CommandMode::Execute
+            && self.commands.environment != CommandEnvironment::Sitl
+        {
+            bail!("execute command mode is permitted only when environment = \"sitl\"");
+        }
+        if self.commands.lifetime_ms > 5_000 {
+            bail!("command lifetime cannot exceed the 5000 ms emergency record lifetime");
         }
         if self.commands.lifetime_ms == 0
             || self.commands.poll_ms == 0

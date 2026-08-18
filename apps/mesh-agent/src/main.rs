@@ -14,12 +14,16 @@ use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration, MissedTickBehavior};
-use vehicle_adapters::{spawn_mavlink_source, MavlinkSourceConfig, MavlinkTelemetryEvent};
+use vehicle_adapters::{
+    spawn_mavlink_runtime, MavlinkCommandOutcome, MavlinkCommandSender, MavlinkSourceConfig,
+    MavlinkTelemetryEvent,
+};
 
 mod membership;
 
 use membership::load_membership;
-use mesh_agent::config::{CliArgs, ResolvedConfig};
+use mesh_agent::commands::{AckOutcome, CommandEvaluation, CommandRuntime};
+use mesh_agent::config::{CliArgs, CommandMode, ResolvedConfig};
 use mesh_agent::payload_ingress::{self, PayloadEvent};
 use mesh_agent::protocol::{ControlRequest, ControlResponse, RecordView};
 use mesh_agent::status::{AgentStatus, PeerAddressStatus, PeerStatus};
@@ -84,6 +88,7 @@ impl From<&InFlightRelayDecision> for RelayDecisionKey {
 async fn main() -> anyhow::Result<()> {
     let args = ResolvedConfig::load(CliArgs::parse())?;
     let node_id = NodeId::from(args.name.clone());
+    let mut command_runtime = CommandRuntime::load(args.commands.clone(), node_id.clone())?;
     let traffic_policy = args
         .traffic_policy_file
         .as_deref()
@@ -210,7 +215,9 @@ async fn main() -> anyhow::Result<()> {
     operator_summary_publish.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut relay_evaluation = time::interval(Duration::from_millis(args.relay_evaluation_ms));
     relay_evaluation.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut mavlink_receiver = start_mavlink(&args, node_id.clone())?;
+    let mut command_poll = time::interval(Duration::from_millis(command_runtime.poll_ms()));
+    command_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let (mut mavlink_receiver, mavlink_commands) = start_mavlink(&args, node_id.clone())?;
     let mut latest_telemetry: Option<Telemetry> = None;
     let mut telemetry_governor = TelemetryTrafficGovernor::default();
     let mut telemetry_sequence = 0_u64;
@@ -219,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
     let mut relay_observation_governor = RelayObservationTrafficGovernor::default();
     let mut relay_observation_buffer = vec![0_u8; 65_535];
     let mut payload_sequence = 0_u64;
+    let mut command_ack_sequence = 0_u64;
     let mut payload_buffer = vec![0_u8; args.sockets.max_message_bytes.saturating_add(1)];
     loop {
         tokio::select! {
@@ -231,8 +239,23 @@ async fn main() -> anyhow::Result<()> {
             }
             control = control_receiver.recv() => {
                 if let Some(control) = control {
-                    handle_control_request(&node, &status, control).await;
+                    handle_control_request(
+                        &node,
+                        &mut status,
+                        &mut command_runtime,
+                        control,
+                    ).await;
                 }
+            }
+            _ = command_poll.tick(), if command_runtime.mode() != CommandMode::Disabled => {
+                process_emergency_commands(
+                    &node,
+                    &node_id,
+                    &mut command_runtime,
+                    &mut status,
+                    mavlink_commands.as_ref(),
+                    &mut command_ack_sequence,
+                ).await;
             }
             received = payload_socket.recv(&mut payload_buffer) => {
                 match received {
@@ -434,11 +457,14 @@ fn telemetry_is_mission_critical(runtime: &RelayRuntimeState, node_id: &NodeId) 
 fn start_mavlink(
     args: &ResolvedConfig,
     node_id: NodeId,
-) -> anyhow::Result<Option<mpsc::Receiver<MavlinkTelemetryEvent>>> {
+) -> anyhow::Result<(
+    Option<mpsc::Receiver<MavlinkTelemetryEvent>>,
+    Option<MavlinkCommandSender>,
+)> {
     let (Some(address), Some(stack)) = (&args.mavlink_address, args.flight_stack) else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    let receiver = spawn_mavlink_source(
+    let runtime = spawn_mavlink_runtime(
         MavlinkSourceConfig {
             address: address.clone(),
             source: node_id,
@@ -448,7 +474,7 @@ fn start_mavlink(
         64,
     )
     .context("starting MAVLink telemetry source")?;
-    Ok(Some(receiver))
+    Ok((Some(runtime.events), Some(runtime.commands)))
 }
 
 async fn publish_telemetry(
@@ -561,7 +587,12 @@ fn peer_statuses(
         .collect()
 }
 
-async fn handle_control_request(node: &PeatNode, status: &AgentStatus, envelope: ControlEnvelope) {
+async fn handle_control_request(
+    node: &PeatNode,
+    status: &mut AgentStatus,
+    commands: &mut CommandRuntime,
+    envelope: ControlEnvelope,
+) {
     let response = match envelope.request {
         ControlRequest::Status { .. } => ControlResponse::Status {
             status: Box::new(status.snapshot(unix_time_ms())),
@@ -591,9 +622,50 @@ async fn handle_control_request(node: &PeatNode, status: &AgentStatus, envelope:
             code: "invalid_limit".into(),
             detail: "record limit must be 1-500".into(),
         },
+        ControlRequest::EmergencyRtl { target }
+            if !target.trim().is_empty()
+                && target.len() <= 128
+                && !target.contains(['\0', '\n', '\r']) =>
+        {
+            match commands.issue_rtl(NodeId::from(target), unix_time_ms()) {
+                Ok(command) => {
+                    let command_id = command.command_id.to_string();
+                    let record = AvianRecord::new(
+                        NodeId::from(status.node.name.clone()),
+                        command.nonce,
+                        DeliveryClass::Emergency,
+                        unix_time_ms(),
+                        MeshPayload::EmergencyCommand(command),
+                    );
+                    match record {
+                        Ok(record) => {
+                            match node.put(&format!("command/{command_id}"), &record).await {
+                                Ok(()) => {
+                                    status.commands.last_command_at_ms = Some(unix_time_ms());
+                                    status.commands.last_result = Some("issued".into());
+                                    ControlResponse::CommandIssued { command_id }
+                                }
+                                Err(error) => ControlResponse::Error {
+                                    code: "command_publication_failed".into(),
+                                    detail: error.to_string(),
+                                },
+                            }
+                        }
+                        Err(error) => ControlResponse::Error {
+                            code: "command_record_invalid".into(),
+                            detail: error.to_string(),
+                        },
+                    }
+                }
+                Err(error) => ControlResponse::Error {
+                    code: "command_rejected".into(),
+                    detail: error.to_string(),
+                },
+            }
+        }
         ControlRequest::EmergencyRtl { .. } => ControlResponse::Error {
-            code: "commands_unavailable".into(),
-            detail: "emergency command handling is disabled until configured".into(),
+            code: "invalid_target".into(),
+            detail: "target must contain 1-128 safe characters".into(),
         },
     };
     let _ = envelope.respond_to.send(response);
@@ -622,6 +694,175 @@ async fn ingest_payload_event(
     let record = AvianRecord::new(node_id.clone(), sequence, class, unix_time_ms(), payload)?;
     node.put(&record_id, &record).await?;
     Ok(())
+}
+
+async fn process_emergency_commands(
+    node: &PeatNode,
+    node_id: &NodeId,
+    commands: &mut CommandRuntime,
+    status: &mut AgentStatus,
+    mavlink: Option<&MavlinkCommandSender>,
+    ack_sequence: &mut u64,
+) {
+    let records = match node.scan(DeliveryClass::Emergency).await {
+        Ok(records) => records,
+        Err(error) => {
+            status.record_error("commands", error.to_string(), unix_time_ms());
+            return;
+        }
+    };
+    for (_, record) in records {
+        let MeshPayload::EmergencyCommand(command) = record.payload else {
+            continue;
+        };
+        let now_ms = unix_time_ms();
+        let system_locked = status.mavlink.connected && status.mavlink.target_system_id.is_some();
+        let evaluation = match commands.evaluate(&command, now_ms, system_locked) {
+            Ok(value) => value,
+            Err(error) => {
+                status.record_error("commands", error.to_string(), now_ms);
+                continue;
+            }
+        };
+        let ack = match evaluation {
+            CommandEvaluation::AlreadyProcessed => match commands.pending_ack(command.command_id) {
+                Some(ack) => Some(ack),
+                None => match commands.recover_interrupted(&command, now_ms) {
+                    Ok(ack) => ack,
+                    Err(error) => {
+                        status.record_error("commands", error.to_string(), now_ms);
+                        None
+                    }
+                },
+            },
+            CommandEvaluation::Rejected(ack) => {
+                status.commands.rejected = status.commands.rejected.saturating_add(1);
+                Some(ack)
+            }
+            CommandEvaluation::Accepted if commands.mode() == CommandMode::DryRun => {
+                status.commands.accepted = status.commands.accepted.saturating_add(1);
+                let ack = commands.ack(
+                    &command,
+                    AckOutcome {
+                        verified: true,
+                        accepted: true,
+                        executed: false,
+                        mavlink_result: None,
+                        detail: "verified dry run; no MAVLink command sent".into(),
+                    },
+                    now_ms,
+                );
+                match commands.queue_ack(ack.clone()) {
+                    Ok(()) => Some(ack),
+                    Err(error) => {
+                        status.record_error("commands", error.to_string(), now_ms);
+                        None
+                    }
+                }
+            }
+            CommandEvaluation::Accepted if commands.mode() == CommandMode::Execute => {
+                status.commands.accepted = status.commands.accepted.saturating_add(1);
+                let outcome = match (mavlink, status.mavlink.target_system_id) {
+                    (Some(sender), Some(system_id)) => {
+                        sender
+                            .return_to_launch(
+                                system_id,
+                                Duration::from_millis(commands.ack_timeout_ms()),
+                                commands.retries(),
+                            )
+                            .await
+                    }
+                    _ => MavlinkCommandOutcome::TransportUnavailable(
+                        "MAVLink command channel is unavailable".into(),
+                    ),
+                };
+                let (executed, result, detail) = match outcome {
+                    MavlinkCommandOutcome::Accepted => (
+                        true,
+                        Some("accepted".into()),
+                        "SITL acknowledged return-to-launch".to_owned(),
+                    ),
+                    MavlinkCommandOutcome::Rejected(result) => (
+                        false,
+                        Some(result.clone()),
+                        format!("SITL rejected return-to-launch: {result}"),
+                    ),
+                    MavlinkCommandOutcome::TimedOut => (
+                        false,
+                        Some("timeout".into()),
+                        "SITL command acknowledgement timed out".to_owned(),
+                    ),
+                    MavlinkCommandOutcome::TransportUnavailable(error) => {
+                        (false, Some("transport_unavailable".into()), error)
+                    }
+                };
+                let ack = commands.ack(
+                    &command,
+                    AckOutcome {
+                        verified: true,
+                        accepted: true,
+                        executed,
+                        mavlink_result: result,
+                        detail,
+                    },
+                    unix_time_ms(),
+                );
+                match commands.queue_ack(ack.clone()) {
+                    Ok(()) => Some(ack),
+                    Err(error) => {
+                        status.record_error("commands", error.to_string(), unix_time_ms());
+                        None
+                    }
+                }
+            }
+            CommandEvaluation::Accepted => None,
+        };
+        if let Some(ack) = ack {
+            *ack_sequence = ack_sequence.saturating_add(1);
+            status.commands.last_command_at_ms = Some(now_ms);
+            status.commands.last_result = Some(ack.detail.clone());
+            if publish_command_ack(node, node_id, *ack_sequence, &ack).await {
+                if let Err(error) = commands.mark_ack_published(ack.command_id) {
+                    status.record_error("commands", error.to_string(), unix_time_ms());
+                }
+            } else {
+                status.record_error(
+                    "commands",
+                    "durable command acknowledgement publication failed",
+                    unix_time_ms(),
+                );
+            }
+        }
+    }
+}
+
+async fn publish_command_ack(
+    node: &PeatNode,
+    node_id: &NodeId,
+    sequence: u64,
+    ack: &mesh_core::EmergencyAck,
+) -> bool {
+    let record = match AvianRecord::new(
+        node_id.clone(),
+        sequence,
+        DeliveryClass::Acknowledgement,
+        unix_time_ms(),
+        MeshPayload::EmergencyAck(ack.clone()),
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            eprintln!("Command acknowledgement rejected: {error}");
+            return false;
+        }
+    };
+    let record_id = format!("ack/{node_id}/{}", ack.command_id);
+    match node.put(&record_id, &record).await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("Command acknowledgement publication failed: {error}");
+            false
+        }
+    }
 }
 
 async fn publish_operator_summary(

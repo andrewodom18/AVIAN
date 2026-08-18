@@ -116,6 +116,14 @@ pub struct EmergencyAck {
     pub command_id: Uuid,
     pub node_id: NodeId,
     pub accepted: bool,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub executed: bool,
+    #[serde(default)]
+    pub command_mode: Option<String>,
+    #[serde(default)]
+    pub mavlink_result: Option<String>,
     pub detail: String,
     pub timestamp_ms: u64,
 }

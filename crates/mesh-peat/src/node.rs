@@ -329,24 +329,27 @@ impl PeatNode {
         else {
             return Ok(None);
         };
-        Ok(Some(record_from_document(document, class)?))
+        let record = record_from_document(document)?;
+        Ok((record.class == class).then_some(record))
     }
 
     pub async fn scan(
         &self,
         class: DeliveryClass,
     ) -> Result<Vec<(String, AvianRecord)>, PeatNodeError> {
-        self.backend
+        let records = self
+            .backend
             .document_store()
             .query(collection_for(class), &Query::All)
             .await?
             .into_iter()
             .map(|document| {
                 let record_id = document.id.clone().ok_or(PeatNodeError::MissingRecordId)?;
-                let record = record_from_document(document, class)?;
-                Ok((record_id, record))
+                let record = record_from_document(document)?;
+                Ok((record.class == class).then_some((record_id, record)))
             })
-            .collect()
+            .collect::<Result<Vec<_>, PeatNodeError>>()?;
+        Ok(records.into_iter().flatten().collect())
     }
 
     pub async fn sync_now(&self) -> Result<(), PeatNodeError> {
@@ -369,19 +372,13 @@ fn collection_for(class: DeliveryClass) -> &'static str {
     }
 }
 
-fn record_from_document(
-    document: Document,
-    expected_class: DeliveryClass,
-) -> Result<AvianRecord, PeatNodeError> {
+fn record_from_document(document: Document) -> Result<AvianRecord, PeatNodeError> {
     let value = document
         .fields
         .get(RECORD_FIELD)
         .ok_or(PeatNodeError::MissingRecordField)?;
     let record: AvianRecord = serde_json::from_value(value.clone())?;
     record.validate()?;
-    if record.class != expected_class {
-        return Err(PeatNodeError::PayloadClassMismatch);
-    }
     Ok(record)
 }
 

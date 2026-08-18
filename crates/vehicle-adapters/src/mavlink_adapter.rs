@@ -1,10 +1,14 @@
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mavlink::dialects::common::{MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavState};
+use mavlink::dialects::common::{
+    MavAutopilot, MavCmd, MavLandedState, MavMessage, MavModeFlag, MavResult, MavState,
+    COMMAND_LONG_DATA,
+};
+use mavlink::error::MessageReadError;
 use mavlink::{MavConnection, MavHeader};
 use mesh_core::{Altitude, FlightStack, NodeId, Telemetry};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::AdapterError;
 
@@ -25,6 +29,60 @@ pub enum MavlinkTelemetryEvent {
     Rejected(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MavlinkCommandOutcome {
+    Accepted,
+    Rejected(String),
+    TimedOut,
+    TransportUnavailable(String),
+}
+
+struct MavlinkCommandRequest {
+    target_system_id: u8,
+    ack_timeout: Duration,
+    retries: u8,
+    respond_to: oneshot::Sender<MavlinkCommandOutcome>,
+}
+
+#[derive(Clone)]
+pub struct MavlinkCommandSender {
+    sender: mpsc::Sender<MavlinkCommandRequest>,
+}
+
+impl MavlinkCommandSender {
+    pub async fn return_to_launch(
+        &self,
+        target_system_id: u8,
+        ack_timeout: Duration,
+        retries: u8,
+    ) -> MavlinkCommandOutcome {
+        let (respond_to, response) = oneshot::channel();
+        if self
+            .sender
+            .send(MavlinkCommandRequest {
+                target_system_id,
+                ack_timeout,
+                retries,
+                respond_to,
+            })
+            .await
+            .is_err()
+        {
+            return MavlinkCommandOutcome::TransportUnavailable(
+                "MAVLink worker is not running".into(),
+            );
+        }
+        response.await.unwrap_or_else(|_| {
+            MavlinkCommandOutcome::TransportUnavailable("MAVLink worker stopped".into())
+        })
+    }
+}
+
+pub struct MavlinkRuntime {
+    pub events: mpsc::Receiver<MavlinkTelemetryEvent>,
+    pub commands: MavlinkCommandSender,
+}
+
 /// Starts rust-mavlink's blocking transport on a dedicated OS thread. The
 /// bounded channel applies backpressure instead of allowing telemetry to grow
 /// without limit when mesh publication is busy.
@@ -32,18 +90,35 @@ pub fn spawn_mavlink_source(
     config: MavlinkSourceConfig,
     channel_capacity: usize,
 ) -> Result<mpsc::Receiver<MavlinkTelemetryEvent>, AdapterError> {
+    Ok(spawn_mavlink_runtime(config, channel_capacity)?.events)
+}
+
+pub fn spawn_mavlink_runtime(
+    config: MavlinkSourceConfig,
+    channel_capacity: usize,
+) -> Result<MavlinkRuntime, AdapterError> {
     if channel_capacity == 0 {
         return Err(AdapterError::InvalidChannelCapacity);
     }
     let (sender, receiver) = mpsc::channel(channel_capacity);
+    let (command_sender, command_receiver) = mpsc::channel(8);
     thread::Builder::new()
         .name("avian-mavlink".to_owned())
-        .spawn(move || run_mavlink_source(config, sender))
+        .spawn(move || run_mavlink_source(config, sender, command_receiver))
         .map_err(|error| AdapterError::Runtime(error.to_string()))?;
-    Ok(receiver)
+    Ok(MavlinkRuntime {
+        events: receiver,
+        commands: MavlinkCommandSender {
+            sender: command_sender,
+        },
+    })
 }
 
-fn run_mavlink_source(config: MavlinkSourceConfig, sender: mpsc::Sender<MavlinkTelemetryEvent>) {
+fn run_mavlink_source(
+    config: MavlinkSourceConfig,
+    sender: mpsc::Sender<MavlinkTelemetryEvent>,
+    mut commands: mpsc::Receiver<MavlinkCommandRequest>,
+) {
     loop {
         let connection = match mavlink::connect::<MavMessage>(&config.address) {
             Ok(connection) => connection,
@@ -61,7 +136,7 @@ fn run_mavlink_source(config: MavlinkSourceConfig, sender: mpsc::Sender<MavlinkT
         if !send_event(&sender, MavlinkTelemetryEvent::Connected) {
             return;
         }
-        if !receive_connection(&config, &connection, &sender) {
+        if !receive_connection(&config, &connection, &sender, &mut commands) {
             return;
         }
         thread::sleep(config.reconnect_delay);
@@ -72,6 +147,7 @@ fn receive_connection(
     config: &MavlinkSourceConfig,
     connection: &dyn MavConnection<MavMessage>,
     sender: &mpsc::Sender<MavlinkTelemetryEvent>,
+    commands: &mut mpsc::Receiver<MavlinkCommandRequest>,
 ) -> bool {
     let mut accumulator =
         match MavlinkTelemetryAccumulator::new(config.source.clone(), config.expected_stack) {
@@ -81,16 +157,81 @@ fn receive_connection(
                 return false;
             }
         };
+    let mut pending: Option<PendingCommand> = None;
     loop {
-        let (header, message) = match connection.recv() {
+        if pending.is_none() {
+            if let Ok(request) = commands.try_recv() {
+                if accumulator.target_system_id() != Some(request.target_system_id) {
+                    let _ = request
+                        .respond_to
+                        .send(MavlinkCommandOutcome::TransportUnavailable(
+                            "MAVLink system lock does not match command target".into(),
+                        ));
+                } else {
+                    match send_rtl(connection, request.target_system_id, 0) {
+                        Ok(()) => {
+                            let ack_timeout = request.ack_timeout;
+                            pending = Some(PendingCommand {
+                                request,
+                                attempts: 1,
+                                deadline: std::time::Instant::now() + ack_timeout,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = request.respond_to.send(
+                                MavlinkCommandOutcome::TransportUnavailable(error.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let received = connection.try_recv();
+        let (header, message) = match received {
             Ok(value) => value,
+            Err(MessageReadError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if process_command_timeout(connection, &mut pending) {
+                    continue;
+                }
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(MessageReadError::Parse(error)) => {
+                if !send_event(sender, MavlinkTelemetryEvent::Rejected(error.to_string())) {
+                    return false;
+                }
+                continue;
+            }
             Err(error) => {
+                if let Some(pending) = pending.take() {
+                    let _ = pending.respond(MavlinkCommandOutcome::TransportUnavailable(
+                        error.to_string(),
+                    ));
+                }
                 return send_event(
                     sender,
                     MavlinkTelemetryEvent::ConnectionLost(error.to_string()),
                 );
             }
         };
+        if let MavMessage::COMMAND_ACK(ack) = &message {
+            if ack.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH {
+                if let Some(pending) = pending.take() {
+                    let outcome = if ack.result == MavResult::MAV_RESULT_ACCEPTED {
+                        MavlinkCommandOutcome::Accepted
+                    } else {
+                        MavlinkCommandOutcome::Rejected(format!("{:?}", ack.result))
+                    };
+                    let _ = pending.respond(outcome);
+                }
+            }
+        }
         let previous_target = accumulator.target_system_id();
         match accumulator.ingest(header, &message, unix_time_ms()) {
             Ok(Some(telemetry)) => {
@@ -125,6 +266,70 @@ fn receive_connection(
             }
         }
     }
+}
+
+struct PendingCommand {
+    request: MavlinkCommandRequest,
+    attempts: u8,
+    deadline: std::time::Instant,
+}
+
+impl PendingCommand {
+    fn respond(self, outcome: MavlinkCommandOutcome) -> Result<(), MavlinkCommandOutcome> {
+        self.request.respond_to.send(outcome)
+    }
+}
+
+fn process_command_timeout(
+    connection: &dyn MavConnection<MavMessage>,
+    pending: &mut Option<PendingCommand>,
+) -> bool {
+    let Some(command) = pending.as_mut() else {
+        return false;
+    };
+    if std::time::Instant::now() < command.deadline {
+        return false;
+    }
+    if command.attempts <= command.request.retries {
+        let confirmation = command.attempts;
+        match send_rtl(connection, command.request.target_system_id, confirmation) {
+            Ok(()) => {
+                command.attempts = command.attempts.saturating_add(1);
+                command.deadline = std::time::Instant::now() + command.request.ack_timeout;
+            }
+            Err(error) => {
+                if let Some(command) = pending.take() {
+                    let _ = command.respond(MavlinkCommandOutcome::TransportUnavailable(
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+    } else if let Some(command) = pending.take() {
+        let _ = command.respond(MavlinkCommandOutcome::TimedOut);
+    }
+    true
+}
+
+fn send_rtl(
+    connection: &dyn MavConnection<MavMessage>,
+    target_system_id: u8,
+    confirmation: u8,
+) -> Result<(), mavlink::error::MessageWriteError> {
+    let header = MavHeader {
+        system_id: 255,
+        component_id: 190,
+        sequence: 0,
+    };
+    let message = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+        command: MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH,
+        target_system: target_system_id,
+        target_component: 1,
+        confirmation,
+        ..COMMAND_LONG_DATA::default()
+    });
+    connection.send(&header, &message)?;
+    Ok(())
 }
 
 fn send_event(sender: &mpsc::Sender<MavlinkTelemetryEvent>, event: MavlinkTelemetryEvent) -> bool {
@@ -339,8 +544,8 @@ mod tests {
     use std::f32::consts::{FRAC_PI_2, PI};
 
     use mavlink::dialects::common::{
-        ALTITUDE_DATA, ATTITUDE_DATA, EXTENDED_SYS_STATE_DATA, GLOBAL_POSITION_INT_DATA,
-        HEARTBEAT_DATA, RC_CHANNELS_DATA, SYS_STATUS_DATA,
+        ALTITUDE_DATA, ATTITUDE_DATA, COMMAND_ACK_DATA, EXTENDED_SYS_STATE_DATA,
+        GLOBAL_POSITION_INT_DATA, HEARTBEAT_DATA, RC_CHANNELS_DATA, SYS_STATUS_DATA,
     };
 
     use super::*;
@@ -360,6 +565,64 @@ mod tests {
             system_status: MavState::MAV_STATE_ACTIVE,
             ..HEARTBEAT_DATA::default()
         })
+    }
+
+    #[tokio::test]
+    async fn bidirectional_runtime_sends_rtl_and_correlates_ack() {
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let mut runtime = spawn_mavlink_runtime(
+            MavlinkSourceConfig {
+                address: format!("udpin:127.0.0.1:{port}"),
+                source: NodeId::from("sitl"),
+                expected_stack: FlightStack::ArduPilot,
+                reconnect_delay: Duration::from_millis(20),
+            },
+            16,
+        )
+        .unwrap();
+        let fake = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let connection =
+                mavlink::connect::<MavMessage>(&format!("udpout:127.0.0.1:{port}")).unwrap();
+            connection
+                .send(
+                    &header(42),
+                    &heartbeat(MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA),
+                )
+                .unwrap();
+            let (_, message) = connection.recv().unwrap();
+            let MavMessage::COMMAND_LONG(command) = message else {
+                panic!("expected COMMAND_LONG");
+            };
+            assert_eq!(command.command, MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH);
+            assert_eq!(command.target_system, 42);
+            connection
+                .send(
+                    &header(42),
+                    &MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+                        command: MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                        result: MavResult::MAV_RESULT_ACCEPTED,
+                    }),
+                )
+                .unwrap();
+        });
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), runtime.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if event == MavlinkTelemetryEvent::SystemLocked(42) {
+                break;
+            }
+        }
+        let outcome = runtime
+            .commands
+            .return_to_launch(42, Duration::from_millis(500), 1)
+            .await;
+        assert_eq!(outcome, MavlinkCommandOutcome::Accepted);
+        fake.join().unwrap();
     }
 
     fn position() -> MavMessage {
