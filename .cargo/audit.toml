@@ -1,0 +1,20 @@
+[advisories]
+ignore = [
+    # Zenoh 1.9 enables RSA public-key authentication by default and no fixed
+    # rsa release exists for this timing advisory. AVIAN currently uses its
+    # local Unix-socket endpoint and does not configure RSA private-key auth.
+    # Re-evaluate when Zenoh or rsa publishes a compatible fix.
+    "RUSTSEC-2023-0071",
+
+    # Zenoh 1.9 pins lz4_flex 0.10 and has no compatible patched release. The
+    # default deployment uses the configured, trusted local ARC Unix socket;
+    # public/untrusted Zenoh endpoints must remain prohibited. Re-evaluate on
+    # every Zenoh upgrade and remove this once Zenoh permits lz4_flex 0.11.6+.
+    "RUSTSEC-2026-0041",
+
+    # quick-xml 0.39 is used only by mavlink-bindgen at build time to parse the
+    # repository's fixed dialect definitions. AVIAN does not process runtime
+    # XML through this dependency. Re-evaluate when MAVLink tooling changes.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
