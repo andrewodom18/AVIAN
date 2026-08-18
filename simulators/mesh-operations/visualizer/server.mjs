@@ -4,15 +4,17 @@ import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_RADIO_CONFIGURATION, validateRadioConfiguration } from "./radio-config.mjs";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
-const workspaceRoot = path.resolve(appRoot, "..", "..");
+const workspaceRoot = path.resolve(appRoot, "..", "..", "..");
 const port = Number.parseInt(process.env.AVIAN_VISUALIZER_PORT ?? "3211", 10);
 
 const contentTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
   [".js", "text/javascript; charset=utf-8"],
+  [".mjs", "text/javascript; charset=utf-8"],
   [".png", "image/png"],
 ]);
 
@@ -72,6 +74,7 @@ function staticPath(urlPath) {
 
 let scenario;
 let scenarioError;
+let radioConfiguration = { ...DEFAULT_RADIO_CONFIGURATION, generation: 1 };
 
 async function refreshScenario() {
   try {
@@ -91,6 +94,25 @@ function json(response, status, value) {
   response.end(JSON.stringify(value));
 }
 
+function readJsonBody(request) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 32_768) reject(new Error("radio configuration request is too large"));
+    });
+    request.on("end", () => {
+      try {
+        resolve(JSON.parse(body || "{}"));
+      } catch {
+        reject(new Error("radio configuration request must be valid JSON"));
+      }
+    });
+    request.on("error", reject);
+  });
+}
+
 async function requestHandler(request, response) {
   const requestUrl = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (requestUrl.pathname === "/api/health") {
@@ -103,6 +125,28 @@ async function requestHandler(request, response) {
       return;
     }
     json(response, 200, scenario);
+    return;
+  }
+  if (requestUrl.pathname === "/api/radio/configuration" && request.method === "GET") {
+    json(response, 200, { configuration: radioConfiguration, simulated: true, hardware_write: false });
+    return;
+  }
+  if (requestUrl.pathname === "/api/radio/configuration" && request.method === "POST") {
+    try {
+      const requested = validateRadioConfiguration(await readJsonBody(request));
+      radioConfiguration = {
+        ...requested,
+        generation: radioConfiguration.generation + 1,
+      };
+      json(response, 200, {
+        status: "SIMULATED APPLY + READBACK CONFIRMED",
+        configuration: radioConfiguration,
+        simulated: true,
+        hardware_write: false,
+      });
+    } catch (error) {
+      json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
     return;
   }
   if (requestUrl.pathname === "/brand/avian-mark.png") {
@@ -140,4 +184,3 @@ const server = createServer((request, response) => {
 server.listen(port, "127.0.0.1", () => {
   console.log(`AVIAN visualizer ready at http://127.0.0.1:${port}`);
 });
-

@@ -5,7 +5,7 @@ param(
 )
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$server = Join-Path $repoRoot 'apps\mesh-visualizer\server.mjs'
+$server = Join-Path $repoRoot 'simulators\mesh-operations\visualizer\server.mjs'
 $logRoot = Join-Path $repoRoot 'target\mesh-visualizer'
 $baseUrl = "http://127.0.0.1:$Port"
 
