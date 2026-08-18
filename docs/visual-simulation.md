@@ -22,10 +22,45 @@ come from `SimNetwork`; the browser does not invent operational topology.
 11. Rejoining peers reconcile the current mission state.
 12. The existing signed-command, replay-guard, vehicle-action, and acknowledgement
    checks complete before the final verified state is displayed.
+13. A separate scale run instantiates 200 aircraft and one ground-control peer
+   in `SimNetwork`, connects the aircraft through the bounded
+   `TopologyPlanner` graph, adds the ground link, publishes the mission record,
+   and synchronizes it across all 201 logical nodes. It then removes the ground
+   peer, disables one aircraft link, takes 20 distributed aircraft offline,
+   converges a newer mission generation across the 180 survivors, restores the
+   failed nodes and link, and verifies that all 201 logical nodes reconcile.
+   The final metrics are read from that executed network: 201 online and
+   synchronized nodes in one connected component. The large-formation screen
+   intentionally presents the nodes rather than every internal path.
 
 The CHUD calls and their results are simulated workflow events, not live writes.
-The simulation demonstrates application behavior. It does not claim measured RF
-range, live hardware validation, or certification of a specific radio.
+The 200-aircraft run is one in-memory process, not 200 independent `mesh-agent`
+processes or radios. It demonstrates bounded graph construction and deterministic
+record convergence; it does not model packet timing, contention, RF propagation,
+measured range, live hardware, or certification of a specific radio.
+
+## Presentation behavior
+
+The first five discovery and configuration events use a slower guided pace at
+normal playback speed. A focus card explains the active operation, while the
+corresponding simulated CHUD request and result are highlighted in the control
+panel. Later topology, continuity, and recovery events advance more quickly.
+
+The scale sequence animates a camera pullback and draws every executed aircraft
+as an individual marker. It first shows all 200 aircraft and the GCS online,
+then shows the GCS and 20 distributed aircraft offline while remaining paths
+carry the 180 survivors, and finally restores all 201 nodes. Spider-web paths
+come from each Rust trace state and change between online, loss, and recovery
+events. The interface continues to emphasize nodes rather than a link counter.
+The in-app
+**About** view documents the trace source, modeled behavior, executed scale run,
+and the boundary between software simulation and pending hardware validation.
+
+The radio configuration panel is functional within the simulator. It validates
+network ID, RF band, center frequency, channel width, per-port transmit power,
+routing-beacon period, and encryption, then posts the plan to
+`/api/radio/configuration`. The local server increments the configuration
+generation and returns a simulated CHUD readback. It never writes radio hardware.
 
 ## Run on Windows
 
@@ -40,7 +75,7 @@ Run the checks directly with:
 
 ```powershell
 cargo test -p mesh-sim
-node --test apps\mesh-visualizer\visualizer.test.mjs
+node --test simulators\mesh-operations\visualizer\visualizer.test.mjs
 ```
 
 ## Hardware and ARC boundary

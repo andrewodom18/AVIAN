@@ -8,12 +8,14 @@ use mesh_core::{
     Altitude, DeliveryClass, DeliveryPolicy, EmergencyAck, EmergencyAction, EmergencyCommand,
     FlightStack, LinkCandidate, LinkGeometry, LinkId, LinkMetrics, LinkOrchestrator, MeshPayload,
     MissionState, MissionStatus, NodeId, NodeProfile, NodeRole, ReplayGuard, Telemetry,
-    TransportKind, DEFAULT_MAX_NEIGHBORS, MAX_SUPPORTED_SWARM_SIZE, SYSTEM_MAX_MSL_M,
+    TopologyPlanner, TransportKind, SYSTEM_MAX_MSL_M,
 };
 use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 use vehicle_adapters::{SimulatedVehicleAdapter, VehicleAdapter};
+
+const DEMONSTRATED_AIRCRAFT_COUNT: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RecordKey(String);
@@ -281,6 +283,10 @@ pub struct VisualFormationSummary {
     pub maximum_overlay_links: usize,
     pub documented_design_target_aircraft: usize,
     pub capacity_basis: String,
+    pub ground_partition_continuity_verified: bool,
+    pub distributed_loss_nodes: usize,
+    pub distributed_loss_continuity_verified: bool,
+    pub recovery_converged: bool,
     pub field_validated: bool,
 }
 
@@ -621,37 +627,7 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         verification.passed(),
     ));
 
-    let maximum_overlay_links = MAX_SUPPORTED_SWARM_SIZE * DEFAULT_MAX_NEIGHBORS / 2;
-    steps.push(VisualStep {
-        id: "maximum-formation-mission".to_owned(),
-        title: "Maximum software formation mission".to_owned(),
-        narrative: format!(
-            "A separate development mission summarizes {MAX_SUPPORTED_SWARM_SIZE} simulated aircraft plus one control station at the current software-planner ceiling. The documented design target remains 200 aircraft, and physical-radio/RF validation is still pending."
-        ),
-        at_ms: 22_500,
-        phase: "LARGE-FORMATION SIMULATION".to_owned(),
-        control_event: None,
-        nodes: Vec::new(),
-        links: Vec::new(),
-        metrics: VisualMetrics {
-            online_nodes: MAX_SUPPORTED_SWARM_SIZE + 1,
-            active_links: maximum_overlay_links,
-            connected_components: 1,
-            mission_synced_nodes: MAX_SUPPORTED_SWARM_SIZE + 1,
-            continuity: "Software topology ceiling represented".to_owned(),
-            signed_command_verified: verification.passed(),
-        },
-        formation_summary: Some(VisualFormationSummary {
-            mission_id: "DEMO-LARGE-FORMATION-01".to_owned(),
-            simulated_aircraft: MAX_SUPPORTED_SWARM_SIZE,
-            control_stations: 1,
-            direct_peer_limit: DEFAULT_MAX_NEIGHBORS,
-            maximum_overlay_links,
-            documented_design_target_aircraft: 200,
-            capacity_basis: "Software planner ceiling".to_owned(),
-            field_validated: false,
-        }),
-    });
+    steps.extend(run_large_formation_steps(verification.passed())?);
 
     Ok(VisualScenario {
         schema_version: 1,
@@ -661,6 +637,250 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
                 .to_owned(),
         steps,
     })
+}
+
+fn run_large_formation_steps(
+    signed_command_verified: bool,
+) -> Result<Vec<VisualStep>, SimulationError> {
+    let ground = NodeId::from("scale-ground-1");
+    let aircraft = (1..=DEMONSTRATED_AIRCRAFT_COUNT)
+        .map(|index| NodeId::from(format!("scale-aircraft-{index:03}")))
+        .collect::<Vec<_>>();
+    let plan = TopologyPlanner::default().plan(&aircraft)?;
+    let planned_aircraft_links = plan.edge_count();
+    let failed_link = (
+        aircraft[0].clone(),
+        plan.neighbors(&aircraft[0])
+            .and_then(BTreeSet::first)
+            .expect("a planned 200-aircraft node has neighbors")
+            .clone(),
+    );
+
+    let mut network = SimNetwork::default();
+    network.add_node(NodeProfile::ground(ground.clone()));
+    for (index, node_id) in aircraft.iter().enumerate() {
+        let flight_stack = match index % 3 {
+            0 => FlightStack::ArduPilot,
+            1 => FlightStack::Px4,
+            _ => FlightStack::Betaflight,
+        };
+        network.add_node(NodeProfile::aircraft(
+            node_id.clone(),
+            flight_stack,
+            SYSTEM_MAX_MSL_M,
+        )?);
+    }
+
+    for node_id in &aircraft {
+        for peer_id in plan
+            .neighbors(node_id)
+            .expect("planned aircraft is present in the topology")
+        {
+            if node_id < peer_id {
+                network.connect(node_id, peer_id)?;
+            }
+        }
+    }
+    network.connect(&ground, &aircraft[0])?;
+
+    let mission_key = RecordKey::from("mission/large-formation");
+    network.publish(
+        &ground,
+        mission_key.clone(),
+        MeshPayload::Mission(MissionState {
+            mission_id: Uuid::from_u128(30),
+            objective: "200-aircraft mesh scale demonstration".to_owned(),
+            generation: 1,
+            status: MissionStatus::Active,
+        }),
+        DeliveryClass::Mission,
+    )?;
+    network.synchronize();
+
+    let initially_converged = std::iter::once(&ground)
+        .chain(aircraft.iter())
+        .all(|node_id| mission_generation(&network, node_id, &mission_key) == Some(1));
+    if !initially_converged {
+        return Err(SimulationError::LargeFormationVerification(
+            "initial mission state did not reach all 201 nodes",
+        ));
+    }
+
+    let mut online_step = visual_step(
+        &network,
+        "maximum-formation-online",
+        "200-aircraft mesh online",
+        "AVIAN is executing 200 in-memory aircraft nodes plus one control station. Every node has converged on mission generation one.",
+        22_500,
+        "LARGE-FORMATION SIMULATION",
+        None,
+        &mission_key,
+        None,
+        false,
+        "200 aircraft online and synchronized",
+        signed_command_verified,
+    );
+    online_step.formation_summary = Some(VisualFormationSummary {
+        mission_id: "DEMO-LARGE-FORMATION-01".to_owned(),
+        simulated_aircraft: DEMONSTRATED_AIRCRAFT_COUNT,
+        control_stations: 1,
+        direct_peer_limit: plan.max_degree(),
+        maximum_overlay_links: planned_aircraft_links,
+        documented_design_target_aircraft: DEMONSTRATED_AIRCRAFT_COUNT,
+        capacity_basis: "Executed SimNetwork state and TopologyPlanner output".to_owned(),
+        ground_partition_continuity_verified: false,
+        distributed_loss_nodes: 0,
+        distributed_loss_continuity_verified: false,
+        recovery_converged: false,
+        field_validated: false,
+    });
+    let mut steps = vec![online_step];
+
+    network.set_node_online(&ground, false)?;
+    let ground_partition_continuity_verified = network.connected_component_count() == 1
+        && aircraft
+            .iter()
+            .all(|node_id| mission_generation(&network, node_id, &mission_key) == Some(1));
+    if !ground_partition_continuity_verified {
+        return Err(SimulationError::LargeFormationVerification(
+            "aircraft did not remain connected after ground loss",
+        ));
+    }
+
+    network.set_link_enabled(&failed_link.0, &failed_link.1, false)?;
+    let distributed_loss = aircraft
+        .iter()
+        .skip(9)
+        .step_by(10)
+        .cloned()
+        .collect::<Vec<_>>();
+    for node_id in &distributed_loss {
+        network.set_node_online(node_id, false)?;
+    }
+    let distributed_loss_continuity_verified = distributed_loss.len() == 20
+        && network.connected_component_count() == 1
+        && network.nodes.values().filter(|node| node.online).count() == 180;
+    if !distributed_loss_continuity_verified {
+        return Err(SimulationError::LargeFormationVerification(
+            "the surviving aircraft disconnected after distributed node and link loss",
+        ));
+    }
+
+    network.publish(
+        &aircraft[0],
+        mission_key.clone(),
+        MeshPayload::Mission(MissionState {
+            mission_id: Uuid::from_u128(30),
+            objective: "200-aircraft mesh scale demonstration".to_owned(),
+            generation: 2,
+            status: MissionStatus::Active,
+        }),
+        DeliveryClass::Mission,
+    )?;
+    network.synchronize();
+    let surviving_nodes_converged = aircraft.iter().all(|node_id| {
+        distributed_loss.contains(node_id)
+            || mission_generation(&network, node_id, &mission_key) == Some(2)
+    });
+    if !surviving_nodes_converged {
+        return Err(SimulationError::LargeFormationVerification(
+            "updated mission state did not reach every surviving aircraft",
+        ));
+    }
+
+    let mut reroute_step = visual_step(
+        &network,
+        "maximum-formation-rerouting",
+        "20 aircraft leave; mesh paths reroute",
+        "Twenty distributed aircraft and the ground station are offline. The 180 surviving aircraft remain one connected component and converge on mission generation two through the remaining paths.",
+        25_000,
+        "LARGE-FORMATION CONTINUITY",
+        None,
+        &mission_key,
+        Some((&failed_link.0, &failed_link.1)),
+        false,
+        "180 aircraft rerouted and synchronized",
+        signed_command_verified,
+    );
+    for node in &mut reroute_step.nodes {
+        if node.status == "offline" {
+            node.mission_synced = false;
+        }
+    }
+    reroute_step.metrics.mission_synced_nodes = 180;
+    reroute_step.formation_summary = Some(VisualFormationSummary {
+        mission_id: "DEMO-LARGE-FORMATION-01".to_owned(),
+        simulated_aircraft: DEMONSTRATED_AIRCRAFT_COUNT,
+        control_stations: 1,
+        direct_peer_limit: plan.max_degree(),
+        maximum_overlay_links: planned_aircraft_links,
+        documented_design_target_aircraft: DEMONSTRATED_AIRCRAFT_COUNT,
+        capacity_basis: "Executed SimNetwork state and TopologyPlanner output".to_owned(),
+        ground_partition_continuity_verified,
+        distributed_loss_nodes: distributed_loss.len(),
+        distributed_loss_continuity_verified,
+        recovery_converged: false,
+        field_validated: false,
+    });
+    steps.push(reroute_step);
+
+    network.set_node_online(&ground, true)?;
+    network.set_link_enabled(&failed_link.0, &failed_link.1, true)?;
+    for node_id in &distributed_loss {
+        network.set_node_online(node_id, true)?;
+    }
+    network.synchronize();
+    let recovery_converged = network.connected_component_count() == 1
+        && std::iter::once(&ground)
+            .chain(aircraft.iter())
+            .all(|node_id| mission_generation(&network, node_id, &mission_key) == Some(2));
+    if !recovery_converged {
+        return Err(SimulationError::LargeFormationVerification(
+            "recovered nodes did not reconcile the latest mission generation",
+        ));
+    }
+
+    let mut step = visual_step(
+        &network,
+        "maximum-formation-mission",
+        "200-aircraft simulation completed",
+        "AVIAN executed 200 in-memory aircraft nodes plus one control station, retained airborne continuity through ground, link, and 20-aircraft loss, then recovered all 201 nodes onto the latest mission generation.",
+        27_500,
+        "LARGE-FORMATION SIMULATION",
+        None,
+        &mission_key,
+        None,
+        false,
+        "200-aircraft loss and recovery verified",
+        signed_command_verified,
+    );
+    step.formation_summary = Some(VisualFormationSummary {
+        mission_id: "DEMO-LARGE-FORMATION-01".to_owned(),
+        simulated_aircraft: DEMONSTRATED_AIRCRAFT_COUNT,
+        control_stations: 1,
+        direct_peer_limit: plan.max_degree(),
+        maximum_overlay_links: planned_aircraft_links,
+        documented_design_target_aircraft: DEMONSTRATED_AIRCRAFT_COUNT,
+        capacity_basis: "Executed SimNetwork state and TopologyPlanner output".to_owned(),
+        ground_partition_continuity_verified,
+        distributed_loss_nodes: distributed_loss.len(),
+        distributed_loss_continuity_verified,
+        recovery_converged,
+        field_validated: false,
+    });
+    steps.push(step);
+    Ok(steps)
+}
+
+fn mission_generation(
+    network: &SimNetwork,
+    node_id: &NodeId,
+    mission_key: &RecordKey,
+) -> Option<u64> {
+    match network.payload(node_id, mission_key) {
+        Some(MeshPayload::Mission(mission)) => Some(mission.generation),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1033,12 +1253,16 @@ pub enum SimulationError {
     UnknownLink(NodeId, NodeId),
     #[error("signed command was not delivered")]
     CommandNotDelivered,
+    #[error("large-formation verification failed: {0}")]
+    LargeFormationVerification(&'static str),
     #[error(transparent)]
     Profile(#[from] mesh_core::ProfileError),
     #[error(transparent)]
     Altitude(#[from] mesh_core::AltitudeError),
     #[error(transparent)]
     Command(#[from] mesh_core::CommandError),
+    #[error(transparent)]
+    Topology(#[from] mesh_core::TopologyError),
     #[error(transparent)]
     Adapter(#[from] vehicle_adapters::AdapterError),
 }
@@ -1057,7 +1281,7 @@ mod tests {
     async fn visual_scenario_reports_real_failure_and_recovery_state() {
         let scenario = run_visual_scenario().await.unwrap();
         assert_eq!(scenario.schema_version, 1);
-        assert_eq!(scenario.steps.len(), 16);
+        assert_eq!(scenario.steps.len(), 18);
 
         let connected = &scenario.steps[0];
         assert_eq!(connected.id, "radio-connected");
@@ -1100,12 +1324,55 @@ mod tests {
         assert_eq!(recovery.metrics.mission_synced_nodes, 4);
         assert!(recovery.metrics.signed_command_verified);
 
+        let scale_online = scenario
+            .steps
+            .iter()
+            .find(|step| step.id == "maximum-formation-online")
+            .unwrap();
+        assert_eq!(scale_online.metrics.online_nodes, 201);
+        assert_eq!(scale_online.metrics.mission_synced_nodes, 201);
+
+        let scale_rerouting = scenario
+            .steps
+            .iter()
+            .find(|step| step.id == "maximum-formation-rerouting")
+            .unwrap();
+        assert_eq!(scale_rerouting.metrics.online_nodes, 180);
+        assert_eq!(scale_rerouting.metrics.connected_components, 1);
+        assert_eq!(scale_rerouting.metrics.mission_synced_nodes, 180);
+        assert_eq!(
+            scale_rerouting
+                .nodes
+                .iter()
+                .filter(|node| node.status == "offline")
+                .count(),
+            21
+        );
+
         let maximum = scenario.steps.last().unwrap();
         let summary = maximum.formation_summary.as_ref().unwrap();
         assert_eq!(maximum.id, "maximum-formation-mission");
-        assert_eq!(summary.simulated_aircraft, MAX_SUPPORTED_SWARM_SIZE);
+        assert_eq!(summary.simulated_aircraft, DEMONSTRATED_AIRCRAFT_COUNT);
         assert_eq!(summary.control_stations, 1);
-        assert_eq!(summary.direct_peer_limit, DEFAULT_MAX_NEIGHBORS);
+        assert_eq!(summary.direct_peer_limit, 8);
+        assert_eq!(summary.maximum_overlay_links, 800);
+        assert_eq!(maximum.nodes.len(), DEMONSTRATED_AIRCRAFT_COUNT + 1);
+        assert_eq!(maximum.links.len(), 801);
+        assert_eq!(
+            maximum.metrics.online_nodes,
+            DEMONSTRATED_AIRCRAFT_COUNT + 1
+        );
+        assert_eq!(maximum.metrics.active_links, 801);
+        assert_eq!(maximum.metrics.connected_components, 1);
+        assert_eq!(
+            maximum.metrics.mission_synced_nodes,
+            DEMONSTRATED_AIRCRAFT_COUNT + 1
+        );
+        assert!(maximum.nodes.iter().all(|node| node.mission_synced));
+        assert!(summary.ground_partition_continuity_verified);
+        assert_eq!(summary.distributed_loss_nodes, 20);
+        assert!(summary.distributed_loss_continuity_verified);
+        assert!(summary.recovery_converged);
         assert!(!summary.field_validated);
     }
 
