@@ -41,7 +41,7 @@ p12-keystore = "0.3.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = "1"
-zenoh = { version = "1", features = ["unstable"] }
+zenoh = { version = "1", default-features = false, features = ["unstable", "transport_tcp", "transport_unixsock-stream"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

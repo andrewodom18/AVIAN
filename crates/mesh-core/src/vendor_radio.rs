@@ -240,9 +240,6 @@ pub fn normalize_radio_mac(value: &str) -> Result<String, VendorRadioError> {
         None
     }
     .ok_or_else(|| VendorRadioError::InvalidMacAddress(value.to_owned()))?;
-    if compact.len() != 12 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(VendorRadioError::InvalidMacAddress(value.to_owned()));
-    }
     Ok(compact
         .as_bytes()
         .chunks(2)
@@ -322,7 +319,9 @@ fn discovery_precedes(
 ) -> bool {
     candidate.observed_at_ms > current.observed_at_ms
         || (candidate.observed_at_ms == current.observed_at_ms
-            && discovery_evidence_key(candidate) > discovery_evidence_key(current))
+            && discovery_evidence_key(candidate)
+                .cmp(&discovery_evidence_key(current))
+                .is_gt())
 }
 
 fn discovery_evidence_key(
@@ -661,9 +660,8 @@ fn validate_mac(value: &str) -> Result<(), VendorRadioError> {
 }
 
 fn validate_public_error_code(value: &str) -> Result<(), VendorRadioError> {
-    validate_token("error_code", value)?;
     let lower = value.to_ascii_lowercase();
-    if [
+    let has_sensitive_marker = [
         "password",
         "private_key",
         "credential",
@@ -672,8 +670,13 @@ fn validate_public_error_code(value: &str) -> Result<(), VendorRadioError> {
         "token",
     ]
     .iter()
-    .any(|marker| lower.contains(marker))
-    {
+    .any(|marker| lower.contains(marker));
+    let is_public_token = !value.is_empty()
+        && value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if has_sensitive_marker || !is_public_token {
         return Err(VendorRadioError::UnsafeErrorCode);
     }
     Ok(())
@@ -832,13 +835,26 @@ mod tests {
         let mut newer = valid_discovery(9_500, "001e.3f20.9a10");
         newer.reachability = RadioReachabilityStatus::Unreachable;
 
-        let reduced =
-            reduce_radio_discoveries([older, newer], 10_000, RadioDiscoveryPolicy::default())
-                .unwrap();
+        let reduced = reduce_radio_discoveries(
+            [older.clone(), newer.clone()],
+            10_000,
+            RadioDiscoveryPolicy::default(),
+        )
+        .unwrap();
         assert_eq!(reduced.len(), 1);
         assert_eq!(reduced[0].observed_at_ms, 9_500);
         assert_eq!(reduced[0].mac_address, "00:1e:3f:20:9a:10");
         assert!(!reduced[0].is_current_live(10_000, RadioDiscoveryPolicy::default()));
+
+        let reverse_order =
+            reduce_radio_discoveries([newer, older], 10_000, RadioDiscoveryPolicy::default())
+                .unwrap();
+        assert_eq!(reverse_order.len(), 1);
+        assert_eq!(reverse_order[0].observed_at_ms, 9_500);
+        assert_eq!(
+            reverse_order[0].reachability,
+            RadioReachabilityStatus::Unreachable
+        );
     }
 
     #[test]
@@ -850,11 +866,22 @@ mod tests {
             .discovery_methods
             .push(RadioDiscoveryMethod::TlsFingerprint);
 
-        let reduced =
-            reduce_radio_discoveries([weak, strong], 10_000, RadioDiscoveryPolicy::default())
-                .unwrap();
+        let reduced = reduce_radio_discoveries(
+            [weak.clone(), strong.clone()],
+            10_000,
+            RadioDiscoveryPolicy::default(),
+        )
+        .unwrap();
         assert_eq!(
             reduced[0].management_authentication,
+            RadioManagementAuthentication::Authenticated
+        );
+
+        let reverse_order =
+            reduce_radio_discoveries([strong, weak], 10_000, RadioDiscoveryPolicy::default())
+                .unwrap();
+        assert_eq!(
+            reverse_order[0].management_authentication,
             RadioManagementAuthentication::Authenticated
         );
     }
@@ -934,6 +961,24 @@ mod tests {
 
         let mut unsafe_discovery = discovery;
         unsafe_discovery.error_code = Some("password_rejected".into());
+        assert_eq!(
+            unsafe_discovery.validate(),
+            Err(VendorRadioError::UnsafeErrorCode)
+        );
+
+        unsafe_discovery.error_code = Some("password rejected: hunter2".into());
+        let error = unsafe_discovery.validate().unwrap_err();
+        assert_eq!(error, VendorRadioError::UnsafeErrorCode);
+        assert!(!error.to_string().contains("hunter2"));
+
+        for invalid_code in ["", "not public"] {
+            unsafe_discovery.error_code = Some(invalid_code.into());
+            assert_eq!(
+                unsafe_discovery.validate(),
+                Err(VendorRadioError::UnsafeErrorCode)
+            );
+        }
+        unsafe_discovery.error_code = Some("a".repeat(97));
         assert_eq!(
             unsafe_discovery.validate(),
             Err(VendorRadioError::UnsafeErrorCode)
