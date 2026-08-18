@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const AVIAN_SCHEMA_VERSION: u16 = 1;
+pub const AVIAN_SCHEMA_VERSION: u16 = 2;
+const MIN_SUPPORTED_SCHEMA_VERSION: u16 = 1;
 
 const COMMANDS_COLLECTION: &str = "commands";
 const MISSIONS_COLLECTION: &str = "missions";
@@ -69,7 +70,7 @@ impl AvianRecord {
     }
 
     fn validate(&self) -> Result<(), PeatNodeError> {
-        if self.schema_version != AVIAN_SCHEMA_VERSION {
+        if !(MIN_SUPPORTED_SCHEMA_VERSION..=AVIAN_SCHEMA_VERSION).contains(&self.schema_version) {
             return Err(PeatNodeError::UnsupportedSchema(self.schema_version));
         }
         if !payload_matches_class(&self.payload, self.class) {
@@ -93,6 +94,8 @@ fn payload_matches_class(payload: &MeshPayload, class: DeliveryClass) -> bool {
             | (MeshPayload::RelayReconfiguration(_), DeliveryClass::Mission)
             | (MeshPayload::RadioConfiguration(_), DeliveryClass::Mission)
             | (MeshPayload::NodeAdvertisement(_), DeliveryClass::Mission)
+            | (MeshPayload::Detection(_), DeliveryClass::Mission)
+            | (MeshPayload::ImageManifest(_), DeliveryClass::Bulk)
             | (MeshPayload::Telemetry(_), DeliveryClass::Telemetry)
             | (MeshPayload::SwarmStatusSummary(_), DeliveryClass::Telemetry)
             | (

@@ -5,6 +5,7 @@ mod command;
 mod link;
 mod message;
 mod node;
+mod payload;
 mod radio;
 mod radio_control;
 mod radio_observation;
@@ -24,6 +25,9 @@ pub use message::{
     Telemetry,
 };
 pub use node::{Capability, FlightStack, NodeId, NodeProfile, NodeRole, ProfileError};
+pub use payload::{
+    Detection, GeotagStatus, ImageManifest, PayloadError, PayloadPosition, PAYLOAD_SCHEMA_VERSION,
+};
 pub use radio::{
     ArcRadioConfiguration, ChannelBandwidthMhz, OemDimensionsMm, PriorityTransferAssessment,
     RadioConfigAuthority, RadioConfigError, RadioFleetDefinition, RadioNodeAssignment,
