@@ -19,6 +19,7 @@ pub struct MavlinkSourceConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MavlinkTelemetryEvent {
     Connected,
+    SystemLocked(u8),
     Telemetry(Telemetry),
     ConnectionLost(String),
     Rejected(String),
@@ -90,13 +91,29 @@ fn receive_connection(
                 );
             }
         };
+        let previous_target = accumulator.target_system_id();
         match accumulator.ingest(header, &message, unix_time_ms()) {
             Ok(Some(telemetry)) => {
+                if previous_target.is_none() {
+                    if let Some(target) = accumulator.target_system_id() {
+                        if !send_event(sender, MavlinkTelemetryEvent::SystemLocked(target)) {
+                            return false;
+                        }
+                    }
+                }
                 if !send_event(sender, MavlinkTelemetryEvent::Telemetry(telemetry)) {
                     return false;
                 }
             }
-            Ok(None) => {}
+            Ok(None) => {
+                if previous_target.is_none() {
+                    if let Some(target) = accumulator.target_system_id() {
+                        if !send_event(sender, MavlinkTelemetryEvent::SystemLocked(target)) {
+                            return false;
+                        }
+                    }
+                }
+            }
             Err(error @ AdapterError::UnexpectedFlightStack { .. }) => {
                 send_event(sender, MavlinkTelemetryEvent::Rejected(error.to_string()));
                 return false;

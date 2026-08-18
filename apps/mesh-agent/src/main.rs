@@ -1,13 +1,11 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
-use clap::{Parser, ValueEnum};
-use mesh_core::DEFAULT_MAX_NEIGHBORS;
+use clap::Parser;
+use mesh_agent::control::{spawn_control_server, ControlEnvelope};
 use mesh_core::{
-    DeliveryClass, FlightStack, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
-    RelayBroadcastPair, RelayLinkObservation, RelayObservationPublication,
+    Capability, DeliveryClass, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
+    NodeProfile, NodeRole, RelayBroadcastPair, RelayLinkObservation, RelayObservationPublication,
     RelayObservationTrafficGovernor, RelayRuntimeAction, RelayRuntimeConfiguration,
     RelayRuntimeSnapshot, SwarmStatusSummary, SwarmTrafficPolicy, Telemetry, TelemetryPublication,
     TelemetryTrafficGovernor,
@@ -21,106 +19,10 @@ use vehicle_adapters::{spawn_mavlink_source, MavlinkSourceConfig, MavlinkTelemet
 mod membership;
 
 use membership::load_membership;
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum MavlinkStack {
-    #[value(name = "ardupilot")]
-    ArduPilot,
-    #[value(name = "px4")]
-    Px4,
-}
-
-impl From<MavlinkStack> for FlightStack {
-    fn from(value: MavlinkStack) -> Self {
-        match value {
-            MavlinkStack::ArduPilot => Self::ArduPilot,
-            MavlinkStack::Px4 => Self::Px4,
-        }
-    }
-}
-
-#[derive(Debug, Parser)]
-#[command(
-    name = "mesh-agent",
-    about = "AVIAN onboard PEAT mesh service",
-    version
-)]
-struct Args {
-    /// Stable AVIAN node name used to derive the PEAT identity.
-    #[arg(long)]
-    name: String,
-
-    /// Local IP and UDP port for the Iroh QUIC transport.
-    #[arg(long, default_value = "0.0.0.0:9000")]
-    bind: SocketAddr,
-
-    /// Directory for persistent Automerge state.
-    #[arg(long, default_value = "./avian-data")]
-    storage: PathBuf,
-
-    /// PEAT formation identifier shared by authorized AVIAN nodes.
-    #[arg(long, default_value = "avian")]
-    formation_id: String,
-
-    /// File containing the shared base64 PEAT formation secret.
-    #[arg(long)]
-    formation_key_file: PathBuf,
-
-    /// Static peer as ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]. Repeat per peer.
-    #[arg(long)]
-    peer: Vec<PeerDescriptor>,
-
-    /// Shared versioned aircraft membership manifest; replaces --peer.
-    #[arg(long, conflicts_with = "peer")]
-    membership_file: Option<PathBuf>,
-
-    /// Hard limit on direct PEAT neighbors; prevents accidental full meshes.
-    #[arg(long, default_value_t = DEFAULT_MAX_NEIGHBORS)]
-    max_mesh_peers: usize,
-
-    /// Seconds between attempts to reconnect unavailable static peers.
-    #[arg(long, default_value_t = 5)]
-    peer_retry_seconds: u64,
-
-    /// MAVLink connection, such as udpin:0.0.0.0:14550 or tcpout:127.0.0.1:5760.
-    #[arg(long, requires = "flight_stack")]
-    mavlink_address: Option<String>,
-
-    /// Expected flight controller for the MAVLink heartbeat.
-    #[arg(long, value_enum, requires = "mavlink_address")]
-    flight_stack: Option<MavlinkStack>,
-
-    /// Maximum AVIAN telemetry publications per second from this aircraft.
-    /// The traffic policy may publish less frequently; this controls how soon
-    /// priority and attention state can be observed locally.
-    #[arg(long, default_value_t = 2.0)]
-    telemetry_hz: f64,
-
-    /// Optional mission traffic policy. When omitted, AVIAN uses its
-    /// conservative bounded default: 0.5 Hz routine telemetry, 2 Hz priority
-    /// telemetry, and three rotating operator-summary publishers every second.
-    #[arg(long)]
-    traffic_policy_file: Option<PathBuf>,
-
-    /// Seconds before reconnecting a lost MAVLink transport.
-    #[arg(long, default_value_t = 2)]
-    mavlink_retry_seconds: u64,
-
-    /// Shared ARC runtime relay configuration. When set, this companion reads
-    /// synchronized telemetry/link observations and publishes relay decisions.
-    #[arg(long)]
-    relay_runtime_config: Option<PathBuf>,
-
-    /// Milliseconds between in-flight relay evaluations.
-    #[arg(long, default_value_t = 1_000, requires = "relay_runtime_config")]
-    relay_evaluation_ms: u64,
-
-    /// Local UDP listener for normalized relay-link observation JSON from a
-    /// radio collector. Bind this to loopback unless the collector is on a
-    /// separately controlled local network namespace.
-    #[arg(long)]
-    relay_observation_listen: Option<SocketAddr>,
-}
+use mesh_agent::config::{CliArgs, ResolvedConfig};
+use mesh_agent::payload_ingress::{self, PayloadEvent};
+use mesh_agent::protocol::{ControlRequest, ControlResponse, RecordView};
+use mesh_agent::status::{AgentStatus, PeerAddressStatus, PeerStatus};
 
 #[derive(Debug)]
 struct RelayRuntimeState {
@@ -180,25 +82,7 @@ impl From<&InFlightRelayDecision> for RelayDecisionKey {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    if !args.telemetry_hz.is_finite() || !(0.1..=20.0).contains(&args.telemetry_hz) {
-        anyhow::bail!("--telemetry-hz must be between 0.1 and 20.0");
-    }
-    if args.relay_runtime_config.is_some() && args.relay_evaluation_ms == 0 {
-        anyhow::bail!("--relay-evaluation-ms must be greater than zero");
-    }
-    if !(2..=DEFAULT_MAX_NEIGHBORS).contains(&args.max_mesh_peers)
-        || !args.max_mesh_peers.is_multiple_of(2)
-    {
-        anyhow::bail!("--max-mesh-peers must be one of 2, 4, 6, or {DEFAULT_MAX_NEIGHBORS}");
-    }
-    if args.peer.len() > args.max_mesh_peers {
-        anyhow::bail!(
-            "{} configured peers exceeds --max-mesh-peers {}",
-            args.peer.len(),
-            args.max_mesh_peers
-        );
-    }
+    let args = ResolvedConfig::load(CliArgs::parse())?;
     let node_id = NodeId::from(args.name.clone());
     let traffic_policy = args
         .traffic_policy_file
@@ -264,8 +148,28 @@ async fn main() -> anyhow::Result<()> {
         );
         (selection.peers, selection.members, selection.generation)
     } else {
-        (args.peer.clone(), vec![node_id.clone()], 0)
+        (args.peers.clone(), vec![node_id.clone()], 0)
     };
+    let started_at_ms = unix_time_ms();
+    let mut status = AgentStatus::new(
+        args.name.clone(),
+        args.role,
+        started_at_ms,
+        args.commands.mode,
+        args.mavlink_address.is_some(),
+        args.radio.enabled,
+    );
+    status.node.endpoint_id = Some(node.endpoint_id_hex());
+    status.peers = peer_statuses(&args, &peers, started_at_ms);
+    publish_node_advertisement(&node, &node_id, node_profile(&args, &node_id)?).await?;
+    let (control_sender, mut control_receiver) = mpsc::channel(32);
+    let control_task = spawn_control_server(
+        args.sockets.control.clone(),
+        args.sockets.max_message_bytes,
+        control_sender,
+    )
+    .await?;
+    let payload_socket = payload_ingress::bind(&args.sockets.payload)?;
 
     println!("AVIAN node '{}' is ready", node.name());
     println!("Endpoint: {}", node.endpoint_id_hex());
@@ -314,6 +218,8 @@ async fn main() -> anyhow::Result<()> {
     let mut relay_observation_sequence = 0_u64;
     let mut relay_observation_governor = RelayObservationTrafficGovernor::default();
     let mut relay_observation_buffer = vec![0_u8; 65_535];
+    let mut payload_sequence = 0_u64;
+    let mut payload_buffer = vec![0_u8; args.sockets.max_message_bytes.saturating_add(1)];
     loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c() => {
@@ -321,7 +227,41 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             _ = peer_retry.tick() => {
-                connect_unavailable_peers(&node, &peers).await;
+                connect_unavailable_peers(&node, &peers, &mut status).await;
+            }
+            control = control_receiver.recv() => {
+                if let Some(control) = control {
+                    handle_control_request(&node, &status, control).await;
+                }
+            }
+            received = payload_socket.recv(&mut payload_buffer) => {
+                match received {
+                    Ok(length) => {
+                        payload_sequence = payload_sequence.saturating_add(1);
+                        match ingest_payload_event(
+                            &node,
+                            &node_id,
+                            payload_sequence,
+                            &payload_buffer[..length],
+                            args.sockets.max_message_bytes,
+                        ).await {
+                            Ok(()) => {
+                                status.payload.accepted = status.payload.accepted.saturating_add(1);
+                                status.payload.last_event_at_ms = Some(unix_time_ms());
+                                status.payload.last_error = None;
+                            }
+                            Err(error) => {
+                                status.payload.rejected = status.payload.rejected.saturating_add(1);
+                                status.payload.last_error = Some(error.to_string());
+                                eprintln!("Payload event rejected: {error}");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        status.payload.last_error = Some(error.to_string());
+                        eprintln!("Payload event socket failed: {error}");
+                    }
+                }
             }
             event = async {
                 mavlink_receiver
@@ -332,19 +272,37 @@ async fn main() -> anyhow::Result<()> {
             }, if mavlink_receiver.is_some() => {
                 match event {
                     Some(MavlinkTelemetryEvent::Connected) => {
-                        println!("MAVLink flight controller connected");
+                        if !status.mavlink.connected {
+                            println!("MAVLink flight controller connected");
+                        }
+                        status.mavlink.connected = true;
+                        status.mavlink.last_error = None;
+                    }
+                    Some(MavlinkTelemetryEvent::SystemLocked(system_id)) => {
+                        status.mavlink.target_system_id = Some(system_id);
+                        status.mavlink.last_message_at_ms = Some(unix_time_ms());
                     }
                     Some(MavlinkTelemetryEvent::Telemetry(telemetry)) => {
+                        status.mavlink.connected = true;
+                        status.mavlink.last_message_at_ms = Some(unix_time_ms());
                         latest_telemetry = Some(telemetry);
                     }
                     Some(MavlinkTelemetryEvent::ConnectionLost(error)) => {
-                        eprintln!("MAVLink unavailable; will retry: {error}");
+                        if status.mavlink.connected {
+                            eprintln!("MAVLink unavailable; will retry: {error}");
+                        }
+                        status.mavlink.connected = false;
+                        status.mavlink.target_system_id = None;
+                        status.mavlink.last_error = Some(error);
                     }
                     Some(MavlinkTelemetryEvent::Rejected(error)) => {
                         eprintln!("MAVLink telemetry rejected: {error}");
+                        status.mavlink.last_error = Some(error);
                     }
                     None => {
                         eprintln!("MAVLink source stopped");
+                        status.mavlink.connected = false;
+                        status.mavlink.target_system_id = None;
                         mavlink_receiver = None;
                     }
                 }
@@ -363,12 +321,18 @@ async fn main() -> anyhow::Result<()> {
                         Ok(TelemetryPublication::Suppress) => {}
                         Ok(_) => {
                             telemetry_sequence = telemetry_sequence.saturating_add(1);
-                            publish_telemetry(
+                            if publish_telemetry(
                                 &node,
                                 &node_id,
                                 telemetry_sequence,
                                 telemetry,
-                            ).await;
+                            ).await {
+                                status.telemetry.published = status.telemetry.published.saturating_add(1);
+                                status.telemetry.last_published_at_ms = Some(unix_time_ms());
+                                status.telemetry.last_error = None;
+                            } else {
+                                status.telemetry.last_error = Some("PEAT publication failed".into());
+                            }
                         }
                         Err(error) => eprintln!("Telemetry traffic policy rejected publication: {error}"),
                     }
@@ -422,6 +386,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    control_task.abort();
+    let _ = std::fs::remove_file(&args.sockets.control);
+    let _ = std::fs::remove_file(&args.sockets.payload);
     node.shutdown().await.context("stopping AVIAN node")?;
     Ok(())
 }
@@ -465,7 +432,7 @@ fn telemetry_is_mission_critical(runtime: &RelayRuntimeState, node_id: &NodeId) 
 }
 
 fn start_mavlink(
-    args: &Args,
+    args: &ResolvedConfig,
     node_id: NodeId,
 ) -> anyhow::Result<Option<mpsc::Receiver<MavlinkTelemetryEvent>>> {
     let (Some(address), Some(stack)) = (&args.mavlink_address, args.flight_stack) else {
@@ -484,7 +451,12 @@ fn start_mavlink(
     Ok(Some(receiver))
 }
 
-async fn publish_telemetry(node: &PeatNode, node_id: &NodeId, sequence: u64, telemetry: Telemetry) {
+async fn publish_telemetry(
+    node: &PeatNode,
+    node_id: &NodeId,
+    sequence: u64,
+    telemetry: Telemetry,
+) -> bool {
     let record = match AvianRecord::new(
         node_id.clone(),
         sequence,
@@ -495,12 +467,161 @@ async fn publish_telemetry(node: &PeatNode, node_id: &NodeId, sequence: u64, tel
         Ok(record) => record,
         Err(error) => {
             eprintln!("Telemetry record rejected: {error}");
-            return;
+            return false;
         }
     };
     if let Err(error) = node.put(node_id.as_str(), &record).await {
         eprintln!("Telemetry publication failed: {error}");
+        return false;
     }
+    true
+}
+
+fn node_profile(config: &ResolvedConfig, node_id: &NodeId) -> anyhow::Result<NodeProfile> {
+    Ok(match config.role {
+        mesh_agent::config::ConfiguredNodeRole::Aircraft => {
+            if let Some(stack) = config.flight_stack {
+                NodeProfile::aircraft(node_id.clone(), stack.into(), mesh_core::SYSTEM_MAX_MSL_M)?
+            } else {
+                NodeProfile {
+                    node_id: node_id.clone(),
+                    role: NodeRole::Aircraft,
+                    flight_stack: None,
+                    capabilities: std::collections::BTreeSet::from([Capability::MeshRelay]),
+                    platform_max_msl_m: None,
+                }
+            }
+        }
+        mesh_agent::config::ConfiguredNodeRole::Ground => NodeProfile::ground(node_id.clone()),
+        mesh_agent::config::ConfiguredNodeRole::Observer => NodeProfile {
+            node_id: node_id.clone(),
+            role: NodeRole::Cloud,
+            flight_stack: None,
+            capabilities: std::collections::BTreeSet::from([
+                Capability::Telemetry,
+                Capability::MeshRelay,
+            ]),
+            platform_max_msl_m: None,
+        },
+    })
+}
+
+async fn publish_node_advertisement(
+    node: &PeatNode,
+    node_id: &NodeId,
+    profile: NodeProfile,
+) -> anyhow::Result<()> {
+    let record = AvianRecord::new(
+        node_id.clone(),
+        1,
+        DeliveryClass::Mission,
+        unix_time_ms(),
+        MeshPayload::NodeAdvertisement(profile),
+    )?;
+    node.put(&format!("node-advertisement/{node_id}"), &record)
+        .await?;
+    Ok(())
+}
+
+fn peer_statuses(
+    config: &ResolvedConfig,
+    peers: &[PeerDescriptor],
+    now_ms: u64,
+) -> Vec<PeerStatus> {
+    peers
+        .iter()
+        .map(|peer| {
+            let tagged = config
+                .tagged_peers
+                .iter()
+                .find(|configured| configured.name == peer.name);
+            let addresses = peer
+                .addresses()
+                .iter()
+                .map(|address| PeerAddressStatus {
+                    underlay: tagged.and_then(|configured| {
+                        configured
+                            .addresses
+                            .iter()
+                            .find(|candidate| candidate.address == *address)
+                            .map(|candidate| candidate.underlay)
+                    }),
+                    address: address.to_string(),
+                })
+                .collect();
+            PeerStatus {
+                name: peer.name.clone(),
+                endpoint_id: peer.endpoint_id_hex.clone(),
+                addresses,
+                connected: false,
+                last_transition_at_ms: now_ms,
+                selected_underlay: None,
+            }
+        })
+        .collect()
+}
+
+async fn handle_control_request(node: &PeatNode, status: &AgentStatus, envelope: ControlEnvelope) {
+    let response = match envelope.request {
+        ControlRequest::Status { .. } => ControlResponse::Status {
+            status: Box::new(status.snapshot(unix_time_ms())),
+        },
+        ControlRequest::ListRecords { class, limit } if (1..=500).contains(&limit) => {
+            match node.scan(class).await {
+                Ok(mut records) => {
+                    records.sort_by_key(|(_, record)| std::cmp::Reverse(record.published_at_ms));
+                    records.truncate(usize::from(limit));
+                    let records = records
+                        .into_iter()
+                        .filter_map(|(record_id, record)| {
+                            serde_json::to_value(record)
+                                .ok()
+                                .map(|record| RecordView { record_id, record })
+                        })
+                        .collect();
+                    ControlResponse::Records { records }
+                }
+                Err(error) => ControlResponse::Error {
+                    code: "record_scan_failed".into(),
+                    detail: error.to_string(),
+                },
+            }
+        }
+        ControlRequest::ListRecords { .. } => ControlResponse::Error {
+            code: "invalid_limit".into(),
+            detail: "record limit must be 1-500".into(),
+        },
+        ControlRequest::EmergencyRtl { .. } => ControlResponse::Error {
+            code: "commands_unavailable".into(),
+            detail: "emergency command handling is disabled until configured".into(),
+        },
+    };
+    let _ = envelope.respond_to.send(response);
+}
+
+async fn ingest_payload_event(
+    node: &PeatNode,
+    node_id: &NodeId,
+    sequence: u64,
+    encoded: &[u8],
+    max_message_bytes: usize,
+) -> anyhow::Result<()> {
+    let event = payload_ingress::decode(encoded, max_message_bytes)?;
+    let (class, record_id, payload) = match event {
+        PayloadEvent::ImageManifest { manifest } => (
+            DeliveryClass::Bulk,
+            format!("image/{}", manifest.image_id),
+            MeshPayload::ImageManifest(manifest),
+        ),
+        PayloadEvent::Detection { detection } => (
+            DeliveryClass::Mission,
+            format!("detection/{}", detection.detection_id),
+            MeshPayload::Detection(detection),
+        ),
+    };
+    let record = AvianRecord::new(node_id.clone(), sequence, class, unix_time_ms(), payload)?;
+    node.put(&record_id, &record).await?;
+    Ok(())
 }
 
 async fn publish_operator_summary(
@@ -762,17 +883,39 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-async fn connect_unavailable_peers(node: &PeatNode, peers: &[PeerDescriptor]) {
+async fn connect_unavailable_peers(
+    node: &PeatNode,
+    peers: &[PeerDescriptor],
+    status: &mut AgentStatus,
+) {
     for peer in peers {
-        if node.is_peer_connected(peer) {
-            continue;
-        }
-        match node.connect(peer).await {
-            Ok(true) => println!("Connected to {}", peer.name),
-            Ok(false) => {
-                println!("Connection to {} delegated by PEAT tie-breaking", peer.name);
+        let was_connected = status
+            .peers
+            .iter()
+            .find(|value| value.endpoint_id == peer.endpoint_id_hex)
+            .is_some_and(|value| value.connected);
+        if !node.is_peer_connected(peer) {
+            if let Err(error) = node.connect(peer).await {
+                if was_connected {
+                    eprintln!("Peer {} lost: {error}", peer.name);
+                }
             }
-            Err(error) => eprintln!("Peer {} is unavailable; will retry: {error}", peer.name),
+        }
+        let connected = node.is_peer_connected(peer);
+        if connected != was_connected {
+            if connected {
+                println!("Peer {} recovered", peer.name);
+            } else {
+                eprintln!("Peer {} unavailable; reconnecting", peer.name);
+            }
+            if let Some(peer_status) = status
+                .peers
+                .iter_mut()
+                .find(|value| value.endpoint_id == peer.endpoint_id_hex)
+            {
+                peer_status.connected = connected;
+                peer_status.last_transition_at_ms = unix_time_ms();
+            }
         }
     }
 }

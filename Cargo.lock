@@ -2979,12 +2979,17 @@ name = "mesh-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "ed25519-dalek 2.2.0",
  "mesh-core",
  "mesh-peat",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "toml 0.9.12+spec-1.1.0",
  "vehicle-adapters",
 ]
 

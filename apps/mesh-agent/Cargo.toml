@@ -7,16 +7,23 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 mesh-core = { path = "../../crates/mesh-core" }
 mesh-peat = { path = "../../crates/mesh-peat" }
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 tokio.workspace = true
 vehicle-adapters = { path = "../../crates/vehicle-adapters" }
 
 [features]
 direct-serial = ["vehicle-adapters/direct-serial"]
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

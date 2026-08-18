@@ -34,9 +34,11 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.9"
 uuid = { version = "1", features = ["serde", "v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zenoh = { version = "1", features = ["unstable"] }
