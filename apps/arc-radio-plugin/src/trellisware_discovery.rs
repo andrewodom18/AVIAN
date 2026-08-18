@@ -12,6 +12,7 @@ use mesh_core::{
 };
 use serde::Deserialize;
 use tokio::net::TcpStream;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::process::Command;
 
 const RADIO_DISCOVERY_TOPIC: &str = "local/link/radio/discovery/v1";
@@ -235,6 +236,7 @@ async fn system_neighbors() -> anyhow::Result<Vec<NeighborEntry>> {
     }
 }
 
+#[cfg(any(test, target_os = "windows", target_os = "linux"))]
 fn parse_neighbor_json(encoded: &[u8]) -> serde_json::Result<Vec<NeighborEntry>> {
     let value: serde_json::Value = serde_json::from_slice(encoded)?;
     match value {
