@@ -9,15 +9,18 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use mesh_core::{
     NodeId, RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
     RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange, RadioIdentity,
     RadioManagementInterface, RadioNetworkMode, RadioVendorId, RADIO_DEVICE_SCHEMA_VERSION,
 };
+use p12_keystore::{KeyStore, Pkcs12ImportPolicy};
 use reqwest::{Certificate, Identity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 pub const READ_PATHS: [&str; 9] = [
     "device/id",
@@ -223,6 +226,16 @@ pub struct HttpsTncAgentTransport {
     client: reqwest::Client,
 }
 
+/// In-memory client identity input for the read-only management connection.
+///
+/// PKCS#12 passwords are borrowed so callers can keep them in a zeroizing
+/// container. This type intentionally does not implement `Debug` because both
+/// variants contain private-key material.
+pub enum ClientIdentity<'a> {
+    Pem(&'a [u8]),
+    Pkcs12 { der: &'a [u8], password: &'a str },
+}
+
 impl HttpsTncAgentTransport {
     pub fn new(
         base_url: impl Into<String>,
@@ -230,9 +243,23 @@ impl HttpsTncAgentTransport {
         ca_certificate_pem: Option<&[u8]>,
         accept_invalid_server_certificate: bool,
     ) -> Result<Self, TrellisWareError> {
+        Self::new_with_identity(
+            base_url,
+            client_identity_pem.map(ClientIdentity::Pem),
+            ca_certificate_pem,
+            accept_invalid_server_certificate,
+        )
+    }
+
+    pub fn new_with_identity(
+        base_url: impl Into<String>,
+        client_identity: Option<ClientIdentity<'_>>,
+        ca_certificate_pem: Option<&[u8]>,
+        accept_invalid_server_certificate: bool,
+    ) -> Result<Self, TrellisWareError> {
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
-        if let Some(pem) = client_identity_pem {
-            builder = builder.identity(Identity::from_pem(pem).map_err(TrellisWareError::Tls)?);
+        if let Some(identity) = client_identity {
+            builder = builder.identity(parse_client_identity(identity)?);
         }
         if let Some(pem) = ca_certificate_pem {
             builder = builder
@@ -253,6 +280,41 @@ impl HttpsTncAgentTransport {
             client: builder.build().map_err(TrellisWareError::Tls)?,
         })
     }
+}
+
+fn parse_client_identity(identity: ClientIdentity<'_>) -> Result<Identity, TrellisWareError> {
+    match identity {
+        ClientIdentity::Pem(pem) => {
+            Identity::from_pem(pem).map_err(|_| TrellisWareError::InvalidClientIdentity)
+        }
+        ClientIdentity::Pkcs12 { der, password } => {
+            let store = KeyStore::from_pkcs12(der, password, Pkcs12ImportPolicy::Strict)
+                .map_err(|_| TrellisWareError::InvalidClientIdentity)?;
+            let (_, chain) = store
+                .private_key_chain()
+                .ok_or(TrellisWareError::InvalidClientIdentity)?;
+            if chain.certs().is_empty() {
+                return Err(TrellisWareError::InvalidClientIdentity);
+            }
+
+            let mut pem = Zeroizing::new(Vec::new());
+            for certificate in chain.certs() {
+                append_pem_block(&mut pem, "CERTIFICATE", certificate.as_der());
+            }
+            append_pem_block(&mut pem, "PRIVATE KEY", chain.key().as_der());
+            Identity::from_pem(&pem).map_err(|_| TrellisWareError::InvalidClientIdentity)
+        }
+    }
+}
+
+fn append_pem_block(output: &mut Vec<u8>, label: &str, der: &[u8]) {
+    output.extend_from_slice(format!("-----BEGIN {label}-----\n").as_bytes());
+    let encoded = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(der));
+    for chunk in encoded.as_bytes().chunks(64) {
+        output.extend_from_slice(chunk);
+        output.push(b'\n');
+    }
+    output.extend_from_slice(format!("-----END {label}-----\n").as_bytes());
 }
 
 #[derive(Debug, Serialize)]
@@ -340,6 +402,8 @@ pub enum TrellisWareError {
     InvalidUrl,
     #[error("TW-950 TLS configuration failed: {0}")]
     Tls(reqwest::Error),
+    #[error("TW-950 client identity is invalid or its password was rejected")]
+    InvalidClientIdentity,
     #[error("TW-950 HTTPS request failed: {0}")]
     Http(reqwest::Error),
     #[error("TW-950 agent returned HTTP {0}")]
@@ -359,6 +423,11 @@ pub enum TrellisWareError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p12_keystore::{
+        Certificate as P12Certificate, EncryptionAlgorithm, KeyStoreEntry, PrivateKey,
+        PrivateKeyChain,
+    };
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -386,6 +455,61 @@ mod tests {
             .any(|channel| channel.bandwidth_mhz == 20.0));
         assert_eq!(profile.maximum_total_transmit_power_dbm, Some(33.0));
         profile.validate().unwrap();
+    }
+
+    fn generated_pkcs12(password: &str, algorithm: EncryptionAlgorithm) -> Vec<u8> {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(["localhost".to_owned()]).unwrap();
+        let key = PrivateKey::from_der(&signing_key.serialize_der()).unwrap();
+        let certificate = P12Certificate::from_der(cert.der().as_ref()).unwrap();
+        let chain = PrivateKeyChain::new("test-key", key, [certificate]);
+        let mut store = KeyStore::new();
+        store.add_entry("client", KeyStoreEntry::PrivateKeyChain(chain));
+        store
+            .writer(password)
+            .encryption_algorithm(algorithm)
+            .write()
+            .unwrap()
+    }
+
+    #[test]
+    fn accepts_blank_password_modern_and_legacy_pkcs12_without_switching_tls_backend() {
+        for algorithm in [
+            EncryptionAlgorithm::PbeWithHmacSha256AndAes256,
+            EncryptionAlgorithm::PbeWithShaAnd3KeyTripleDesCbc,
+        ] {
+            let der = generated_pkcs12("", algorithm);
+            HttpsTncAgentTransport::new_with_identity(
+                "http://127.0.0.1",
+                Some(ClientIdentity::Pkcs12 {
+                    der: &der,
+                    password: "",
+                }),
+                None,
+                false,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn pkcs12_password_failures_do_not_echo_the_password() {
+        let der = generated_pkcs12(
+            "correct-password",
+            EncryptionAlgorithm::PbeWithHmacSha256AndAes256,
+        );
+        let error = HttpsTncAgentTransport::new_with_identity(
+            "http://127.0.0.1",
+            Some(ClientIdentity::Pkcs12 {
+                der: &der,
+                password: "secret-wrong-password",
+            }),
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, TrellisWareError::InvalidClientIdentity));
+        assert!(!error.to_string().contains("secret-wrong-password"));
     }
 
     #[tokio::test]

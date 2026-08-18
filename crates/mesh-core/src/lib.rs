@@ -77,9 +77,11 @@ pub use traffic::{
     SwarmTrafficPolicy, TelemetryPublication, TelemetryTrafficGovernor, TrafficPolicyError,
 };
 pub use vendor_radio::{
-    RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
-    RadioDiscoveryMethod, RadioDiscoveryObservation, RadioEffectiveState, RadioEvidenceLevel,
+    normalize_radio_mac, reduce_radio_discoveries, stable_radio_source, RadioCapabilities,
+    RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus, RadioDiscoveryMethod,
+    RadioDiscoveryObservation, RadioDiscoveryPolicy, RadioEffectiveState, RadioEvidenceLevel,
     RadioFrequencyRange, RadioIdentity, RadioManagementAuthentication, RadioManagementEndpoint,
-    RadioManagementInterface, RadioNeighborObservation, RadioNetworkMode, RadioReachabilityStatus,
-    RadioVendorId, VendorRadioError, RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION,
+    RadioManagementInterface, RadioNeighborObservation, RadioNetworkMode,
+    RadioObservationFreshness, RadioReachabilityStatus, RadioVendorId, VendorRadioError,
+    RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION,
 };

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -6,9 +5,9 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::Args;
 use mesh_core::{
-    NodeId, RadioDiscoveryMethod, RadioDiscoveryObservation, RadioManagementAuthentication,
-    RadioManagementEndpoint, RadioReachabilityStatus, RadioVendorId,
-    RADIO_DISCOVERY_SCHEMA_VERSION,
+    reduce_radio_discoveries, stable_radio_source, RadioDiscoveryMethod, RadioDiscoveryObservation,
+    RadioDiscoveryPolicy, RadioManagementAuthentication, RadioManagementEndpoint,
+    RadioReachabilityStatus, RadioVendorId, RADIO_DISCOVERY_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use tokio::net::TcpStream;
@@ -98,16 +97,21 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
 }
 
 async fn discover() -> anyhow::Result<Vec<RadioDiscoveryObservation>> {
-    let mut discoveries = BTreeMap::new();
+    let observed_at_ms = now_unix_ms();
+    let mut discoveries = Vec::new();
     for neighbor in system_neighbors().await? {
-        if let Some(discovery) = discovery_from_neighbor(&neighbor).await {
-            discoveries.insert(discovery.mac_address.clone(), discovery);
+        if let Some(discovery) = discovery_from_neighbor(&neighbor, observed_at_ms).await {
+            discoveries.push(discovery);
         }
     }
-    Ok(discoveries.into_values().collect())
+    reduce_radio_discoveries(discoveries, observed_at_ms, RadioDiscoveryPolicy::default())
+        .context("reducing TW-950 discovery observations")
 }
 
-async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscoveryObservation> {
+async fn discovery_from_neighbor(
+    neighbor: &NeighborEntry,
+    observed_at_ms: u64,
+) -> Option<RadioDiscoveryObservation> {
     let mac = normalize_mac(&neighbor.link_layer_address)?;
     if !is_trellisware_mac(&mac) || neighbor_state_is_inactive(neighbor.state.as_ref()) {
         return None;
@@ -144,12 +148,12 @@ async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscov
         endpoints.push(observed_endpoint);
     }
     let reachable = observed_reachable || link_local_reachable;
-    let compact_mac = mac.replace(':', "");
+    let vendor = RadioVendorId::trellisware();
     let observation = RadioDiscoveryObservation {
         schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
-        observed_at_ms: now_unix_ms(),
-        source: NodeId::from(format!("radio/trellisware/{compact_mac}")),
-        vendor: RadioVendorId::trellisware(),
+        observed_at_ms,
+        source: stable_radio_source(&vendor, &mac).ok()?,
+        vendor,
         model_hint: "tw-950".into(),
         mac_address: mac,
         serial_number: None,

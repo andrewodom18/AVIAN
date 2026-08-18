@@ -4,7 +4,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::Args;
 use mesh_core::{NodeId, RadioDeviceObservation};
-use trellisware_control::{HttpsTncAgentTransport, TrellisWareReader};
+use trellisware_control::{ClientIdentity, HttpsTncAgentTransport, TrellisWareReader};
+use zeroize::Zeroizing;
 
 const RADIO_OBSERVATIONS_TOPIC: &str = "local/link/radio/observations/v1";
 
@@ -17,8 +18,14 @@ pub struct TrellisWareProbeArgs {
     #[arg(long)]
     source: String,
     /// Combined PEM client certificate and private key when the radio requires mTLS.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "client_identity_pkcs12")]
     client_identity_pem: Option<PathBuf>,
+    /// PKCS#12 client identity when the radio requires mTLS.
+    #[arg(long, conflicts_with = "client_identity_pem")]
+    client_identity_pkcs12: Option<PathBuf>,
+    /// File containing the PKCS#12 password. Omit for a blank password.
+    #[arg(long, requires = "client_identity_pkcs12")]
+    client_identity_pkcs12_password_file: Option<PathBuf>,
     /// PEM CA certificate used to validate the radio's HTTPS certificate.
     #[arg(long)]
     ca_certificate_pem: Option<PathBuf>,
@@ -46,11 +53,23 @@ pub async fn run(args: &TrellisWareProbeArgs) -> anyhow::Result<()> {
     if args.interval_seconds == 0 {
         bail!("--interval-seconds must be positive");
     }
-    let identity = read_optional(args.client_identity_pem.as_deref())?;
+    let identity_pem = read_sensitive_optional(args.client_identity_pem.as_deref())?;
+    let identity_pkcs12 = read_sensitive_optional(args.client_identity_pkcs12.as_deref())?;
+    let identity_pkcs12_password =
+        read_password(args.client_identity_pkcs12_password_file.as_deref())?;
+    let identity = match (identity_pem.as_deref(), identity_pkcs12.as_deref()) {
+        (Some(pem), None) => Some(ClientIdentity::Pem(pem)),
+        (None, Some(der)) => Some(ClientIdentity::Pkcs12 {
+            der,
+            password: &identity_pkcs12_password,
+        }),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("clap rejects conflicting identity inputs"),
+    };
     let ca = read_optional(args.ca_certificate_pem.as_deref())?;
-    let transport = HttpsTncAgentTransport::new(
+    let transport = HttpsTncAgentTransport::new_with_identity(
         &args.radio_url,
-        identity.as_deref(),
+        identity,
         ca.as_deref(),
         args.accept_invalid_server_certificate,
     )
@@ -139,6 +158,28 @@ fn read_optional(path: Option<&Path>) -> anyhow::Result<Option<Vec<u8>>> {
         .transpose()
 }
 
+fn read_sensitive_optional(path: Option<&Path>) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
+    path.map(|path| {
+        std::fs::read(path)
+            .map(Zeroizing::new)
+            .context("reading client identity file")
+    })
+    .transpose()
+}
+
+fn read_password(path: Option<&Path>) -> anyhow::Result<Zeroizing<String>> {
+    let Some(encoded) = read_sensitive_optional(path)? else {
+        return Ok(Zeroizing::new(String::new()));
+    };
+    let mut password = String::from_utf8(encoded.to_vec())
+        .map(Zeroizing::new)
+        .context("client identity password file must contain UTF-8 text")?;
+    while password.ends_with(['\r', '\n']) {
+        password.pop();
+    }
+    Ok(password)
+}
+
 fn management_ip(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()?
@@ -190,6 +231,22 @@ mod tests {
         assert_eq!(
             management_ip("https://[fe80::21e:3fff:fe20:9a10]:8443/agent/"),
             Some("[fe80::21e:3fff:fe20:9a10]".trim_matches(['[', ']']).into())
+        );
+    }
+
+    #[test]
+    fn omitted_pkcs12_password_is_blank() {
+        assert_eq!(read_password(None).unwrap().as_str(), "");
+    }
+
+    #[test]
+    fn password_file_removes_only_line_endings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("password.txt");
+        std::fs::write(&path, b" leading and trailing spaces \r\n").unwrap();
+        assert_eq!(
+            read_password(Some(&path)).unwrap().as_str(),
+            " leading and trailing spaces "
         );
     }
 }
