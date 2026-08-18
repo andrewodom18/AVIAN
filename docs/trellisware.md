@@ -16,6 +16,13 @@ report network reachability separately from management authentication, so ARC
 can show a reachable radio without inventing an authentication requirement.
 TCP reachability alone is reported with authentication `unknown`.
 
+Discovery ingestion canonicalizes colon-, dash-, dotted-, and compact-form MAC
+addresses to one physical identity. A bounded reducer retains only fresh
+observations, rejects excessive future clock skew, and lets newer evidence win
+even when it reports that a previously reachable radio is now unreachable.
+Equal-time duplicates are resolved by deterministic evidence strength. These
+rules prevent stale or duplicate records from inflating the live fleet.
+
 Observed fields include the physical device ID/MAC, model, serial number,
 firmware, system alias, operating state, battery level, active preset, and
 transmit-power override. The HTTPS contract does not expose trustworthy RSSI,
@@ -102,6 +109,30 @@ cargo run -p arc-radio-plugin -- trellisware-probe `
   --client-identity-pem C:\secure\tw-client-identity.pem `
   --ca-certificate-pem C:\secure\tw-radio-ca.pem
 ```
+
+The diagnostic probe also accepts a PKCS#12 client identity without converting
+or writing its private key to disk:
+
+```powershell
+cargo run -p arc-radio-plugin -- trellisware-probe `
+  --radio-url https://10.1.0.11 `
+  --source tw-ground-1 `
+  --client-identity-pkcs12 C:\secure\oemcert-compat.p12 `
+  --ca-certificate-pem C:\secure\tw-radio-ca.pem
+```
+
+Omitting `--client-identity-pkcs12-password-file` deliberately tries a blank
+password. If an issued identity has a password, put only that password in a
+restricted file and pass its path with the option; do not put the password on
+the command line. The probe keeps the password and converted in-memory PEM in
+zeroizing buffers and emits only a generic identity error.
+
+Local parser validation confirms that the issued `oemcert-compat.p12` artifact
+loads with a blank password. The similarly named `oemcert.p12` artifact did not
+pass PKCS#12 MAC-integrity validation in the pure-Rust diagnostic path. This is
+certificate-file compatibility evidence only: neither artifact has yet been
+authenticated against a physical radio, and the repository stores neither
+file, its private key, nor its bytes.
 
 For a self-signed lab certificate, `--accept-invalid-server-certificate` is an
 explicit temporary alternative to `--ca-certificate-pem`. It does not disable

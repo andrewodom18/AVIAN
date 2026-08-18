@@ -37,8 +37,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+p12-keystore = "0.3.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = "1"
 zenoh = { version = "1", features = ["unstable"] }
 
 [workspace.lints.rust]

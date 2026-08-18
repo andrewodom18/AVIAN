@@ -5,7 +5,7 @@
 //! ARC remains the authority for desired configuration and activation policy.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use thiserror::Error;
 
@@ -13,6 +13,30 @@ use crate::NodeId;
 
 pub const RADIO_DEVICE_SCHEMA_VERSION: u16 = 1;
 pub const RADIO_DISCOVERY_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadioDiscoveryPolicy {
+    pub max_age_ms: u64,
+    pub max_future_skew_ms: u64,
+    pub max_entries: usize,
+}
+
+impl Default for RadioDiscoveryPolicy {
+    fn default() -> Self {
+        Self {
+            max_age_ms: 15_000,
+            max_future_skew_ms: 5_000,
+            max_entries: 1_024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioObservationFreshness {
+    Fresh,
+    Stale,
+    Future,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RadioVendorId(String);
@@ -88,7 +112,7 @@ pub enum RadioEvidenceLevel {
     FieldMeasured,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RadioDiscoveryMethod {
     NeighborTable,
@@ -174,8 +198,171 @@ impl RadioDiscoveryObservation {
         if self.discovery_methods.is_empty() {
             return Err(VendorRadioError::MissingDiscoveryMethods);
         }
+        if let Some(code) = self.error_code.as_deref() {
+            validate_public_error_code(code)?;
+        }
         Ok(())
     }
+
+    pub fn freshness_at(
+        &self,
+        now_ms: u64,
+        policy: RadioDiscoveryPolicy,
+    ) -> RadioObservationFreshness {
+        if self.observed_at_ms > now_ms.saturating_add(policy.max_future_skew_ms) {
+            RadioObservationFreshness::Future
+        } else if now_ms.saturating_sub(self.observed_at_ms) > policy.max_age_ms {
+            RadioObservationFreshness::Stale
+        } else {
+            RadioObservationFreshness::Fresh
+        }
+    }
+
+    pub fn is_current_live(&self, now_ms: u64, policy: RadioDiscoveryPolicy) -> bool {
+        self.freshness_at(now_ms, policy) == RadioObservationFreshness::Fresh
+            && self.reachability == RadioReachabilityStatus::Reachable
+    }
+}
+
+pub fn normalize_radio_mac(value: &str) -> Result<String, VendorRadioError> {
+    if value.trim() != value {
+        return Err(VendorRadioError::InvalidMacAddress(value.to_owned()));
+    }
+    let compact = if value.contains(':') {
+        normalize_mac_groups(value, ':', 6, 2)
+    } else if value.contains('-') {
+        normalize_mac_groups(value, '-', 6, 2)
+    } else if value.contains('.') {
+        normalize_mac_groups(value, '.', 3, 4)
+    } else if value.len() == 12 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(value.to_owned())
+    } else {
+        None
+    }
+    .ok_or_else(|| VendorRadioError::InvalidMacAddress(value.to_owned()))?;
+    if compact.len() != 12 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(VendorRadioError::InvalidMacAddress(value.to_owned()));
+    }
+    Ok(compact
+        .as_bytes()
+        .chunks(2)
+        .map(|chunk| std::str::from_utf8(chunk).expect("ASCII hex was validated"))
+        .collect::<Vec<_>>()
+        .join(":")
+        .to_ascii_lowercase())
+}
+
+fn normalize_mac_groups(
+    value: &str,
+    separator: char,
+    expected_groups: usize,
+    group_length: usize,
+) -> Option<String> {
+    let groups = value.split(separator).collect::<Vec<_>>();
+    (groups.len() == expected_groups
+        && groups.iter().all(|group| {
+            group.len() == group_length && group.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }))
+    .then(|| groups.concat())
+}
+
+pub fn stable_radio_source(
+    vendor: &RadioVendorId,
+    mac_address: &str,
+) -> Result<NodeId, VendorRadioError> {
+    let compact = normalize_radio_mac(mac_address)?.replace(':', "");
+    Ok(NodeId::from(format!("radio/{}/{compact}", vendor.as_str())))
+}
+
+/// Reduce one discovery snapshot without introducing a second fleet store.
+///
+/// Newer evidence always wins, including a newer unreachable observation. For
+/// equal timestamps, stronger direct evidence wins. Stale and future-skewed
+/// records are omitted, and the result is bounded and deterministically sorted.
+pub fn reduce_radio_discoveries(
+    observations: impl IntoIterator<Item = RadioDiscoveryObservation>,
+    now_ms: u64,
+    policy: RadioDiscoveryPolicy,
+) -> Result<Vec<RadioDiscoveryObservation>, VendorRadioError> {
+    if policy.max_age_ms == 0 || policy.max_entries == 0 {
+        return Err(VendorRadioError::InvalidDiscoveryPolicy);
+    }
+    let mut latest = BTreeMap::<(RadioVendorId, String), RadioDiscoveryObservation>::new();
+    for mut observation in observations {
+        observation.mac_address = normalize_radio_mac(&observation.mac_address)?;
+        observation.source = stable_radio_source(&observation.vendor, &observation.mac_address)?;
+        observation.validate()?;
+        if observation.freshness_at(now_ms, policy) != RadioObservationFreshness::Fresh {
+            continue;
+        }
+        let key = (observation.vendor.clone(), observation.mac_address.clone());
+        let replace = latest
+            .get(&key)
+            .is_none_or(|current| discovery_precedes(current, &observation));
+        if replace {
+            latest.insert(key, observation);
+        }
+    }
+
+    let mut reduced = latest.into_values().collect::<Vec<_>>();
+    reduced.sort_by(|left, right| {
+        right
+            .observed_at_ms
+            .cmp(&left.observed_at_ms)
+            .then_with(|| left.mac_address.cmp(&right.mac_address))
+    });
+    reduced.truncate(policy.max_entries);
+    reduced.sort_by(|left, right| left.mac_address.cmp(&right.mac_address));
+    Ok(reduced)
+}
+
+fn discovery_precedes(
+    current: &RadioDiscoveryObservation,
+    candidate: &RadioDiscoveryObservation,
+) -> bool {
+    candidate.observed_at_ms > current.observed_at_ms
+        || (candidate.observed_at_ms == current.observed_at_ms
+            && discovery_evidence_key(candidate) > discovery_evidence_key(current))
+}
+
+fn discovery_evidence_key(
+    observation: &RadioDiscoveryObservation,
+) -> (u8, u8, u8, usize, usize, String) {
+    let reachability = u8::from(observation.reachability == RadioReachabilityStatus::Reachable);
+    let authentication = match observation.management_authentication {
+        RadioManagementAuthentication::Unknown => 0,
+        RadioManagementAuthentication::Rejected => 1,
+        RadioManagementAuthentication::ClientCertificateRequired => 2,
+        RadioManagementAuthentication::Authenticated => 3,
+    };
+    let method_score = observation
+        .discovery_methods
+        .iter()
+        .map(|method| match method {
+            RadioDiscoveryMethod::Oui => 1_u8,
+            RadioDiscoveryMethod::NeighborTable => 2,
+            RadioDiscoveryMethod::Dhcp => 3,
+            RadioDiscoveryMethod::Mdns => 4,
+            RadioDiscoveryMethod::TcpReachability => 5,
+            RadioDiscoveryMethod::TlsFingerprint => 6,
+        })
+        .max()
+        .unwrap_or_default();
+    let unique_methods = observation
+        .discovery_methods
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .len();
+    let deterministic_tie_break = serde_json::to_string(observation).unwrap_or_default();
+    (
+        reachability,
+        authentication,
+        method_score,
+        unique_methods,
+        observation.management_endpoints.len(),
+        deterministic_tie_break,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,6 +591,9 @@ impl RadioDeviceObservation {
             validate_optional_positive("neighbor_tx_rate_mbps", neighbor.tx_rate_mbps)?;
             validate_optional_positive("neighbor_rx_rate_mbps", neighbor.rx_rate_mbps)?;
         }
+        if let Some(code) = self.error.as_deref() {
+            validate_public_error_code(code)?;
+        }
         Ok(())
     }
 }
@@ -450,6 +640,10 @@ pub enum VendorRadioError {
     InvalidBatteryPercent,
     #[error("duplicate radio neighbor peer ID {0:?}")]
     DuplicatePeerId(String),
+    #[error("radio discovery policy must have a positive age and entry bound")]
+    InvalidDiscoveryPolicy,
+    #[error("radio observation error code is not safe for publication")]
+    UnsafeErrorCode,
 }
 
 fn validate_ip(field: &'static str, value: &str) -> Result<(), VendorRadioError> {
@@ -463,20 +657,26 @@ fn validate_ip(field: &'static str, value: &str) -> Result<(), VendorRadioError>
 }
 
 fn validate_mac(value: &str) -> Result<(), VendorRadioError> {
-    let bytes = value.as_bytes();
-    let valid = bytes.len() == 17
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            if matches!(index, 2 | 5 | 8 | 11 | 14) {
-                *byte == b':'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(VendorRadioError::InvalidMacAddress(value.to_owned()))
+    normalize_radio_mac(value).map(|_| ())
+}
+
+fn validate_public_error_code(value: &str) -> Result<(), VendorRadioError> {
+    validate_token("error_code", value)?;
+    let lower = value.to_ascii_lowercase();
+    if [
+        "password",
+        "private_key",
+        "credential",
+        "session",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return Err(VendorRadioError::UnsafeErrorCode);
     }
+    Ok(())
 }
 
 fn validate_token(field: &'static str, value: &str) -> Result<(), VendorRadioError> {
@@ -520,6 +720,30 @@ fn validate_optional_positive(
 mod tests {
     use super::*;
 
+    fn valid_discovery(observed_at_ms: u64, mac_address: &str) -> RadioDiscoveryObservation {
+        let vendor = RadioVendorId::trellisware();
+        RadioDiscoveryObservation {
+            schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
+            observed_at_ms,
+            source: stable_radio_source(&vendor, mac_address).unwrap(),
+            vendor,
+            model_hint: "tw-950".into(),
+            mac_address: mac_address.into(),
+            serial_number: None,
+            hostname: None,
+            reachability: RadioReachabilityStatus::Reachable,
+            management_authentication: RadioManagementAuthentication::Unknown,
+            management_endpoints: vec![RadioManagementEndpoint {
+                address: "10.1.0.2".into(),
+                port: 443,
+                interface: None,
+                interface_index: None,
+            }],
+            discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
+            error_code: None,
+        }
+    }
+
     fn valid_device_observation() -> RadioDeviceObservation {
         RadioDeviceObservation {
             schema_version: RADIO_DEVICE_SCHEMA_VERSION,
@@ -549,6 +773,171 @@ mod tests {
         assert!(RadioVendorId::new("future-radio_1").is_ok());
         assert!(RadioVendorId::new("future radio").is_err());
         assert!(serde_json::from_str::<RadioVendorId>(r#""future radio""#).is_err());
+    }
+
+    #[test]
+    fn mac_variants_normalize_to_one_physical_identity() {
+        let variants = [
+            "00:1E:3F:20:9A:10",
+            "00-1e-3f-20-9a-10",
+            "001e.3f20.9a10",
+            "001e3f209a10",
+        ];
+        for variant in variants {
+            assert_eq!(normalize_radio_mac(variant).unwrap(), "00:1e:3f:20:9a:10");
+            assert_eq!(
+                stable_radio_source(&RadioVendorId::trellisware(), variant).unwrap(),
+                NodeId::from("radio/trellisware/001e3f209a10")
+            );
+        }
+        for malformed in [
+            "0:01e:3f:20:9a:10",
+            "00:1e-3f:20:9a:10",
+            "001e.3f20.9a1",
+            "001e3f209a1z",
+        ] {
+            assert!(normalize_radio_mac(malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn reducer_stabilizes_source_and_keeps_vendor_namespaces_distinct() {
+        let mut trellisware = valid_discovery(10_000, "00-1E-3F-20-9A-10");
+        trellisware.source = NodeId::from("unstable-neighbor-source");
+        let mut microhard = trellisware.clone();
+        microhard.vendor = RadioVendorId::microhard();
+        microhard.model_hint = "pmddl2450".into();
+
+        let reduced = reduce_radio_discoveries(
+            [trellisware, microhard],
+            10_000,
+            RadioDiscoveryPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(reduced.len(), 2);
+        assert_eq!(
+            reduced[0].source,
+            stable_radio_source(&reduced[0].vendor, &reduced[0].mac_address).unwrap()
+        );
+        assert_eq!(
+            reduced[1].source,
+            stable_radio_source(&reduced[1].vendor, &reduced[1].mac_address).unwrap()
+        );
+    }
+
+    #[test]
+    fn reducer_prefers_newest_evidence_even_when_radio_became_unreachable() {
+        let mut older = valid_discovery(9_000, "00:1e:3f:20:9a:10");
+        older.management_authentication = RadioManagementAuthentication::Authenticated;
+        let mut newer = valid_discovery(9_500, "001e.3f20.9a10");
+        newer.reachability = RadioReachabilityStatus::Unreachable;
+
+        let reduced =
+            reduce_radio_discoveries([older, newer], 10_000, RadioDiscoveryPolicy::default())
+                .unwrap();
+        assert_eq!(reduced.len(), 1);
+        assert_eq!(reduced[0].observed_at_ms, 9_500);
+        assert_eq!(reduced[0].mac_address, "00:1e:3f:20:9a:10");
+        assert!(!reduced[0].is_current_live(10_000, RadioDiscoveryPolicy::default()));
+    }
+
+    #[test]
+    fn reducer_uses_stronger_evidence_for_equal_timestamps() {
+        let weak = valid_discovery(10_000, "00:1e:3f:20:9a:10");
+        let mut strong = weak.clone();
+        strong.management_authentication = RadioManagementAuthentication::Authenticated;
+        strong
+            .discovery_methods
+            .push(RadioDiscoveryMethod::TlsFingerprint);
+
+        let reduced =
+            reduce_radio_discoveries([weak, strong], 10_000, RadioDiscoveryPolicy::default())
+                .unwrap();
+        assert_eq!(
+            reduced[0].management_authentication,
+            RadioManagementAuthentication::Authenticated
+        );
+    }
+
+    #[test]
+    fn reducer_omits_stale_and_future_observations_and_enforces_bound() {
+        let policy = RadioDiscoveryPolicy {
+            max_age_ms: 1_000,
+            max_future_skew_ms: 100,
+            max_entries: 2,
+        };
+        let observations = [
+            valid_discovery(8_999, "00:1e:3f:20:9a:01"),
+            valid_discovery(9_100, "00:1e:3f:20:9a:02"),
+            valid_discovery(9_200, "00:1e:3f:20:9a:03"),
+            valid_discovery(9_300, "00:1e:3f:20:9a:04"),
+            valid_discovery(10_101, "00:1e:3f:20:9a:05"),
+        ];
+        let reduced = reduce_radio_discoveries(observations, 10_000, policy).unwrap();
+        assert_eq!(
+            reduced
+                .iter()
+                .map(|observation| observation.mac_address.as_str())
+                .collect::<Vec<_>>(),
+            ["00:1e:3f:20:9a:03", "00:1e:3f:20:9a:04"]
+        );
+    }
+
+    #[test]
+    fn reducer_rejects_unbounded_or_timeless_policy() {
+        assert_eq!(
+            reduce_radio_discoveries(
+                std::iter::empty(),
+                10_000,
+                RadioDiscoveryPolicy {
+                    max_age_ms: 0,
+                    ..RadioDiscoveryPolicy::default()
+                }
+            ),
+            Err(VendorRadioError::InvalidDiscoveryPolicy)
+        );
+        assert_eq!(
+            reduce_radio_discoveries(
+                std::iter::empty(),
+                10_000,
+                RadioDiscoveryPolicy {
+                    max_entries: 0,
+                    ..RadioDiscoveryPolicy::default()
+                }
+            ),
+            Err(VendorRadioError::InvalidDiscoveryPolicy)
+        );
+    }
+
+    #[test]
+    fn observation_contracts_reject_secret_fields_and_sensitive_error_text() {
+        let discovery = valid_discovery(1, "00:1e:3f:20:9a:10");
+        let mut discovery_json = serde_json::to_value(&discovery).unwrap();
+        discovery_json["private_key"] = serde_json::json!("must-not-enter-observation");
+        assert!(serde_json::from_value::<RadioDiscoveryObservation>(discovery_json).is_err());
+
+        let mut nested_discovery_json = serde_json::to_value(&discovery).unwrap();
+        nested_discovery_json["management_endpoints"][0]["credential"] =
+            serde_json::json!("must-not-enter-endpoint");
+        assert!(
+            serde_json::from_value::<RadioDiscoveryObservation>(nested_discovery_json).is_err()
+        );
+
+        let mut device_json = serde_json::to_value(valid_device_observation()).unwrap();
+        device_json["credential"] = serde_json::json!("must-not-enter-observation");
+        assert!(serde_json::from_value::<RadioDeviceObservation>(device_json).is_err());
+
+        let mut nested_device_json = serde_json::to_value(valid_device_observation()).unwrap();
+        nested_device_json["identity"]["private_key"] =
+            serde_json::json!("must-not-enter-identity");
+        assert!(serde_json::from_value::<RadioDeviceObservation>(nested_device_json).is_err());
+
+        let mut unsafe_discovery = discovery;
+        unsafe_discovery.error_code = Some("password_rejected".into());
+        assert_eq!(
+            unsafe_discovery.validate(),
+            Err(VendorRadioError::UnsafeErrorCode)
+        );
     }
 
     #[test]
