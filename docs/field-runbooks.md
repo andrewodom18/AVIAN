@@ -32,8 +32,10 @@ Configure the aircraft agent with `udpin:0.0.0.0:14553`, `flight_stack =
 "hardware"`. Restart MAVProxy, image trigger, and AVIAN. Leave RFD900, GPS
 Guard, MediaMTX, and KLV in their existing independent paths.
 
-On the Mac, run the ground agent as described in [deployment](deployment.md).
-Then verify:
+On the Mac, run the ground agent and AVIAN Ground UI as persistent user
+LaunchAgents as described in [deployment](deployment.md). Open the loopback UI
+on that same Mac; do not forward the aircraft's web service or depend on an SSH
+session to the aircraft. Then verify:
 
 ```sh
 avianctl --socket ./field/run/control.sock status --json --require-ready
@@ -42,9 +44,18 @@ avianctl --socket ./field/run/control.sock records --class bulk
 ```
 
 The remote telemetry record must identify the aircraft node and update from the
-real Cube. The bulk record must contain an image manifest with a relative
+real Cube. The UI aircraft panel must show the same source and new observation
+times at the 2 Hz publication rate, label the feed `Live`, and show the local
+ground agent as ready. The bulk record must contain an image manifest with a relative
 imagery reference, byte count, SHA-256, and geotag status, but no JPEG bytes or
 absolute path.
+
+Disconnect only the direct Ethernet/Silvus data path while leaving the
+ZeroTier-over-Starshield path available. The loopback page must remain loaded,
+retain the last good aircraft sample with a stale warning during the gap, and
+return to `Live` after AVIAN reconnects through the satellite-tagged address.
+Reconnect the direct path and confirm that no Ground UI or mesh process
+restarts. Record interruption, stale-warning, and recovery timestamps.
 
 If no supported camera is attached, place an approved JPEG fixture under the
 stardogOS imagery root and invoke the same failure-isolated notifier as user
@@ -117,7 +128,9 @@ PEAT should disconnect and reconnect using the peer's tagged `satellite`
 address over ZeroTier/Starshield. Record interruption and recovery timestamps.
 Restore Silvus and confirm it becomes the selected reachable preferred path.
 During both transitions, verify image capture, GPS Guard, RFD900, and the plain
-flight video remain unaffected. AVIAN must never change terminal GPS state.
+flight video remain unaffected. The local Ground UI must stay reachable, keep
+last-known telemetry visible during the gap, and resume live timestamps after
+recovery. AVIAN must never change terminal GPS state.
 
 Make-before-break handoff, JPEG transfer, AVIAN-over-RFD900, dynamic in-flight
 membership, and hardware RTL are outside this milestone.

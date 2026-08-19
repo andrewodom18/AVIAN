@@ -61,10 +61,14 @@ sudo systemctl enable --now avian-mesh-agent.service
 sudo systemctl enable --now avian-link-monitor.service
 ```
 
-If `[radio].enabled = false`, the link monitor exits successfully; the mesh
-agent remains operational. On stardogOS the installer also adds `rolex` to the
-`avian` group so the image-trigger service can write the payload socket. Restart
-that service after installation so it receives the updated group membership.
+If `[radio].enabled = false`, vendor radio API collection stays disabled. The
+link monitor still runs when `probe_listen` or `[[radio.probes]]` is configured,
+so ordinary Ethernet or ZeroTier links can be measured without pretending that
+a managed radio is present. With neither passive probe feature configured it
+waits without contacting a radio API. On stardogOS the installer also adds
+`rolex` to the `avian` group so the image-trigger service can write the payload
+socket. Restart that service after installation so it receives the updated
+group membership.
 
 ## Normal operation
 
@@ -89,15 +93,20 @@ service can submit strict image/detection metadata. Linux operators therefore
 run `avianctl` through `sudo`; the optional
 [AVIAN Ground UI](https://github.com/andrewodom18/avian-ground-ui) follows the
 same owner-only boundary and exposes no command endpoint. Install that
-companion repository on a ground device with `sudo ./deploy/install.sh
---enable`, then open `http://127.0.0.1:4178/` on that device. It is loopback-
-only, observational, and not required for mesh operation. Status refreshes at
-10-second intervals and bounded log/record feeds at 30-second intervals;
-background tabs pause polling. Active warnings are expandable, and events are
-searchable, filterable, ordered, and paginated.
+companion repository on the ground operator device with `sudo
+./deploy/install.sh --enable`, then open `http://127.0.0.1:4178/` on that
+device. It is loopback-only, observational, and not required for mesh
+operation. Its dedicated aircraft view reads telemetry records synchronized to
+the local ground agent; it does not tunnel HTTP to the aircraft. Aircraft data
+refreshes every 2 seconds, status every 10 seconds, and bounded log/record feeds
+every 30 seconds. Background tabs pause polling. Last-known flight data remains
+visible with an explicit stale warning during a link interruption. Active
+warnings are expandable, and events are searchable, filterable, ordered, and
+paginated.
 
-To view the dashboard from an operator laptop without exposing another network
-listener, forward the Pi's loopback port over SSH:
+To view a dashboard installed on a separate ground computer without exposing
+another network listener, forward that ground computer's loopback port over
+SSH:
 
 ```sh
 ssh -N -L 4178:127.0.0.1:4178 avian-operator@ground-device
@@ -106,8 +115,10 @@ ssh -N -L 4178:127.0.0.1:4178 avian-operator@ground-device
 Open `http://127.0.0.1:4178/` on the laptop. If the underlying Ethernet,
 Wi-Fi, or overlay path changes, the dashboard and AVIAN services continue on
 the ground device, but the existing SSH session ends and must be re-established
-through a reachable address. `jq` is optional operator tooling and is not an
-AVIAN or dashboard runtime dependency.
+through a reachable address. For flight, run the Ground UI on the same operator
+Mac as the local ground agent and browser so an aircraft SSH session is never
+part of the display path. `jq` is optional operator tooling and is not an AVIAN
+or dashboard runtime dependency.
 
 Useful service diagnostics:
 
@@ -145,6 +156,19 @@ Run both processes from separate terminals:
 ```
 
 Point `avianctl --socket` at the configured control socket.
+
+For unattended field use, run both binaries as user LaunchAgents with
+`RunAtLoad` and `KeepAlive`, using absolute paths to the config, binaries,
+sockets, and log files. Run `avian-ground-ui` as a third LaunchAgent with the
+same local control socket and `--disable-journal`. Verify all three processes
+after login before flight; the HTTP listener must remain on `127.0.0.1`.
+
+The Mac peer should list the aircraft's preferred direct/Silvus address first
+and its ZeroTier-over-Starshield address second. The aircraft should list the
+corresponding Mac addresses in the same order. This symmetric configuration
+avoids relying on which endpoint wins PEAT's deterministic connection
+initiation. A cable removal can then interrupt the direct session and trigger a
+retry through the satellite-tagged address without taking down the local UI.
 
 ## Failure recovery
 
