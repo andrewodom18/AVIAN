@@ -5,7 +5,7 @@ It is intentionally conservative: the milestone is not complete until every
 required field row contains dated, sanitized evidence.
 
 Last automated verification: 2026-08-19 on macOS and Debian Linux
-(`dev` at `c21eb56` or later).
+(`dev` at `240f0c2` or later).
 
 ## Implemented and automated
 
@@ -14,7 +14,7 @@ Last automated verification: 2026-08-19 on macOS and Debian Linux
 | Baseline | macOS `just verify` passes formatting, warning-free workspace Clippy, workspace tests, doc tests, and locked debug build; Debian Linux locked workspace tests and release build also pass |
 | Configuration | Strict versioned/size-bounded TOML, consistent relative path resolution, scalar CLI precedence, peer-list replacement, identifier/count/timing bounds, distinct sockets, unknown-field rejection, production examples |
 | Deployment | Locked release build path, prebuilt path, service account/group, preserved live config, capability-free hardened independent systemd units |
-| Mesh/status | Stable derived identity across restart, startup node advertisement, ordered multi-address fallback, transition status, owner-only/time- and size-bounded control protocol and record inspection, plus atomic ground-side one-code aircraft pairing, safe corrected-code replacement, and protected removal of code-added direct peers |
+| Mesh/status | Stable derived identity across restart, startup node advertisement, ordered multi-address fallback with bounded background reconnects that do not block local status, transition status, owner-only/time- and size-bounded control protocol and record inspection, plus atomic ground-side one-code aircraft pairing, safe corrected-code replacement, and protected removal of code-added direct peers |
 | Payload | Schema-v2 image manifest/detection contracts, source assignment by local agent, metadata-only stardogOS image publication, malformed-event and socket-mode tests |
 | Commands | Ed25519 key generation, short record/config lifetime, target/issuer/action/fresh-system-lock checks, atomic nonce/replay state, dry-run path, restart replay suppression, ACK source correlation, five-second total ACK/retry budget, execute-on-SITL-only configuration gate |
 | Radio | Read-only StreamCaster client, sanitized API failures, bounded bidirectional probes (including passive Ethernet/ZeroTier operation with vendor APIs disabled), Unix observation socket plus legacy UDP ingress, fail-closed relay geometry/calibration |
