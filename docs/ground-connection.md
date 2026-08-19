@@ -29,7 +29,7 @@ aircraft through a trusted provisioning channel or print it as a QR/text label.
 
 1. Power on the aircraft computer.
 2. Put the ground device on the aircraft's local network or approved overlay.
-3. Open AVIAN Ground and select **Connect aircraft**.
+3. Open AVIAN Ground and select **Manage aircraft**.
 4. Paste the `AVIAN1.` code and select **Connect aircraft**.
 
 The local ground agent validates the code's version, formation, aircraft name,
@@ -50,9 +50,32 @@ The browser endpoint remains loopback-only and requires an exact same-origin
 request plus an explicit setup header. Flight and emergency operations remain
 outside the website.
 
+## Remove a saved aircraft
+
+1. Open **Manage aircraft** in AVIAN Ground.
+2. Under **Saved aircraft**, select **Remove** for the aircraft.
+3. Select **Confirm remove**.
+
+Removal is a ground-local operation. AVIAN atomically removes the public peer
+descriptor from `paired-peers.json`, stops outbound reconnect attempts, and
+closes the currently tracked transport session. It does not change
+configuration on the aircraft, revoke formation membership or credentials, or
+erase records that already synchronized to the ground device. An authorized
+aircraft or another formation peer can therefore establish an inbound or
+relayed mesh path and continue synchronizing records. Paste the aircraft's
+connection code again to restore the ground-initiated direct pairing.
+
+Only aircraft added through a connection code are shown as removable. Static
+TOML peers and signed managed-membership peers cannot be removed through the
+website.
+
+Removing a saved peer is not an aircraft revocation mechanism. Revocation
+requires the approved formation membership or credential-rotation process on
+every affected node.
+
 ## Boundary
 
-This workflow adds a ground-side direct peer. Aircraft connections still need the
-same formation credential, a reachable AVIAN UDP listener, and network policy
-that permits the advertised addresses. Large managed formations continue to
-use signed membership manifests instead of local connection codes.
+This workflow adds or removes a ground-side direct peer. Aircraft connections
+still need the same formation credential, a reachable AVIAN UDP listener, and
+network policy that permits the advertised addresses. Large managed formations
+continue to use signed membership manifests instead of local connection codes.

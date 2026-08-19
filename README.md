@@ -148,7 +148,9 @@ For a pre-provisioned ground formation, an aircraft provisioner can generate a
 non-secret `AVIAN1` connection code with `avianctl connection-code`. The
 operator pastes that single code into AVIAN Ground; the local agent validates,
 persists, and connects the peer without TOML editing or a service restart. See
-the [ground connection guide](docs/ground-connection.md).
+the [ground connection guide](docs/ground-connection.md). Code-added aircraft
+can also be removed from the ground device through the same setup panel;
+statically configured and managed-membership peers remain protected.
 
 With Docker:
 
