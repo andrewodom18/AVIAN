@@ -151,6 +151,11 @@ persists, and connects the peer without TOML editing or a service restart. See
 the [ground connection guide](docs/ground-connection.md). Code-added aircraft
 can also be removed from the ground device through the same setup panel;
 statically configured and managed-membership peers remain protected.
+The panel also lists the code-added aircraft's communication paths. Operators
+can add or remove individual AVIAN routes to test link loss and recovery; AVIAN
+persists the complete path set, reconnects automatically, and reports the path
+selected by the live PEAT transport. These controls never disable operating-
+system interfaces or change radio configuration.
 
 With Docker:
 

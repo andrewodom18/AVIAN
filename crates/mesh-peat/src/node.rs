@@ -323,15 +323,40 @@ impl PeatNode {
             .any(|endpoint_id| endpoint_id.to_string() == endpoint_id_hex)
     }
 
+    /// Returns the live transport's current remote address for status and
+    /// underlay attribution. This never initiates or changes a connection.
+    pub fn peer_remote_address(&self, endpoint_id_hex: &str) -> Option<SocketAddr> {
+        let endpoint_id = endpoint_id_hex.parse().ok()?;
+        self.backend
+            .transport()
+            .get_connection(&endpoint_id)
+            .and_then(|connection| {
+                connection
+                    .paths()
+                    .iter()
+                    .find(|path| path.is_selected())
+                    .and_then(|path| match path.remote_addr() {
+                        iroh::TransportAddr::Ip(address) => Some(*address),
+                        _ => None,
+                    })
+            })
+    }
+
     /// Closes and forgets the current transport connection for a peer.
     /// Runtime configuration remains the caller's responsibility.
     pub fn disconnect(&self, peer: &PeerDescriptor) -> Result<(), PeatNodeError> {
-        let endpoint_id = peer
-            .endpoint_id_hex
+        self.disconnect_endpoint(&peer.endpoint_id_hex)
+    }
+
+    /// Closes and forgets a transport connection using only its endpoint ID.
+    /// This supports ground-side path admission when a paired peer deliberately
+    /// has no current routing addresses.
+    pub fn disconnect_endpoint(&self, endpoint_id_hex: &str) -> Result<(), PeatNodeError> {
+        let endpoint_id = endpoint_id_hex
             .parse()
             .map_err(|_| PeatNodeError::InvalidEndpointId)?;
         if let Some(connection) = self.backend.transport().get_connection(&endpoint_id) {
-            connection.close(200u32.into(), b"peer removed from local configuration");
+            connection.close(200u32.into(), b"peer path is not locally configured");
         }
         self.backend.transport().remove_connection(&endpoint_id);
         self.backend

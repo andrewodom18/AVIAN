@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -30,7 +31,9 @@ use mesh_agent::config::{
 use mesh_agent::link_monitor_protocol;
 use mesh_agent::paired_peers;
 use mesh_agent::payload_ingress::{self, PayloadEvent};
-use mesh_agent::protocol::{ControlRequest, ControlResponse, PeerConnectionAddress, RecordView};
+use mesh_agent::protocol::{
+    ControlRequest, ControlResponse, PairedPeerConnection, PeerConnectionAddress, RecordView,
+};
 use mesh_agent::status::{
     AgentStatus, PeerAddressStatus, PeerStatus, RadioDeviceStatus, UnderlayStatus,
 };
@@ -174,9 +177,17 @@ async fn main() -> anyhow::Result<()> {
         args.membership_file.is_none() || persisted_paired_peers.is_empty(),
         "paired peers cannot be combined with a managed membership file"
     );
+    let dynamic_peer_count = persisted_paired_peers
+        .iter()
+        .filter(|paired| !args.peers.iter().any(|peer| peer.name == paired.name))
+        .count();
+    anyhow::ensure!(
+        peers.len().saturating_add(dynamic_peer_count) <= args.max_mesh_peers,
+        "configured peer limit is exceeded by persisted paired aircraft"
+    );
     let mut tagged_peers = args.tagged_peers.clone();
     for paired_peer in persisted_paired_peers.iter().cloned() {
-        merge_runtime_peer(
+        merge_persisted_peer(
             &mut peers,
             &mut tagged_peers,
             paired_peer,
@@ -239,6 +250,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Mesh service running; press Ctrl-C to stop");
     let mut peer_retry = time::interval(Duration::from_secs(args.peer_retry_seconds.max(1)));
     peer_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut paired_path_enforcement = time::interval(Duration::from_millis(250));
+    paired_path_enforcement.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut telemetry_publish = time::interval(Duration::from_secs_f64(1.0 / args.telemetry_hz));
     telemetry_publish.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut operator_summary_publish = time::interval(Duration::from_millis(
@@ -269,6 +282,10 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = peer_retry.tick() => {
                 schedule_unavailable_peer_connections(&node, &peers, &mut status);
+            }
+            _ = paired_path_enforcement.tick(), if args.role == ConfiguredNodeRole::Ground && args.membership_file.is_none() => {
+                enforce_ground_peer_path_policy(&node, &mut status);
+                update_peer_connection_states(&node, &mut status);
             }
             control = control_receiver.recv() => {
                 if let Some(control) = control {
@@ -623,7 +640,7 @@ fn peer_statuses(
     peers: &[PeerDescriptor],
     now_ms: u64,
 ) -> Vec<PeerStatus> {
-    peers
+    let mut statuses = peers
         .iter()
         .map(|peer| {
             let tagged = tagged_peers
@@ -652,7 +669,29 @@ fn peer_statuses(
                 selected_underlay: None,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    statuses.extend(
+        tagged_peers
+            .iter()
+            .filter(|tagged| !peers.iter().any(|peer| peer.name == tagged.name))
+            .map(|tagged| PeerStatus {
+                name: tagged.name.clone(),
+                endpoint_id: tagged.endpoint_id.clone(),
+                addresses: tagged
+                    .addresses
+                    .iter()
+                    .map(|address| PeerAddressStatus {
+                        underlay: Some(address.underlay),
+                        address: address.address.to_string(),
+                    })
+                    .collect(),
+                connected: false,
+                last_transition_at_ms: now_ms,
+                selected_underlay: None,
+            }),
+    );
+    statuses.sort_by(|left, right| left.name.cmp(&right.name));
+    statuses
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -669,6 +708,9 @@ async fn handle_control_request(
 ) {
     let response = match envelope.request {
         ControlRequest::Status { .. } => {
+            if config.role == ConfiguredNodeRole::Ground && config.membership_file.is_none() {
+                enforce_ground_peer_path_policy(node, status);
+            }
             update_peer_connection_states(node, status);
             ControlResponse::Status {
                 status: Box::new(status.snapshot(unix_time_ms())),
@@ -798,6 +840,63 @@ async fn handle_control_request(
                 "local paired-aircraft management is available only on an unmanaged ground node"
                     .into(),
         },
+        ControlRequest::ListPairedPeerDetails
+            if config.role == ConfiguredNodeRole::Ground && config.membership_file.is_none() =>
+        {
+            let mut peers = persisted_paired_peers
+                .iter()
+                .filter(|peer| {
+                    !config
+                        .peers
+                        .iter()
+                        .any(|configured| configured.name == peer.name)
+                })
+                .map(|peer| PairedPeerConnection {
+                    name: peer.name.clone(),
+                    addresses: peer
+                        .addresses
+                        .iter()
+                        .map(|address| PeerConnectionAddress {
+                            underlay: address.underlay,
+                            address: address.address,
+                        })
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            peers.sort_by(|left, right| left.name.cmp(&right.name));
+            ControlResponse::PairedPeerDetails { peers }
+        }
+        ControlRequest::ListPairedPeerDetails => ControlResponse::Error {
+            code: "peer_management_rejected".into(),
+            detail:
+                "local paired-aircraft management is available only on an unmanaged ground node"
+                    .into(),
+        },
+        ControlRequest::SetPeerPaths { name, addresses } => {
+            match set_paired_peer_paths(
+                node,
+                status,
+                config,
+                paired_peer_path,
+                persisted_paired_peers,
+                peers,
+                tagged_peers,
+                name,
+                addresses,
+            )
+            .await
+            {
+                Ok((name, addresses, connected)) => ControlResponse::PeerPathsConfigured {
+                    name,
+                    addresses,
+                    connected,
+                },
+                Err(error) => ControlResponse::Error {
+                    code: "peer_path_configuration_rejected".into(),
+                    detail: error.to_string(),
+                },
+            }
+        }
         ControlRequest::RemovePeer { name } => {
             match remove_paired_peer(
                 node,
@@ -822,6 +921,9 @@ async fn handle_control_request(
                 && addresses.len() <= 8
                 && addresses.iter().all(valid_pairing_address) =>
         {
+            for address in &mut addresses {
+                address.address = canonical_socket_address(address.address);
+            }
             addresses.sort_by_key(|value| underlay_priority(value.underlay));
             addresses.dedup_by_key(|value| value.address);
             ControlResponse::ConnectionInfo {
@@ -852,7 +954,7 @@ async fn configure_peer(
     formation_id: String,
     name: String,
     endpoint_id: String,
-    addresses: Vec<PeerConnectionAddress>,
+    mut addresses: Vec<PeerConnectionAddress>,
 ) -> anyhow::Result<(String, bool)> {
     anyhow::ensure!(
         config.role == ConfiguredNodeRole::Ground,
@@ -867,6 +969,9 @@ async fn configure_peer(
         "connection code belongs to a different AVIAN formation"
     );
 
+    for address in &mut addresses {
+        address.address = canonical_socket_address(address.address);
+    }
     let mut addresses = addresses
         .into_iter()
         .map(|value| TaggedAddress {
@@ -933,6 +1038,85 @@ async fn configure_peer(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn set_paired_peer_paths(
+    node: &PeatNode,
+    status: &mut AgentStatus,
+    config: &ResolvedConfig,
+    paired_peer_path: &std::path::Path,
+    persisted_paired_peers: &mut Vec<TaggedPeer>,
+    peers: &mut Vec<PeerDescriptor>,
+    tagged_peers: &mut Vec<TaggedPeer>,
+    name: String,
+    mut addresses: Vec<PeerConnectionAddress>,
+) -> anyhow::Result<(String, Vec<PeerConnectionAddress>, bool)> {
+    anyhow::ensure!(
+        config.role == ConfiguredNodeRole::Ground,
+        "aircraft path management is available only on a ground node"
+    );
+    anyhow::ensure!(
+        config.membership_file.is_none(),
+        "managed-membership nodes cannot accept local path changes"
+    );
+    anyhow::ensure!(valid_pairing_identifier(&name), "invalid peer name");
+    anyhow::ensure!(
+        addresses.len() <= 8,
+        "a paired peer supports at most 8 paths"
+    );
+    for address in &mut addresses {
+        address.address = canonical_socket_address(address.address);
+    }
+    anyhow::ensure!(
+        addresses.iter().all(valid_pairing_address),
+        "paired paths must be routable unicast endpoints with a nonzero port"
+    );
+    let unique_addresses = addresses
+        .iter()
+        .map(|path| path.address)
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        unique_addresses.len() == addresses.len(),
+        "paired paths must use unique network addresses"
+    );
+    addresses.sort_by(|left, right| {
+        underlay_priority(left.underlay)
+            .cmp(&underlay_priority(right.underlay))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+
+    let staged = stage_paired_peer_paths(
+        &config.peers,
+        persisted_paired_peers,
+        peers,
+        tagged_peers,
+        &name,
+        &addresses,
+        config.max_mesh_peers,
+    )?;
+    paired_peers::persist(paired_peer_path, &staged.persisted)?;
+
+    *persisted_paired_peers = staged.persisted;
+    *peers = staged.peers;
+    *tagged_peers = staged.tagged_peers;
+    if let Some(previous) = staged.previous_descriptor {
+        let _ = node.disconnect(&previous);
+    }
+    if let Some(next) = staged.next_descriptor.as_ref() {
+        let _ = time::timeout(Duration::from_secs(2), node.connect(next)).await;
+    }
+    refresh_peer_statuses(node, status, tagged_peers, peers);
+    let connected = status
+        .peers
+        .iter()
+        .find(|peer| peer.name == name)
+        .is_some_and(|peer| peer.connected);
+    println!(
+        "Configured {} path(s) for locally paired aircraft '{name}'",
+        addresses.len()
+    );
+    Ok((name, addresses, connected))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn remove_paired_peer(
     node: &PeatNode,
     status: &mut AgentStatus,
@@ -960,7 +1144,9 @@ fn remove_paired_peer(
         &name,
     )?;
     paired_peers::persist(paired_peer_path, &staged.persisted)?;
-    node.disconnect(&staged.removed_descriptor)?;
+    if let Some(removed) = staged.removed_descriptor.as_ref() {
+        node.disconnect(removed)?;
+    }
 
     *persisted_paired_peers = staged.persisted;
     *peers = staged.peers;
@@ -979,20 +1165,21 @@ fn refresh_peer_statuses(
     let previous = std::mem::take(&mut status.peers);
     status.peers = peer_statuses(tagged_peers, peers, unix_time_ms());
     for peer in &mut status.peers {
-        peer.connected = peers
-            .iter()
-            .find(|candidate| candidate.endpoint_id_hex == peer.endpoint_id)
-            .is_some_and(|candidate| node.is_peer_connected(candidate));
         if let Some(old) = previous
             .iter()
             .find(|candidate| candidate.endpoint_id == peer.endpoint_id)
         {
-            if old.connected == peer.connected {
-                peer.last_transition_at_ms = old.last_transition_at_ms;
-            }
-            peer.selected_underlay = old.selected_underlay;
+            peer.connected = old.connected;
+            peer.last_transition_at_ms = old.last_transition_at_ms;
+            peer.selected_underlay = old.selected_underlay.filter(|selected| {
+                peer.addresses
+                    .iter()
+                    .any(|path| path.underlay == Some(*selected))
+            });
         }
     }
+    enforce_ground_peer_path_policy(node, status);
+    update_peer_connection_states(node, status);
 }
 
 struct StagedPairedPeer {
@@ -1006,7 +1193,87 @@ struct StagedRemovedPeer {
     persisted: Vec<TaggedPeer>,
     peers: Vec<PeerDescriptor>,
     tagged_peers: Vec<TaggedPeer>,
-    removed_descriptor: PeerDescriptor,
+    removed_descriptor: Option<PeerDescriptor>,
+}
+
+struct StagedPeerPaths {
+    persisted: Vec<TaggedPeer>,
+    peers: Vec<PeerDescriptor>,
+    tagged_peers: Vec<TaggedPeer>,
+    previous_descriptor: Option<PeerDescriptor>,
+    next_descriptor: Option<PeerDescriptor>,
+}
+
+fn stage_paired_peer_paths(
+    configured_peers: &[PeerDescriptor],
+    persisted_paired_peers: &[TaggedPeer],
+    peers: &[PeerDescriptor],
+    tagged_peers: &[TaggedPeer],
+    name: &str,
+    addresses: &[PeerConnectionAddress],
+    max_mesh_peers: usize,
+) -> anyhow::Result<StagedPeerPaths> {
+    anyhow::ensure!(valid_pairing_identifier(name), "invalid peer name");
+    anyhow::ensure!(
+        !configured_peers.iter().any(|peer| peer.name == name),
+        "peer is managed by the agent configuration and its paths cannot be changed here"
+    );
+    let original = persisted_paired_peers
+        .iter()
+        .find(|peer| peer.name == name)
+        .context("only locally paired aircraft paths can be changed")?;
+    let mut normalized_addresses = addresses.to_vec();
+    normalized_addresses.sort_by(|left, right| {
+        underlay_priority(left.underlay)
+            .cmp(&underlay_priority(right.underlay))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+    let updated = TaggedPeer {
+        name: original.name.clone(),
+        endpoint_id: original.endpoint_id.clone(),
+        addresses: normalized_addresses
+            .iter()
+            .map(|path| TaggedAddress {
+                underlay: path.underlay,
+                address: path.address,
+            })
+            .collect(),
+    };
+    let mut next_persisted = persisted_paired_peers.to_vec();
+    *next_persisted
+        .iter_mut()
+        .find(|peer| peer.name == name)
+        .context("paired aircraft disappeared during path update")? = updated.clone();
+
+    let previous_descriptor = peers
+        .iter()
+        .find(|peer| peer.name == name && peer.endpoint_id_hex == original.endpoint_id)
+        .cloned();
+    let mut next_peers = peers
+        .iter()
+        .filter(|peer| peer.name != name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut next_tagged_peers = tagged_peers
+        .iter()
+        .filter(|peer| peer.name != name)
+        .cloned()
+        .collect::<Vec<_>>();
+    merge_persisted_peer(
+        &mut next_peers,
+        &mut next_tagged_peers,
+        updated,
+        max_mesh_peers,
+    )?;
+    let next_descriptor = next_peers.iter().find(|peer| peer.name == name).cloned();
+
+    Ok(StagedPeerPaths {
+        persisted: next_persisted,
+        peers: next_peers,
+        tagged_peers: next_tagged_peers,
+        previous_descriptor,
+        next_descriptor,
+    })
 }
 
 fn stage_removed_paired_peer(
@@ -1028,8 +1295,7 @@ fn stage_removed_paired_peer(
     let removed_descriptor = peers
         .iter()
         .find(|peer| peer.name == name && peer.endpoint_id_hex == persisted.endpoint_id)
-        .cloned()
-        .context("locally paired aircraft is missing from the runtime configuration")?;
+        .cloned();
 
     Ok(StagedRemovedPeer {
         persisted: persisted_paired_peers
@@ -1066,6 +1332,24 @@ fn stage_paired_peer(
         anyhow::ensure!(
             static_peer.endpoint_id_hex == paired_peer.endpoint_id,
             "peer name is managed by the agent configuration and cannot be replaced"
+        );
+    }
+    let already_counted = static_peer.is_some()
+        || persisted_paired_peers
+            .iter()
+            .any(|peer| peer.name == paired_peer.name);
+    if !already_counted {
+        let dynamic_peer_count = persisted_paired_peers
+            .iter()
+            .filter(|persisted| {
+                !configured_peers
+                    .iter()
+                    .any(|configured| configured.name == persisted.name)
+            })
+            .count();
+        anyhow::ensure!(
+            configured_peers.len().saturating_add(dynamic_peer_count) < max_mesh_peers,
+            "configured peer limit is reached"
         );
     }
     let replacing_dynamic = static_peer.is_none()
@@ -1112,6 +1396,44 @@ fn stage_paired_peer(
     })
 }
 
+fn merge_persisted_peer(
+    peers: &mut Vec<PeerDescriptor>,
+    tagged_peers: &mut Vec<TaggedPeer>,
+    paired_peer: TaggedPeer,
+    max_mesh_peers: usize,
+) -> anyhow::Result<()> {
+    if !paired_peer.addresses.is_empty() {
+        return merge_runtime_peer(peers, tagged_peers, paired_peer, max_mesh_peers);
+    }
+    anyhow::ensure!(
+        valid_pairing_identifier(&paired_peer.name),
+        "invalid peer name"
+    );
+    anyhow::ensure!(
+        valid_endpoint_id(&paired_peer.endpoint_id),
+        "invalid paired endpoint identity"
+    );
+    anyhow::ensure!(
+        !peers.iter().any(|peer| {
+            peer.name != paired_peer.name && peer.endpoint_id_hex == paired_peer.endpoint_id
+        }),
+        "endpoint identity is already assigned to another peer"
+    );
+    if let Some(existing) = tagged_peers
+        .iter_mut()
+        .find(|peer| peer.name == paired_peer.name)
+    {
+        anyhow::ensure!(
+            existing.endpoint_id == paired_peer.endpoint_id,
+            "peer name is already assigned to a different endpoint"
+        );
+        *existing = paired_peer;
+    } else {
+        tagged_peers.push(paired_peer);
+    }
+    Ok(())
+}
+
 fn merge_runtime_peer(
     peers: &mut Vec<PeerDescriptor>,
     tagged_peers: &mut Vec<TaggedPeer>,
@@ -1135,6 +1457,9 @@ fn merge_runtime_peer(
         }),
         "paired addresses must be routable unicast endpoints with a nonzero port"
     );
+    for address in &mut paired_peer.addresses {
+        address.address = canonical_socket_address(address.address);
+    }
     paired_peer
         .addresses
         .sort_by_key(|value| underlay_priority(value.underlay));
@@ -1187,8 +1512,16 @@ fn valid_pairing_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn valid_endpoint_id(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn valid_pairing_address(value: &PeerConnectionAddress) -> bool {
     value.address.port() != 0 && valid_pairing_ip(value.address.ip())
+}
+
+fn canonical_socket_address(value: std::net::SocketAddr) -> std::net::SocketAddr {
+    std::net::SocketAddr::new(value.ip().to_canonical(), value.port())
 }
 
 fn valid_pairing_ip(value: std::net::IpAddr) -> bool {
@@ -1291,8 +1624,6 @@ async fn ingest_link_monitor_observation(
             },
         );
     }
-    update_selected_underlays(status, &observation);
-
     *sequence = sequence.saturating_add(1);
     let record = AvianRecord::new(
         node_id.clone(),
@@ -1326,60 +1657,6 @@ async fn ingest_link_monitor_observation(
             }
             Err(error) => status.record_error("link-monitor", error.to_string(), unix_time_ms()),
         }
-    }
-}
-
-fn update_selected_underlays(status: &mut AgentStatus, observation: &LinkMonitorObservation) {
-    for peer in &mut status.peers {
-        let selected = peer.addresses.iter().find_map(|address| {
-            let underlay = address.underlay?;
-            observation
-                .probes
-                .iter()
-                .any(|probe| {
-                    probe.peer == peer.name
-                        && probe.underlay == transport_for_underlay(underlay)
-                        && probe.reachable
-                })
-                .then_some(underlay)
-        });
-        if selected == peer.selected_underlay {
-            continue;
-        }
-        match (peer.selected_underlay, selected) {
-            (Some(Underlay::Silvus), Some(fallback)) => eprintln!(
-                "Peer {} Silvus path interrupted; selected reachable fallback {}",
-                peer.name,
-                underlay_name(fallback)
-            ),
-            (Some(_), Some(Underlay::Silvus)) => println!(
-                "Peer {} Silvus path recovered; preferred underlay restored",
-                peer.name
-            ),
-            (None, Some(selected)) => println!(
-                "Peer {} reachable on {}",
-                peer.name,
-                underlay_name(selected)
-            ),
-            (Some(previous), None) => eprintln!(
-                "Peer {} lost its last reachable {} path",
-                peer.name,
-                underlay_name(previous)
-            ),
-            _ => {}
-        }
-        peer.selected_underlay = selected;
-        peer.last_transition_at_ms = unix_time_ms();
-    }
-}
-
-fn transport_for_underlay(underlay: Underlay) -> TransportKind {
-    match underlay {
-        Underlay::Silvus => TransportKind::Silvus,
-        Underlay::Satellite => TransportKind::Satellite,
-        Underlay::Ethernet => TransportKind::Ethernet,
-        Underlay::Wifi => TransportKind::Wifi,
-        Underlay::Other => TransportKind::Other,
     }
 }
 
@@ -1855,7 +2132,18 @@ fn schedule_unavailable_peer_connections(
 fn update_peer_connection_states(node: &PeatNode, status: &mut AgentStatus) {
     for peer_status in &mut status.peers {
         let was_connected = peer_status.connected;
+        let previous_underlay = peer_status.selected_underlay;
         let connected = node.is_endpoint_connected(&peer_status.endpoint_id);
+        let selected_underlay = connected
+            .then(|| node.peer_remote_address(&peer_status.endpoint_id))
+            .flatten()
+            .and_then(|remote| {
+                peer_status.addresses.iter().find_map(|path| {
+                    (path.address.parse::<std::net::SocketAddr>().ok() == Some(remote))
+                        .then_some(path.underlay)
+                        .flatten()
+                })
+            });
         if connected != was_connected {
             if connected {
                 println!("Peer {} recovered", peer_status.name);
@@ -1865,7 +2153,57 @@ fn update_peer_connection_states(node: &PeatNode, status: &mut AgentStatus) {
             peer_status.connected = connected;
             peer_status.last_transition_at_ms = unix_time_ms();
         }
+        if selected_underlay != previous_underlay {
+            if let Some(selected) = selected_underlay {
+                println!(
+                    "Peer {} active transport is {}",
+                    peer_status.name,
+                    underlay_name(selected)
+                );
+            }
+            peer_status.selected_underlay = selected_underlay;
+            peer_status.last_transition_at_ms = unix_time_ms();
+        }
     }
+}
+
+fn enforce_ground_peer_path_policy(node: &PeatNode, status: &mut AgentStatus) {
+    for peer_status in &mut status.peers {
+        if !node.is_endpoint_connected(&peer_status.endpoint_id) {
+            continue;
+        }
+        let remote = node.peer_remote_address(&peer_status.endpoint_id);
+        let allowed = configured_path_allows_remote(peer_status, remote);
+        if allowed {
+            continue;
+        }
+        let _ = node.disconnect_endpoint(&peer_status.endpoint_id);
+        if peer_status.connected {
+            eprintln!(
+                "Peer {} connected through an unconfigured ground path; connection closed",
+                peer_status.name
+            );
+        }
+        peer_status.connected = false;
+        peer_status.selected_underlay = None;
+        peer_status.last_transition_at_ms = unix_time_ms();
+    }
+}
+
+fn configured_path_allows_remote(
+    peer_status: &mesh_agent::status::PeerStatus,
+    remote: Option<std::net::SocketAddr>,
+) -> bool {
+    remote.is_some_and(|remote| {
+        let remote = canonical_socket_address(remote);
+        peer_status.addresses.iter().any(|path| {
+            path.address
+                .parse::<std::net::SocketAddr>()
+                .ok()
+                .map(canonical_socket_address)
+                == Some(remote)
+        })
+    })
 }
 
 fn mavlink_system_lock_is_fresh(status: &AgentStatus, now_ms: u64) -> bool {
@@ -2072,7 +2410,10 @@ mod tests {
         assert!(staged.persisted.is_empty());
         assert!(staged.peers.is_empty());
         assert!(staged.tagged_peers.is_empty());
-        assert_eq!(staged.removed_descriptor.name, paired.name);
+        assert_eq!(
+            staged.removed_descriptor.as_ref().unwrap().name,
+            paired.name
+        );
 
         assert!(stage_removed_paired_peer(
             &peers,
@@ -2084,5 +2425,113 @@ mod tests {
         .is_err());
         assert!(stage_removed_paired_peer(&[], &[], &peers, &tagged, &paired.name).is_err());
         assert!(stage_removed_paired_peer(&[], &[paired], &peers, &tagged, "../aircraft").is_err());
+    }
+
+    #[test]
+    fn paired_paths_can_be_removed_completely_and_restored_in_priority_order() {
+        let paired = TaggedPeer {
+            name: "aircraft-001".into(),
+            endpoint_id: "a".repeat(64),
+            addresses: vec![TaggedAddress {
+                underlay: Underlay::Ethernet,
+                address: "192.0.2.4:9000".parse().unwrap(),
+            }],
+        };
+        let mut peers = Vec::new();
+        let mut tagged = Vec::new();
+        merge_persisted_peer(&mut peers, &mut tagged, paired.clone(), 2).unwrap();
+
+        let disconnected = stage_paired_peer_paths(
+            &[],
+            std::slice::from_ref(&paired),
+            &peers,
+            &tagged,
+            &paired.name,
+            &[],
+            2,
+        )
+        .unwrap();
+        assert!(disconnected.persisted[0].addresses.is_empty());
+        assert!(disconnected.peers.is_empty());
+        assert_eq!(disconnected.tagged_peers.len(), 1);
+        assert!(disconnected.next_descriptor.is_none());
+
+        let restored = stage_paired_peer_paths(
+            &[],
+            &disconnected.persisted,
+            &disconnected.peers,
+            &disconnected.tagged_peers,
+            &paired.name,
+            &[
+                PeerConnectionAddress {
+                    underlay: Underlay::Satellite,
+                    address: "198.51.100.7:9000".parse().unwrap(),
+                },
+                PeerConnectionAddress {
+                    underlay: Underlay::Wifi,
+                    address: "192.0.2.5:9000".parse().unwrap(),
+                },
+            ],
+            2,
+        )
+        .unwrap();
+        assert_eq!(restored.persisted[0].addresses.len(), 2);
+        assert_eq!(restored.persisted[0].addresses[0].underlay, Underlay::Wifi);
+        assert_eq!(
+            restored.next_descriptor.unwrap().addresses()[0],
+            "192.0.2.5:9000".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn zero_path_pairings_still_count_toward_the_peer_limit() {
+        let paired = TaggedPeer {
+            name: "aircraft-001".into(),
+            endpoint_id: "a".repeat(64),
+            addresses: Vec::new(),
+        };
+        let candidate = TaggedPeer {
+            name: "aircraft-002".into(),
+            endpoint_id: "b".repeat(64),
+            addresses: vec![TaggedAddress {
+                underlay: Underlay::Ethernet,
+                address: "192.0.2.5:9000".parse().unwrap(),
+            }],
+        };
+
+        assert!(stage_paired_peer(&[], &[paired], &[], &[], candidate, 1,).is_err());
+    }
+
+    #[test]
+    fn ground_path_policy_matches_only_configured_canonical_addresses() {
+        let status = mesh_agent::status::PeerStatus {
+            name: "aircraft-001".into(),
+            endpoint_id: "a".repeat(64),
+            addresses: vec![mesh_agent::status::PeerAddressStatus {
+                underlay: Some(Underlay::Ethernet),
+                address: "[::ffff:192.0.2.4]:9000".into(),
+            }],
+            connected: true,
+            last_transition_at_ms: 0,
+            selected_underlay: None,
+        };
+
+        assert!(configured_path_allows_remote(
+            &status,
+            Some("192.0.2.4:9000".parse().unwrap())
+        ));
+        assert!(!configured_path_allows_remote(
+            &status,
+            Some("192.0.2.5:9000".parse().unwrap())
+        ));
+        assert!(!configured_path_allows_remote(&status, None));
+        let disabled = mesh_agent::status::PeerStatus {
+            addresses: Vec::new(),
+            ..status
+        };
+        assert!(!configured_path_allows_remote(
+            &disabled,
+            Some("192.0.2.4:9000".parse().unwrap())
+        ));
     }
 }

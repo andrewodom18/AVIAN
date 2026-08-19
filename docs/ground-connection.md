@@ -50,11 +50,59 @@ The browser endpoint remains loopback-only and requires an exact same-origin
 request plus an explicit setup header. Flight and emergency operations remain
 outside the website.
 
+## Manage communication paths
+
+The connection code automatically adds every advertised aircraft address and
+orders the routes as Silvus, Ethernet, Wi-Fi, satellite, then other. PEAT is
+given the complete address set, monitors the live connection, retries an
+unavailable aircraft in the background, and can move traffic to another
+reachable path without changing the aircraft identity. The Ground peer table
+attributes the active underlay from PEAT's currently selected transport path,
+not from a reachability guess.
+
+On each device, PEAT's wildcard AVIAN listener tracks available local IP
+interfaces and exposes their live network candidates automatically; an
+Ethernet, Wi-Fi, ZeroTier, or other interface can disappear and return without
+an AVIAN restart. The remote aircraft addresses are populated from the
+connection code because AVIAN cannot safely infer another device's routable
+addresses across NATs or overlays. Operators add only a new remote address that
+was not provisioned in the code; operating-system network setup remains outside
+AVIAN.
+
+To test loss and recovery without unplugging equipment:
+
+1. Open **Manage aircraft** and find the saved aircraft.
+2. Select **Remove path**, then **Confirm**, beside the communication method to
+   simulate losing. The aircraft remains paired.
+3. To simulate recovery, choose the underlay, enter the aircraft's routable
+   `IP:port`, and select **Add path**.
+
+Each change atomically replaces the aircraft's complete saved path set,
+disconnects the obsolete transport session, and immediately attempts the
+remaining preferred routes. Removing the last path is intentionally allowed:
+the peer stays visible and disconnected, outbound retries pause, and AVIAN
+Ground retains the last synchronized telemetry as stale. Adding a path resumes
+connection attempts immediately. Pasting the aircraft's original connection
+code restores the provisioned address set.
+
+On unmanaged ground nodes, the saved addresses are also an inbound path
+allowlist. If the aircraft tries to reconnect over a route the operator removed,
+the ground agent closes that transport instead of letting the remote dial
+bypass the simulation. This enforcement is ground-only; aircraft and managed
+formations retain their normal authenticated inbound mesh behavior.
+
+Path controls affect only AVIAN's public peer descriptor. They do not add,
+remove, enable, disable, or configure Ethernet, Wi-Fi, ZeroTier, Starlink,
+Silvus, or any other operating-system/radio interface. The ground device must
+already have working network reachability to every address it is expected to
+use. Only code-added peers can be edited; static TOML and signed managed-
+membership peers remain protected.
+
 ## Remove a saved aircraft
 
 1. Open **Manage aircraft** in AVIAN Ground.
-2. Under **Saved aircraft**, select **Remove** for the aircraft.
-3. Select **Confirm remove**.
+2. Under **Saved aircraft and paths**, select **Remove aircraft**.
+3. Select **Confirm aircraft removal**.
 
 Removal is a ground-local operation. AVIAN atomically removes the public peer
 descriptor from `paired-peers.json`, stops outbound reconnect attempts, and
@@ -79,7 +127,9 @@ every affected node.
 
 ## Boundary
 
-This workflow adds or removes a ground-side direct peer. Aircraft connections
-still need the same formation credential, a reachable AVIAN UDP listener, and
-network policy that permits the advertised addresses. Large managed formations
-continue to use signed membership manifests instead of local connection codes.
+This workflow adds or removes a ground-side direct peer and edits that peer's
+public AVIAN routing addresses. Aircraft connections still need the same
+formation credential, a reachable AVIAN UDP listener, an already configured
+network interface, and network policy that permits the advertised addresses.
+Large managed formations continue to use signed membership manifests instead
+of local connection codes.

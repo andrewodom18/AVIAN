@@ -55,8 +55,10 @@ restarting an upgraded node.
    `avianctl connection-code` and paste it into AVIAN Ground. The agent stores
    the public descriptor in private state and connects immediately; see
    [Ground aircraft connection](ground-connection.md). The same Ground setup
-   panel can remove code-added peers without editing the aircraft or static
-   configuration.
+   panel can add/remove their public communication paths for loss/recovery
+   testing or remove code-added peers entirely, without editing the aircraft or
+   static configuration. Path controls do not configure operating-system or
+   radio interfaces.
 
 Enable services after provisioning:
 

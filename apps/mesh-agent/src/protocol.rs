@@ -31,6 +31,11 @@ pub enum ControlRequest {
         addresses: Vec<PeerConnectionAddress>,
     },
     ListPairedPeers,
+    ListPairedPeerDetails,
+    SetPeerPaths {
+        name: String,
+        addresses: Vec<PeerConnectionAddress>,
+    },
     RemovePeer {
         name: String,
     },
@@ -58,6 +63,14 @@ pub enum ControlResponse {
     PairedPeers {
         names: Vec<String>,
     },
+    PairedPeerDetails {
+        peers: Vec<PairedPeerConnection>,
+    },
+    PeerPathsConfigured {
+        name: String,
+        addresses: Vec<PeerConnectionAddress>,
+        connected: bool,
+    },
     PeerRemoved {
         name: String,
     },
@@ -78,6 +91,13 @@ pub enum ControlResponse {
 pub struct PeerConnectionAddress {
     pub underlay: Underlay,
     pub address: SocketAddr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairedPeerConnection {
+    pub name: String,
+    pub addresses: Vec<PeerConnectionAddress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +187,19 @@ mod tests {
             ControlRequest::ListPairedPeers
         ));
 
+        let details = br#"{"protocol_version":1,"body":{"type":"list_paired_peer_details"}}"#;
+        assert!(matches!(
+            decode_request(details).unwrap(),
+            ControlRequest::ListPairedPeerDetails
+        ));
+
+        let paths = br#"{"protocol_version":1,"body":{"type":"set_peer_paths","name":"aircraft-001","addresses":[]}}"#;
+        assert!(matches!(
+            decode_request(paths).unwrap(),
+            ControlRequest::SetPeerPaths { name, addresses }
+                if name == "aircraft-001" && addresses.is_empty()
+        ));
+
         let remove =
             br#"{"protocol_version":1,"body":{"type":"remove_peer","name":"aircraft-001"}}"#;
         assert!(matches!(
@@ -176,5 +209,7 @@ mod tests {
 
         let unknown = br#"{"protocol_version":1,"body":{"type":"remove_peer","name":"aircraft-001","force":true}}"#;
         assert!(decode_request(unknown).is_err());
+        let unknown_path = br#"{"protocol_version":1,"body":{"type":"set_peer_paths","name":"aircraft-001","addresses":[],"force":true}}"#;
+        assert!(decode_request(unknown_path).is_err());
     }
 }
