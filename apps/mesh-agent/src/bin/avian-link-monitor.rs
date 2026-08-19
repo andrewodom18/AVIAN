@@ -52,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
             .context("configuration path is not UTF-8")?,
     ]))?;
     if !config.radio.enabled {
-        println!("AVIAN radio monitoring is disabled");
+        println!("AVIAN radio monitoring is disabled; waiting for shutdown");
+        tokio::signal::ctrl_c()
+            .await
+            .context("waiting for link monitor shutdown")?;
         return Ok(());
     }
     let responder = config
