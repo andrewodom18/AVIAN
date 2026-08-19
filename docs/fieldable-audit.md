@@ -2,8 +2,8 @@
 
 Audit date: 2026-08-19
 
-Audited code: AVIAN `dev` at `64f1e23` or later; stardogOS `odom-dev` at
-`966d1e8`; AVIAN Ground UI `dev` at `22c7311` or later
+Audited code: AVIAN `dev` at `406e2b3` or later; stardogOS `odom-dev` at
+`966d1e8`; AVIAN Ground UI `dev` at `8d78a1b` or later
 
 Plan source: AVIAN Fieldable Implementation Plan supplied by the operator
 
@@ -80,10 +80,12 @@ agent.
 
 The approved boundary is:
 
-- read-only status, records, warnings, and sanitized service logs;
+- operationally read-only status, records, warnings, and sanitized service logs;
 - mandatory loopback binding with no non-loopback mode;
 - no emergency-command, radio-mutation, Starshield, camera, or flight-control
   endpoint;
+- one bounded, same-origin setup route that accepts only a non-secret,
+  versioned aircraft descriptor and asks the local agent to persist it;
 - fixed service/log queries only, with bounded output and polling;
 - minimum-field projection so unused record payloads and peer addresses never
   cross into the browser API;
@@ -100,3 +102,5 @@ all three were fixed before commit `66f57d7`. Commit `22c7311` additionally
 uses 10-second status polling, 30-second bounded log/record polling, pauses
 background-tab polling, expands every active warning, and provides searchable,
 filterable, ordered, paginated events instead of an unbounded visual feed.
+Commit `8d78a1b` adds the guided one-code aircraft connection flow without
+putting formation credentials or operational controls in the browser.

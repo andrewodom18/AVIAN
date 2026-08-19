@@ -50,9 +50,11 @@ restarting an upgraded node.
 3. Keep private command keys and radio credential files owned by `avian` with
    mode `0600`. Public verification keys may be `0644`.
 4. Keep `/etc/avian/avian.toml` owned by `root:avian` with mode `0640`.
-5. Start once without `[[peers]]` entries if endpoint IDs are not known. Read
-   the stable endpoint from `journalctl -u avian-mesh-agent`, exchange it out of
-   band, add the peer blocks, and restart.
+5. For static or managed formations, provision peer blocks as before. For a
+   simple ground installation, generate a non-secret aircraft code with
+   `avianctl connection-code` and paste it into AVIAN Ground. The agent stores
+   the public descriptor in private state and connects immediately; see
+   [Ground aircraft connection](ground-connection.md).
 
 Enable services after provisioning:
 

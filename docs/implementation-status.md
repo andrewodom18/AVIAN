@@ -5,7 +5,7 @@ It is intentionally conservative: the milestone is not complete until every
 required field row contains dated, sanitized evidence.
 
 Last automated verification: 2026-08-19 on macOS and Debian Linux
-(`dev` at `43296fd` or later).
+(`dev` at `406e2b3` or later).
 
 ## Implemented and automated
 
@@ -14,12 +14,12 @@ Last automated verification: 2026-08-19 on macOS and Debian Linux
 | Baseline | macOS `just verify` passes formatting, warning-free workspace Clippy, workspace tests, doc tests, and locked debug build; Debian Linux locked workspace tests and release build also pass |
 | Configuration | Strict versioned/size-bounded TOML, consistent relative path resolution, scalar CLI precedence, peer-list replacement, identifier/count/timing bounds, distinct sockets, unknown-field rejection, production examples |
 | Deployment | Locked release build path, prebuilt path, service account/group, preserved live config, capability-free hardened independent systemd units |
-| Mesh/status | Stable derived identity across restart, startup node advertisement, ordered multi-address fallback, transition status, owner-only/time- and size-bounded control protocol and record inspection |
+| Mesh/status | Stable derived identity across restart, startup node advertisement, ordered multi-address fallback, transition status, owner-only/time- and size-bounded control protocol and record inspection, plus atomic ground-side one-code aircraft pairing with safe corrected-code replacement |
 | Payload | Schema-v2 image manifest/detection contracts, source assignment by local agent, metadata-only stardogOS image publication, malformed-event and socket-mode tests |
 | Commands | Ed25519 key generation, short record/config lifetime, target/issuer/action/fresh-system-lock checks, atomic nonce/replay state, dry-run path, restart replay suppression, ACK source correlation, five-second total ACK/retry budget, execute-on-SITL-only configuration gate |
 | Radio | Read-only StreamCaster client, sanitized API failures, bounded bidirectional probes (including passive Ethernet/ZeroTier operation with vendor APIs disabled), Unix observation socket plus legacy UDP ingress, fail-closed relay geometry/calibration |
 | stardogOS regression | `odom-dev` at `966d1e8`: 35 root Python tests and 258 isolated KLV tests pass; absolute imagery paths are excluded from AVIAN/camera failure logs and telemetry CSV output |
-| Ground dashboard | Companion `avian-ground-ui` `dev` at `1275dec`: loopback-only local ground-agent projection, synchronized 2-second aircraft view, explicit unavailable-position/stale/failsafe warnings, retained last-known data, 10-second status and 30-second bounded event/record polling, background-tab pause, searchable/filterable/paginated events, sanitized logs, clean ARM64 macOS and Linux builds, and persistent macOS LaunchAgents |
+| Ground dashboard | Companion `avian-ground-ui` `dev` at `8d78a1b`: loopback-only local ground-agent projection, guided non-secret aircraft-code setup, synchronized 2-second aircraft view, explicit unavailable-position/stale/failsafe warnings, retained last-known data, 10-second status and 30-second bounded event/record polling, background-tab pause, searchable/filterable/paginated events, sanitized logs, clean ARM64 macOS and Linux builds, and persistent macOS LaunchAgents |
 
 ## Pi integration snapshot
 

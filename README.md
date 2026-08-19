@@ -144,6 +144,12 @@ preserves the live configuration on upgrades. See the [production deployment
 guide](docs/deployment.md) and the validated [aircraft](config/aircraft.toml.example)
 and [ground](config/ground.toml.example) examples.
 
+For a pre-provisioned ground formation, an aircraft provisioner can generate a
+non-secret `AVIAN1` connection code with `avianctl connection-code`. The
+operator pastes that single code into AVIAN Ground; the local agent validates,
+persists, and connects the peer without TOML editing or a service restart. See
+the [ground connection guide](docs/ground-connection.md).
+
 With Docker:
 
 ```sh
