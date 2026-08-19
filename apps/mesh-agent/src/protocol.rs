@@ -30,6 +30,10 @@ pub enum ControlRequest {
         endpoint_id: String,
         addresses: Vec<PeerConnectionAddress>,
     },
+    ListPairedPeers,
+    RemovePeer {
+        name: String,
+    },
     ConnectionInfo {
         addresses: Vec<PeerConnectionAddress>,
     },
@@ -50,6 +54,12 @@ pub enum ControlResponse {
     PeerConfigured {
         name: String,
         connected: bool,
+    },
+    PairedPeers {
+        names: Vec<String>,
+    },
+    PeerRemoved {
+        name: String,
     },
     ConnectionInfo {
         formation_id: String,
@@ -146,6 +156,25 @@ mod tests {
         );
 
         let unknown = br#"{"protocol_version":1,"body":{"type":"configure_peer","formation_id":"mission-alpha","name":"aircraft-001","endpoint_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","addresses":[{"underlay":"ethernet","address":"192.0.2.4:9000","secret":"no"}]}}"#;
+        assert!(decode_request(unknown).is_err());
+    }
+
+    #[test]
+    fn paired_peer_management_requests_are_strict_and_versioned() {
+        let list = br#"{"protocol_version":1,"body":{"type":"list_paired_peers"}}"#;
+        assert!(matches!(
+            decode_request(list).unwrap(),
+            ControlRequest::ListPairedPeers
+        ));
+
+        let remove =
+            br#"{"protocol_version":1,"body":{"type":"remove_peer","name":"aircraft-001"}}"#;
+        assert!(matches!(
+            decode_request(remove).unwrap(),
+            ControlRequest::RemovePeer { name } if name == "aircraft-001"
+        ));
+
+        let unknown = br#"{"protocol_version":1,"body":{"type":"remove_peer","name":"aircraft-001","force":true}}"#;
         assert!(decode_request(unknown).is_err());
     }
 }

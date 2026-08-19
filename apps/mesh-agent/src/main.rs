@@ -772,6 +772,47 @@ async fn handle_control_request(
                 },
             }
         }
+        ControlRequest::ListPairedPeers
+            if config.role == ConfiguredNodeRole::Ground && config.membership_file.is_none() =>
+        {
+            let mut names = persisted_paired_peers
+                .iter()
+                .filter(|peer| {
+                    !config
+                        .peers
+                        .iter()
+                        .any(|configured| configured.name == peer.name)
+                })
+                .map(|peer| peer.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            ControlResponse::PairedPeers { names }
+        }
+        ControlRequest::ListPairedPeers => ControlResponse::Error {
+            code: "peer_management_rejected".into(),
+            detail:
+                "local paired-aircraft management is available only on an unmanaged ground node"
+                    .into(),
+        },
+        ControlRequest::RemovePeer { name } => {
+            match remove_paired_peer(
+                node,
+                status,
+                config,
+                paired_peer_path,
+                persisted_paired_peers,
+                peers,
+                tagged_peers,
+                name,
+            ) {
+                Ok(name) => ControlResponse::PeerRemoved { name },
+                Err(error) => ControlResponse::Error {
+                    code: "peer_removal_rejected".into(),
+                    detail: error.to_string(),
+                },
+            }
+        }
         ControlRequest::ConnectionInfo { mut addresses }
             if config.role == ConfiguredNodeRole::Aircraft
                 && !addresses.is_empty()
@@ -883,6 +924,55 @@ async fn configure_peer(
     }
     let connected = node.is_peer_connected(descriptor);
 
+    refresh_peer_statuses(node, status, tagged_peers, peers);
+    println!("Paired ground node with aircraft '{name}'");
+    Ok((name, connected))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_paired_peer(
+    node: &PeatNode,
+    status: &mut AgentStatus,
+    config: &ResolvedConfig,
+    paired_peer_path: &std::path::Path,
+    persisted_paired_peers: &mut Vec<TaggedPeer>,
+    peers: &mut Vec<PeerDescriptor>,
+    tagged_peers: &mut Vec<TaggedPeer>,
+    name: String,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        config.role == ConfiguredNodeRole::Ground,
+        "aircraft removal is available only on a ground node"
+    );
+    anyhow::ensure!(
+        config.membership_file.is_none(),
+        "managed-membership nodes cannot accept local pairing changes"
+    );
+
+    let staged = stage_removed_paired_peer(
+        &config.peers,
+        persisted_paired_peers,
+        peers,
+        tagged_peers,
+        &name,
+    )?;
+    paired_peers::persist(paired_peer_path, &staged.persisted)?;
+    node.disconnect(&staged.removed_descriptor)?;
+
+    *persisted_paired_peers = staged.persisted;
+    *peers = staged.peers;
+    *tagged_peers = staged.tagged_peers;
+    refresh_peer_statuses(node, status, tagged_peers, peers);
+    println!("Removed locally paired aircraft '{name}'");
+    Ok(name)
+}
+
+fn refresh_peer_statuses(
+    node: &PeatNode,
+    status: &mut AgentStatus,
+    tagged_peers: &[TaggedPeer],
+    peers: &[PeerDescriptor],
+) {
     let previous = std::mem::take(&mut status.peers);
     status.peers = peer_statuses(tagged_peers, peers, unix_time_ms());
     for peer in &mut status.peers {
@@ -900,11 +990,6 @@ async fn configure_peer(
             peer.selected_underlay = old.selected_underlay;
         }
     }
-    if let Some(peer) = status.peers.iter_mut().find(|peer| peer.name == name) {
-        peer.connected = connected;
-    }
-    println!("Paired ground node with aircraft '{name}'");
-    Ok((name, connected))
 }
 
 struct StagedPairedPeer {
@@ -912,6 +997,55 @@ struct StagedPairedPeer {
     peers: Vec<PeerDescriptor>,
     tagged_peers: Vec<TaggedPeer>,
     replaced_descriptor: Option<PeerDescriptor>,
+}
+
+struct StagedRemovedPeer {
+    persisted: Vec<TaggedPeer>,
+    peers: Vec<PeerDescriptor>,
+    tagged_peers: Vec<TaggedPeer>,
+    removed_descriptor: PeerDescriptor,
+}
+
+fn stage_removed_paired_peer(
+    configured_peers: &[PeerDescriptor],
+    persisted_paired_peers: &[TaggedPeer],
+    peers: &[PeerDescriptor],
+    tagged_peers: &[TaggedPeer],
+    name: &str,
+) -> anyhow::Result<StagedRemovedPeer> {
+    anyhow::ensure!(valid_pairing_identifier(name), "invalid peer name");
+    anyhow::ensure!(
+        !configured_peers.iter().any(|peer| peer.name == name),
+        "peer is managed by the agent configuration and cannot be removed here"
+    );
+    let persisted = persisted_paired_peers
+        .iter()
+        .find(|peer| peer.name == name)
+        .context("only locally paired aircraft can be removed")?;
+    let removed_descriptor = peers
+        .iter()
+        .find(|peer| peer.name == name && peer.endpoint_id_hex == persisted.endpoint_id)
+        .cloned()
+        .context("locally paired aircraft is missing from the runtime configuration")?;
+
+    Ok(StagedRemovedPeer {
+        persisted: persisted_paired_peers
+            .iter()
+            .filter(|peer| peer.name != name)
+            .cloned()
+            .collect(),
+        peers: peers
+            .iter()
+            .filter(|peer| peer.name != name)
+            .cloned()
+            .collect(),
+        tagged_peers: tagged_peers
+            .iter()
+            .filter(|peer| peer.name != name)
+            .cloned()
+            .collect(),
+        removed_descriptor,
+    })
 }
 
 fn stage_paired_peer(
@@ -1908,5 +2042,44 @@ mod tests {
             2,
         )
         .is_err());
+    }
+
+    #[test]
+    fn only_dynamic_paired_aircraft_can_be_staged_for_removal() {
+        let paired = TaggedPeer {
+            name: "aircraft-001".into(),
+            endpoint_id: "a".repeat(64),
+            addresses: vec![TaggedAddress {
+                underlay: Underlay::Ethernet,
+                address: "192.0.2.4:9000".parse().unwrap(),
+            }],
+        };
+        let mut peers = Vec::new();
+        let mut tagged = Vec::new();
+        merge_runtime_peer(&mut peers, &mut tagged, paired.clone(), 2).unwrap();
+
+        let staged = stage_removed_paired_peer(
+            &[],
+            std::slice::from_ref(&paired),
+            &peers,
+            &tagged,
+            &paired.name,
+        )
+        .unwrap();
+        assert!(staged.persisted.is_empty());
+        assert!(staged.peers.is_empty());
+        assert!(staged.tagged_peers.is_empty());
+        assert_eq!(staged.removed_descriptor.name, paired.name);
+
+        assert!(stage_removed_paired_peer(
+            &peers,
+            std::slice::from_ref(&paired),
+            &peers,
+            &tagged,
+            &paired.name
+        )
+        .is_err());
+        assert!(stage_removed_paired_peer(&[], &[], &peers, &tagged, &paired.name).is_err());
+        assert!(stage_removed_paired_peer(&[], &[paired], &peers, &tagged, "../aircraft").is_err());
     }
 }
