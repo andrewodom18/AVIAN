@@ -3,6 +3,7 @@
 mod altitude;
 mod command;
 mod link;
+mod link_monitor;
 mod message;
 mod node;
 mod payload;
@@ -19,6 +20,9 @@ pub use altitude::{Altitude, AltitudeError, SYSTEM_MAX_MSL_FT, SYSTEM_MAX_MSL_M}
 pub use command::{CommandError, EmergencyAction, EmergencyCommand, ReplayGuard};
 pub use link::{
     LinkCandidate, LinkGeometry, LinkId, LinkMetrics, LinkOrchestrator, RoutePlan, TransportKind,
+};
+pub use link_monitor::{
+    LinkMonitorObservation, PeerProbeObservation, RadioApiObservation, LINK_MONITOR_SCHEMA_VERSION,
 };
 pub use message::{
     DeliveryClass, DeliveryPolicy, EmergencyAck, MeshPayload, MissionState, MissionStatus,

@@ -28,7 +28,7 @@ impl From<MavlinkStack> for FlightStack {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfiguredNodeRole {
     Aircraft,
@@ -166,7 +166,7 @@ pub struct TaggedAddress {
     pub address: SocketAddr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Underlay {
     Silvus,
@@ -211,6 +211,8 @@ pub struct RadioConfig {
     pub probe_timeout_ms: u64,
     pub devices: Vec<RadioDeviceConfig>,
     pub probes: Vec<PeerProbeConfig>,
+    pub probe_listen: Option<SocketAddr>,
+    pub links: Vec<CalibratedLinkConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,6 +230,27 @@ pub struct PeerProbeConfig {
     pub peer: String,
     pub underlay: Underlay,
     pub address: String,
+    #[serde(default = "default_probe_packets")]
+    pub packets: u16,
+    #[serde(default = "default_probe_payload_bytes")]
+    pub payload_bytes: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalibratedLinkConfig {
+    pub first: String,
+    pub second: String,
+    pub underlay: Underlay,
+    pub first_radio_node_id: Option<u32>,
+    pub second_radio_node_id: Option<u32>,
+    pub distance_m: Option<f64>,
+    pub line_of_sight: Option<bool>,
+    pub fresnel_clearance_ratio: Option<f32>,
+    pub snr_floor_db: Option<f64>,
+    pub snr_ceiling_db: Option<f64>,
+    pub receiver_sensitivity_dbm: Option<f64>,
+    pub energy_cost: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +389,8 @@ struct FileRadio {
     probe_timeout_ms: u64,
     devices: Vec<RadioDeviceConfig>,
     probes: Vec<PeerProbeConfig>,
+    probe_listen: Option<SocketAddr>,
+    links: Vec<CalibratedLinkConfig>,
 }
 
 impl Default for FileRadio {
@@ -376,6 +401,8 @@ impl Default for FileRadio {
             probe_timeout_ms: 1_000,
             devices: Vec::new(),
             probes: Vec::new(),
+            probe_listen: None,
+            links: Vec::new(),
         }
     }
 }
@@ -487,6 +514,8 @@ impl ResolvedConfig {
                 probe_timeout_ms: value.radio.probe_timeout_ms,
                 devices: value.radio.devices.clone(),
                 probes: value.radio.probes.clone(),
+                probe_listen: value.radio.probe_listen,
+                links: value.radio.links.clone(),
             });
 
         let resolved = Self {
@@ -570,6 +599,8 @@ impl ResolvedConfig {
                     })
                     .collect(),
                 probes: radio.probes,
+                probe_listen: radio.probe_listen,
+                links: radio.links,
             },
         };
         resolved.validate()?;
@@ -619,6 +650,31 @@ impl ResolvedConfig {
             || self.commands.ack_timeout_ms == 0
         {
             bail!("command timing values must be positive");
+        }
+        if self.radio.enabled
+            && (self.radio.observation_interval_seconds == 0 || self.radio.probe_timeout_ms == 0)
+        {
+            bail!("radio observation interval and probe timeout must be positive");
+        }
+        for probe in &self.radio.probes {
+            if probe.peer.trim().is_empty()
+                || !(1..=100).contains(&probe.packets)
+                || !(32..=1_400).contains(&probe.payload_bytes)
+            {
+                bail!("radio probes require a peer, 1-100 packets, and 32-1400 byte payloads");
+            }
+            probe
+                .address
+                .parse::<SocketAddr>()
+                .with_context(|| format!("invalid probe address {}", probe.address))?;
+        }
+        for link in &self.radio.links {
+            if link.first.trim().is_empty()
+                || link.second.trim().is_empty()
+                || link.first == link.second
+            {
+                bail!("calibrated radio links require two distinct node names");
+            }
         }
         Ok(())
     }
@@ -708,6 +764,14 @@ fn default_mavlink_retry_seconds() -> u64 {
 
 fn default_relay_evaluation_ms() -> u64 {
     1_000
+}
+
+fn default_probe_packets() -> u16 {
+    5
+}
+
+fn default_probe_payload_bytes() -> u16 {
+    256
 }
 
 #[cfg(test)]

@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use crate::{
     Altitude, ArcRadioConfiguration, Detection, EmergencyCommand, ImageManifest,
-    InFlightRelayDecision, MissionAllocation, NodeId, NodeProfile, RadioDeviceObservation,
-    RelayLinkObservation, RelayRuntimeConfiguration, StreamCasterMeshObservation,
-    SwarmStatusSummary,
+    InFlightRelayDecision, LinkMonitorObservation, MissionAllocation, NodeId, NodeProfile,
+    RadioDeviceObservation, RelayLinkObservation, RelayRuntimeConfiguration,
+    StreamCasterMeshObservation, SwarmStatusSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -144,6 +144,7 @@ pub enum MeshPayload {
     /// Vendor-neutral read-only radio observation. New adapters publish this
     /// alongside any legacy vendor-specific record during migration.
     RadioDeviceObservation(RadioDeviceObservation),
+    LinkMonitorObservation(LinkMonitorObservation),
     Mission(MissionState),
     MissionAllocation(MissionAllocation),
     /// Durable ARC-supplied policy used by companions to rebuild an in-flight

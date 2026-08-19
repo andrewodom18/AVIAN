@@ -30,6 +30,7 @@ impl AgentStatus {
         command_mode: CommandMode,
         mavlink_required: bool,
         radio_required: bool,
+        radio_max_age_ms: u64,
     ) -> Self {
         Self {
             schema_version: STATUS_SCHEMA_VERSION,
@@ -62,6 +63,8 @@ impl AgentStatus {
             radio: RadioStatus {
                 required: radio_required,
                 fresh: !radio_required,
+                api_healthy: !radio_required,
+                max_age_ms: radio_max_age_ms,
                 last_observation_at_ms: None,
                 devices: Vec::new(),
                 degradation_reasons: Vec::new(),
@@ -86,6 +89,12 @@ impl AgentStatus {
                     .mavlink
                     .last_message_at_ms
                     .is_some_and(|at| now_ms.saturating_sub(at) <= 5_000));
+        self.radio.fresh = !self.radio.required
+            || (self.radio.api_healthy
+                && self
+                    .radio
+                    .last_observation_at_ms
+                    .is_some_and(|at| now_ms.saturating_sub(at) <= self.radio.max_age_ms));
         self.ready = self.node.endpoint_id.is_some()
             && peers_ready
             && mavlink_ready
@@ -186,6 +195,8 @@ pub struct CommandStatus {
 pub struct RadioStatus {
     pub required: bool,
     pub fresh: bool,
+    pub api_healthy: bool,
+    pub max_age_ms: u64,
     pub last_observation_at_ms: Option<u64>,
     pub devices: Vec<RadioDeviceStatus>,
     pub degradation_reasons: Vec<String>,

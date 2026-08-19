@@ -4,11 +4,11 @@ use anyhow::Context;
 use clap::Parser;
 use mesh_agent::control::{spawn_control_server, ControlEnvelope};
 use mesh_core::{
-    Capability, DeliveryClass, InFlightRelayDecision, InFlightRelayPlanner, MeshPayload, NodeId,
-    NodeProfile, NodeRole, RelayBroadcastPair, RelayLinkObservation, RelayObservationPublication,
-    RelayObservationTrafficGovernor, RelayRuntimeAction, RelayRuntimeConfiguration,
-    RelayRuntimeSnapshot, SwarmStatusSummary, SwarmTrafficPolicy, Telemetry, TelemetryPublication,
-    TelemetryTrafficGovernor,
+    Capability, DeliveryClass, InFlightRelayDecision, InFlightRelayPlanner, LinkMonitorObservation,
+    MeshPayload, NodeId, NodeProfile, NodeRole, RelayBroadcastPair, RelayLinkObservation,
+    RelayObservationPublication, RelayObservationTrafficGovernor, RelayRuntimeAction,
+    RelayRuntimeConfiguration, RelayRuntimeSnapshot, SwarmStatusSummary, SwarmTrafficPolicy,
+    Telemetry, TelemetryPublication, TelemetryTrafficGovernor, TransportKind,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
@@ -23,10 +23,13 @@ mod membership;
 
 use membership::load_membership;
 use mesh_agent::commands::{AckOutcome, CommandEvaluation, CommandRuntime};
-use mesh_agent::config::{CliArgs, CommandMode, ResolvedConfig};
+use mesh_agent::config::{CliArgs, CommandMode, ResolvedConfig, Underlay};
+use mesh_agent::link_monitor_protocol;
 use mesh_agent::payload_ingress::{self, PayloadEvent};
 use mesh_agent::protocol::{ControlRequest, ControlResponse, RecordView};
-use mesh_agent::status::{AgentStatus, PeerAddressStatus, PeerStatus};
+use mesh_agent::status::{
+    AgentStatus, PeerAddressStatus, PeerStatus, RadioDeviceStatus, UnderlayStatus,
+};
 
 #[derive(Debug)]
 struct RelayRuntimeState {
@@ -163,6 +166,9 @@ async fn main() -> anyhow::Result<()> {
         args.commands.mode,
         args.mavlink_address.is_some(),
         args.radio.enabled,
+        args.radio
+            .observation_interval_seconds
+            .saturating_mul(3_000),
     );
     status.node.endpoint_id = Some(node.endpoint_id_hex());
     status.peers = peer_statuses(&args, &peers, started_at_ms);
@@ -175,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let payload_socket = payload_ingress::bind(&args.sockets.payload)?;
+    let link_observation_socket = link_monitor_protocol::bind(&args.sockets.link_observation)?;
 
     println!("AVIAN node '{}' is ready", node.name());
     println!("Endpoint: {}", node.endpoint_id_hex());
@@ -228,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
     let mut payload_sequence = 0_u64;
     let mut command_ack_sequence = 0_u64;
     let mut payload_buffer = vec![0_u8; args.sockets.max_message_bytes.saturating_add(1)];
+    let mut link_observation_buffer = vec![0_u8; args.sockets.max_message_bytes.saturating_add(1)];
     loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c() => {
@@ -283,6 +291,36 @@ async fn main() -> anyhow::Result<()> {
                     Err(error) => {
                         status.payload.last_error = Some(error.to_string());
                         eprintln!("Payload event socket failed: {error}");
+                    }
+                }
+            }
+            received = link_observation_socket.recv(&mut link_observation_buffer) => {
+                match received {
+                    Ok(length) => {
+                        match link_monitor_protocol::decode(
+                            &link_observation_buffer[..length],
+                            args.sockets.max_message_bytes,
+                        ) {
+                            Ok(observation) => {
+                                ingest_link_monitor_observation(
+                                    &node,
+                                    &node_id,
+                                    &mut relay_observation_sequence,
+                                    observation,
+                                    &mut status,
+                                    traffic_policy,
+                                    &mut relay_observation_governor,
+                                ).await;
+                            }
+                            Err(error) => {
+                                status.record_error("link-monitor", error.to_string(), unix_time_ms());
+                                eprintln!("Link-monitor observation rejected: {error}");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        status.record_error("link-monitor", error.to_string(), unix_time_ms());
+                        eprintln!("Link-monitor socket failed: {error}");
                     }
                 }
             }
@@ -412,6 +450,7 @@ async fn main() -> anyhow::Result<()> {
     control_task.abort();
     let _ = std::fs::remove_file(&args.sockets.control);
     let _ = std::fs::remove_file(&args.sockets.payload);
+    let _ = std::fs::remove_file(&args.sockets.link_observation);
     node.shutdown().await.context("stopping AVIAN node")?;
     Ok(())
 }
@@ -694,6 +733,169 @@ async fn ingest_payload_event(
     let record = AvianRecord::new(node_id.clone(), sequence, class, unix_time_ms(), payload)?;
     node.put(&record_id, &record).await?;
     Ok(())
+}
+
+async fn ingest_link_monitor_observation(
+    node: &PeatNode,
+    node_id: &NodeId,
+    sequence: &mut u64,
+    observation: LinkMonitorObservation,
+    status: &mut AgentStatus,
+    traffic_policy: SwarmTrafficPolicy,
+    governor: &mut RelayObservationTrafficGovernor,
+) {
+    status.radio.last_observation_at_ms = Some(observation.observed_at_ms);
+    status.radio.api_healthy =
+        !observation.radios.is_empty() && observation.radios.iter().all(|radio| radio.api_fresh);
+    status.radio.devices = observation
+        .radios
+        .iter()
+        .map(|radio| RadioDeviceStatus {
+            name: radio.name.clone(),
+            model: radio
+                .capabilities
+                .as_ref()
+                .and_then(|value| value.model)
+                .map(|value| format!("{value:?}")),
+            firmware: radio
+                .capabilities
+                .as_ref()
+                .and_then(|value| value.firmware_version.clone()),
+            api_fresh: radio.api_fresh,
+            neighbors: radio.rf_links.len(),
+            error: (!radio.errors.is_empty()).then(|| radio.errors.join(",")),
+        })
+        .collect();
+    status.radio.degradation_reasons = observation.degradation_reasons.clone();
+
+    for probe in &observation.probes {
+        let Some(underlay) = underlay_for_transport(probe.underlay) else {
+            continue;
+        };
+        status.underlays.insert(
+            underlay_name(underlay).into(),
+            UnderlayStatus {
+                reachable: probe.reachable,
+                last_observed_at_ms: Some(probe.observed_at_ms),
+                latency_ms: probe.latency_ms,
+                loss_ratio: Some(probe.loss_ratio),
+                goodput_bps: probe.goodput_bps,
+                stability: probe.stability,
+                error: probe.error.clone(),
+            },
+        );
+    }
+    update_selected_underlays(status, &observation);
+
+    *sequence = sequence.saturating_add(1);
+    let record = AvianRecord::new(
+        node_id.clone(),
+        *sequence,
+        DeliveryClass::Telemetry,
+        unix_time_ms(),
+        MeshPayload::LinkMonitorObservation(observation.clone()),
+    );
+    match record {
+        Ok(record) => {
+            if let Err(error) = node.put(&format!("link-monitor/{node_id}"), &record).await {
+                status.record_error("link-monitor", error.to_string(), unix_time_ms());
+            }
+        }
+        Err(error) => status.record_error("link-monitor", error.to_string(), unix_time_ms()),
+    }
+
+    for relay in observation.relay_observations {
+        *sequence = sequence.saturating_add(1);
+        match serde_json::to_vec(&relay) {
+            Ok(encoded) => {
+                ingest_relay_observation(
+                    node,
+                    node_id,
+                    *sequence,
+                    &encoded,
+                    traffic_policy,
+                    governor,
+                )
+                .await;
+            }
+            Err(error) => status.record_error("link-monitor", error.to_string(), unix_time_ms()),
+        }
+    }
+}
+
+fn update_selected_underlays(status: &mut AgentStatus, observation: &LinkMonitorObservation) {
+    for peer in &mut status.peers {
+        let selected = peer.addresses.iter().find_map(|address| {
+            let underlay = address.underlay?;
+            observation
+                .probes
+                .iter()
+                .any(|probe| {
+                    probe.peer == peer.name
+                        && probe.underlay == transport_for_underlay(underlay)
+                        && probe.reachable
+                })
+                .then_some(underlay)
+        });
+        if selected == peer.selected_underlay {
+            continue;
+        }
+        match (peer.selected_underlay, selected) {
+            (Some(Underlay::Silvus), Some(fallback)) => eprintln!(
+                "Peer {} Silvus path interrupted; selected reachable fallback {}",
+                peer.name,
+                underlay_name(fallback)
+            ),
+            (Some(_), Some(Underlay::Silvus)) => println!(
+                "Peer {} Silvus path recovered; preferred underlay restored",
+                peer.name
+            ),
+            (None, Some(selected)) => println!(
+                "Peer {} reachable on {}",
+                peer.name,
+                underlay_name(selected)
+            ),
+            (Some(previous), None) => eprintln!(
+                "Peer {} lost its last reachable {} path",
+                peer.name,
+                underlay_name(previous)
+            ),
+            _ => {}
+        }
+        peer.selected_underlay = selected;
+        peer.last_transition_at_ms = unix_time_ms();
+    }
+}
+
+fn transport_for_underlay(underlay: Underlay) -> TransportKind {
+    match underlay {
+        Underlay::Silvus => TransportKind::Silvus,
+        Underlay::Satellite => TransportKind::Satellite,
+        Underlay::Ethernet => TransportKind::Ethernet,
+        Underlay::Wifi => TransportKind::Wifi,
+        Underlay::Other => TransportKind::Other,
+    }
+}
+
+fn underlay_for_transport(transport: TransportKind) -> Option<Underlay> {
+    match transport {
+        TransportKind::Silvus => Some(Underlay::Silvus),
+        TransportKind::Satellite => Some(Underlay::Satellite),
+        TransportKind::Ethernet => Some(Underlay::Ethernet),
+        TransportKind::Wifi => Some(Underlay::Wifi),
+        TransportKind::Other => Some(Underlay::Other),
+        _ => None,
+    }
+}
+
+fn underlay_name(underlay: Underlay) -> &'static str {
+    match underlay {
+        Underlay::Silvus => "silvus",
+        Underlay::Satellite => "satellite",
+        Underlay::Ethernet => "ethernet",
+        Underlay::Wifi => "wifi",
+        Underlay::Other => "other",
+    }
 }
 
 async fn process_emergency_commands(
