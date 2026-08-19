@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::Parser;
 use mesh_agent::config::{
-    CalibratedLinkConfig, CliArgs, PeerProbeConfig, ResolvedConfig, Underlay,
+    CalibratedLinkConfig, CliArgs, PeerProbeConfig, RadioConfig, ResolvedConfig, Underlay,
 };
 use mesh_agent::link_monitor_protocol;
 use mesh_core::{
@@ -51,12 +51,15 @@ async fn main() -> anyhow::Result<()> {
             .to_str()
             .context("configuration path is not UTF-8")?,
     ]))?;
-    if !config.radio.enabled {
+    if !link_monitor_has_work(&config.radio) {
         println!("AVIAN radio monitoring is disabled; waiting for shutdown");
         tokio::signal::ctrl_c()
             .await
             .context("waiting for link monitor shutdown")?;
         return Ok(());
+    }
+    if !config.radio.enabled {
+        println!("AVIAN radio APIs are disabled; running configured network probes only");
     }
     let responder = config
         .radio
@@ -92,8 +95,10 @@ async fn observe(
 ) -> LinkMonitorObservation {
     let observed_at_ms = unix_time_ms();
     let mut radios = Vec::new();
-    for device in &config.radio.devices {
-        radios.push(observe_radio(device, observed_at_ms).await);
+    if config.radio.enabled {
+        for device in &config.radio.devices {
+            radios.push(observe_radio(device, observed_at_ms).await);
+        }
     }
     let mut probes = Vec::new();
     for probe in &config.radio.probes {
@@ -122,6 +127,10 @@ async fn observe(
         relay_observations,
         degradation_reasons,
     }
+}
+
+fn link_monitor_has_work(radio: &RadioConfig) -> bool {
+    radio.enabled || radio.probe_listen.is_some() || !radio.probes.is_empty()
 }
 
 async fn observe_radio(
@@ -509,6 +518,16 @@ mod tests {
         assert_eq!(observation.received_packets, 3);
         assert_eq!(observation.loss_ratio, 0.0);
         assert!(observation.goodput_bps.is_some());
+    }
+
+    #[test]
+    fn passive_probes_run_without_enabling_radio_apis() {
+        let mut radio = RadioConfig::default();
+        assert!(!link_monitor_has_work(&radio));
+        radio.probe_listen = Some("127.0.0.1:9200".parse().unwrap());
+        assert!(link_monitor_has_work(&radio));
+        assert!(!radio.enabled);
+        assert!(radio.devices.is_empty());
     }
 
     #[test]
