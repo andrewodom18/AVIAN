@@ -3,6 +3,11 @@
 This document defines the application-level contract carried by PEAT. The Rust
 types in `mesh-core` are authoritative for v0.1.
 
+Writers emit AVIAN envelope schema v2. Readers accept envelope schemas v1 and
+v2 so existing durable records remain readable during rollout. Local Unix
+protocols have an independent explicit protocol version, reject unknown fields,
+and enforce configured message-size bounds.
+
 ## Node advertisement
 
 A node advertises a stable identifier, its flight stack, its explicit
@@ -47,6 +52,27 @@ Companions combine these records with current vehicle telemetry and membership
 state to construct the shared in-flight relay snapshot. A stale or one-way
 observation is not eligible to become a chain hop.
 
+## Payload metadata
+
+An image manifest is durable bulk metadata. It contains a UUID, UTC capture
+time, sensor, `image/jpeg` media type, byte count, SHA-256, safe
+imagery-relative reference, optional MSL position/heading, and geotag status.
+It never contains JPEG bytes or an absolute path.
+
+A detection is durable mission data. It contains a UUID, observation time,
+optional image UUID, bounded label, optional confidence, and optional
+geolocation. The local mesh agent assigns the PEAT source identity for both
+records; a Unix payload producer cannot supply or override it.
+
+## Link-monitor observation
+
+The isolated link monitor sends schema-v2 normalized radio/API and peer-probe
+state through a strict versioned Unix datagram. It includes model/firmware and
+effective settings when available, direct RF evidence, API freshness/errors,
+latency, loss, achieved probe goodput, and rolling stability. Relay-eligible
+observations require bidirectional radio evidence and all configured geometry
+and calibration. Missing inputs remain explicit degradation reasons.
+
 ## Emergency command
 
 An emergency command contains:
@@ -59,8 +85,11 @@ An emergency command contains:
 - Ed25519 signature over a deterministic binary representation.
 
 Receivers verify the trusted issuer key, target, lifetime, signature, and
-nonce before execution. A command ID or issuer/nonce pair can be accepted only
-once. An acknowledgement is a separate durable record.
+nonce before execution. The embedded lifetime cannot exceed the receiver's
+configured short acceptance window. A command ID or issuer/nonce pair can be
+accepted only once, and acceptance is persisted before any SITL packet is
+sent. An acknowledgement is a separate durable record containing verification,
+mode, execution result, correlated MAVLink result, and failure detail.
 
 Betaflight v0.1 actions are limited to GPS Rescue, return-to-launch mapped to
 GPS Rescue, and disarm after the adapter reports a landed state. Raw stick

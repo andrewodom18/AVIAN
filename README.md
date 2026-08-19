@@ -34,10 +34,13 @@ ArduPilot/PX4 MAVLink telemetry over UDP or TCP; direct serial is an optional
 build feature. Silvus StreamCaster is modeled as an IP MANET underlay, and each
 PEAT peer can have multiple underlay addresses for reconnection across Silvus,
 Wi-Fi, cellular, or other paths. MAVLink emergency-command transmission is not
-enabled yet. The ARC radio sidecar now collects read-only StreamCaster
-observations when a radio reports them; hardware configuration apply remains
-disabled by default until its evidence, maintenance-window, and confirmation
-gates are satisfied.
+available on hardware: real Cube deployments are verification-only dry runs.
+The agent can transmit signed RTL to ArduPilot SITL when configuration
+explicitly selects the SITL environment; hardware execute mode is rejected.
+The isolated link monitor collects read-only StreamCaster observations and
+bounded underlay probes. Hardware radio configuration apply remains disabled
+by default until its evidence, maintenance-window, and confirmation gates are
+satisfied.
 
 When supplied a shared relay-runtime configuration, `mesh-agent` also combines
 mesh telemetry and relay-link observations into leaderless in-flight chain
@@ -127,6 +130,20 @@ cargo run -p mesh-agent -- --help
 cargo run -p arc-radio-plugin -- --help
 ```
 
+For a Linux companion installation:
+
+```sh
+sudo ./deploy/install.sh
+# Provision /etc/avian/avian.toml and private formation/key files first.
+sudo systemctl enable --now avian-mesh-agent avian-link-monitor
+avianctl status --json --require-ready
+```
+
+The installer also accepts `--bin-dir` for prebuilt release binaries and
+preserves the live configuration on upgrades. See the [production deployment
+guide](docs/deployment.md) and the validated [aircraft](config/aircraft.toml.example)
+and [ground](config/ground.toml.example) examples.
+
 With Docker:
 
 ```sh
@@ -140,6 +157,12 @@ The [scalability contract](docs/scalability.md) describes the 5-200 aircraft
 overlay and what remains to validate on real radios.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
+The [field runbooks](docs/field-runbooks.md) cover Pi-to-Mac, Pi-to-Pi, real
+Cube metadata, Silvus, and ZeroTier-over-Starshield recovery checks.
+The [signed RTL guide](docs/emergency-rtl.md) covers key provisioning, real-Cube
+dry run, and the SITL-only execution procedure.
+The [implementation-status ledger](docs/implementation-status.md) separates
+automated behavior from hardware acceptance still requiring field evidence.
 The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
 The [ARC radio-plugin guide](docs/arc-radio-plugin.md) defines the local

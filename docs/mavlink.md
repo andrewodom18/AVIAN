@@ -39,5 +39,11 @@ cargo run -p mesh-agent --features direct-serial -- \
   reported.
 - Publication is capped at 2 Hz by default. New samples replace the prior
   telemetry record instead of accumulating history.
-- This slice is telemetry-only. MAVLink emergency command transmission is not
-  enabled yet.
+- Real flight-controller configurations default to signed command `dry_run` and
+  send no command packet. `execute` is accepted only when the strict TOML also
+  declares `environment = "sitl"`; the bounded sender then correlates
+  `COMMAND_ACK` for `MAV_CMD_NAV_RETURN_TO_LAUNCH`.
+
+stardogOS supplies AVIAN from its dedicated MAVProxy output on UDP 14553. This
+does not replace the independent RFD900 path. See the [signed RTL
+procedure](emergency-rtl.md) before testing commands.

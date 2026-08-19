@@ -121,17 +121,19 @@ operator-authorization dependent.
 
 - [StreamCaster API manual access page](https://silvustechnologies.com/resources/downloads/api-manual/)
 
-When representative radios are available, the Silvus adapter will normalize
-vendor measurements into AVIAN's existing latency,
-loss, goodput, signal quality, stability, energy cost, line-of-sight, and
-Fresnel-clearance model. Until then, the integration stays standards-based and
-does not invent proprietary endpoints.
+`avian-link-monitor` now uses the existing allowlisted read-only StreamCaster
+client. It reads capabilities/model/firmware, effective settings, network
+neighbors, RSSI, SNR, and transmit/receive MCS. Credentials stay in a local
+mode-`0600` JSON file and are reduced to sanitized availability errors before
+status or PEAT publication. The monitor has no radio mutation call path.
 
-The companion is ready for that adapter now. A collector running on the same
-Linux computer sends one normalized `RelayLinkObservation` JSON datagram to
-the agent's local UDP listener; the agent validates it and publishes it as
-latest-value PEAT telemetry. Bind the listener to loopback unless the collector
-is isolated in a controlled local network namespace:
+It also runs bounded UDP echo probes for each configured peer/underlay and
+normalizes latency, loss, achieved probe goodput, and rolling stability. The
+default local path to `mesh-agent` is the group-controlled Unix datagram
+`/run/avian/link-observations.sock`. The existing normalized
+`RelayLinkObservation` UDP listener remains available for compatibility; bind
+that compatibility listener to loopback unless it is isolated in a controlled
+local network namespace:
 
 ```sh
 cargo run -p mesh-agent -- \
@@ -140,12 +142,19 @@ cargo run -p mesh-agent -- \
   --relay-observation-listen 127.0.0.1:9100
 ```
 
-The collector must provide a rolling **bidirectional** observation rather than
-one directional RSSI sample. Its required JSON shape is shown in
+The compatibility collector must provide a rolling **bidirectional**
+observation rather than one directional RSSI sample. Its required JSON shape is shown in
 [`relay-link-observation.sample.json`](../examples/relay-link-observation.sample.json).
 AVIAN checks endpoint shape, sample window, finite metrics, and geometry at
 ingress; mission evaluation then checks membership, freshness, and the
 mission-specific health policy.
+
+The built-in monitor similarly publishes a relay-eligible observation only
+when both radio API directions and every mission measurement are present. It
+does not derive geometry from a plausible-looking guess. Missing distance,
+line of sight, Fresnel clearance, RF node IDs, SNR bounds, receiver sensitivity,
+energy calibration, latency, loss, goodput, or rolling stability produces an
+explicit degradation reason.
 
 Desired radio settings come only from Arc. `arc-radio-plugin` validates the
 grouped 4200/4400/5200 fleet, expands it to deterministic node assignments,
@@ -154,9 +163,18 @@ produces a PEAT mission-class record, and emits a dry-run StreamCaster API
 sequence. It never includes passwords or encryption keys in the PEAT payload. See
 [the Arc radio-plugin guide](arc-radio-plugin.md).
 
-## Remaining handoff work
+## Silvus loss and satellite fallback
 
-The current retry loop can reconnect a peer using any advertised address.
-Seamless score-driven handoff still requires live interface/radio monitoring,
-address advertisement, route-change events, and a multi-underlay test harness.
-Those are the next networking milestones after shared membership manifests.
+Production peer TOML tags the Silvus IP first and the peer's ZeroTier IP over
+Starshield second as `satellite`. PEAT receives the complete ordered set at
+every connection attempt. When the operator/network layer removes the Silvus
+route, the existing session may drop and reconnect through the reachable
+ZeroTier address. Status and transition logs report the interruption, selected
+fallback, and preferred-path recovery.
+
+AVIAN neither mutates StreamCaster configuration nor changes Starshield
+terminal/GPS state. RFD900 remains an independent direct-MAVLink safety path.
+This milestone does not provide make-before-break handoff or AVIAN transport
+over RFD900. Follow the [field runbook](field-runbooks.md) for physical proof;
+the behavior remains unaccepted until the SL5200/4200 and route-loss evidence is
+recorded in the [status ledger](implementation-status.md).
