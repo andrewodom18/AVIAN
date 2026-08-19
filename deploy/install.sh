@@ -67,6 +67,12 @@ done
 
 install -m 0644 -o root -g root "$REPO_ROOT/config/avian.toml.example" \
     /usr/local/share/doc/avian/avian.toml.example
+for example in aircraft.toml.example ground.toml.example; do
+    install -m 0644 -o root -g root "$REPO_ROOT/config/$example" \
+        "/usr/local/share/doc/avian/$example"
+    install -m 0640 -o root -g avian "$REPO_ROOT/config/$example" \
+        "/etc/avian/$example"
+done
 install -m 0640 -o root -g avian "$REPO_ROOT/config/avian.toml.example" \
     /etc/avian/avian.toml.example
 if [[ ! -e /etc/avian/avian.toml ]]; then
