@@ -1,0 +1,99 @@
+# Production aircraft example. Replace node names, endpoint IDs, addresses, and
+# calibration values with deployment-owned data before enabling the services.
+schema_version = 1
+
+[node]
+name = "aircraft-001"
+role = "aircraft"
+
+[peat]
+bind = "0.0.0.0:9000"
+storage = "/var/lib/avian"
+formation_id = "mission-alpha"
+formation_key_file = "formation.key"
+max_mesh_peers = 4
+peer_retry_seconds = 5
+
+[[peers]]
+name = "ground-001"
+endpoint_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[[peers.addresses]]
+underlay = "silvus"
+address = "10.40.0.2:9000"
+
+# "satellite" is the ZeroTier address routed over Starshield. AVIAN does not
+# communicate with or configure the Starshield terminal itself.
+[[peers.addresses]]
+underlay = "satellite"
+address = "172.22.0.2:9000"
+
+[mavlink]
+address = "udpin:0.0.0.0:14553"
+flight_stack = "ardupilot"
+telemetry_hz = 2.0
+retry_seconds = 2
+
+[sockets]
+control = "/run/avian/control.sock"
+payload = "/run/avian/payload-events.sock"
+link_observation = "/run/avian/link-observations.sock"
+max_message_bytes = 65536
+
+# Hardware aircraft stay in dry_run. execute is rejected unless environment is
+# explicitly sitl.
+[commands]
+mode = "dry_run"
+environment = "hardware"
+state_file = "command-state.json"
+lifetime_ms = 5000
+poll_ms = 250
+ack_timeout_ms = 1500
+retries = 1
+
+[[commands.issuers]]
+id = "ground-001"
+public_key_file = "keys/ground-001.pub"
+
+[radio]
+enabled = true
+observation_interval_seconds = 10
+probe_timeout_ms = 1000
+probe_listen = "0.0.0.0:9200"
+
+[[radio.devices]]
+name = "air-sl5200"
+base_url = "https://10.41.0.1"
+credentials_file = "secrets/air-sl5200.json"
+local_node_id = 1
+
+# Include the peer management API only when it is deliberately reachable from
+# this monitor. Relay eligibility requires bidirectional API evidence.
+[[radio.devices]]
+name = "ground-4200"
+base_url = "https://10.41.0.2"
+credentials_file = "secrets/ground-4200.json"
+local_node_id = 2
+
+[[radio.probes]]
+peer = "ground-001"
+underlay = "silvus"
+address = "10.40.0.2:9200"
+packets = 5
+payload_bytes = 256
+
+[[radio.probes]]
+peer = "ground-001"
+underlay = "satellite"
+address = "172.22.0.2:9200"
+packets = 5
+payload_bytes = 256
+
+# Geometry and RF calibration are intentionally absent. The monitor reports an
+# explicit degradation until field-owned values are supplied.
+[[radio.links]]
+first = "aircraft-001"
+second = "ground-001"
+underlay = "silvus"
+first_radio_node_id = 1
+second_radio_node_id = 2

@@ -93,4 +93,57 @@ mod tests {
         }"#;
         assert!(decode(encoded, 4096).is_err());
     }
+
+    #[test]
+    fn rejects_unknown_fields_and_protocol_versions() {
+        let unknown = br#"{
+            "protocol_version":1,
+            "event":{
+                "type":"detection",
+                "detection":{
+                    "schema_version":2,
+                    "detection_id":"00000000-0000-0000-0000-000000000000",
+                    "observed_at_ms":1,
+                    "image_id":null,
+                    "label":"vehicle",
+                    "confidence":null,
+                    "position":null,
+                    "surprise":true
+                }
+            }
+        }"#;
+        assert!(decode(unknown, 4096).is_err());
+
+        let wrong_version = br#"{
+            "protocol_version":2,
+            "event":{
+                "type":"detection",
+                "detection":{
+                    "schema_version":2,
+                    "detection_id":"00000000-0000-0000-0000-000000000000",
+                    "observed_at_ms":1,
+                    "image_id":null,
+                    "label":"vehicle",
+                    "confidence":null,
+                    "position":null
+                }
+            }
+        }"#;
+        assert!(decode(wrong_version, 4096).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn payload_socket_is_group_writable_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("payload.sock");
+        let socket = bind(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o660
+        );
+        drop(socket);
+    }
 }

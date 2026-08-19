@@ -609,4 +609,25 @@ mod tests {
         node_a.shutdown().await.unwrap();
         node_b.shutdown().await.unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn endpoint_identity_is_stable_across_restart() {
+        let storage = TempDir::new().unwrap();
+        let shared_key = FormationKey::generate_secret();
+        let expected = derive_peat_endpoint_id(&shared_key, "avian-test/stable").unwrap();
+
+        let first = PeatNode::start(node_config("avian-test/stable", &storage, &shared_key))
+            .await
+            .unwrap();
+        assert_eq!(first.endpoint_id_hex(), expected);
+        first.shutdown().await.unwrap();
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let second = PeatNode::start(node_config("avian-test/stable", &storage, &shared_key))
+            .await
+            .unwrap();
+        assert_eq!(second.endpoint_id_hex(), expected);
+        second.shutdown().await.unwrap();
+    }
 }

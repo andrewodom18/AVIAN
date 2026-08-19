@@ -13,6 +13,7 @@ pub const CONFIG_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MavlinkStack {
+    #[serde(rename = "ardupilot", alias = "ardu_pilot")]
     #[value(name = "ardupilot")]
     ArduPilot,
     #[value(name = "px4")]
@@ -893,6 +894,118 @@ addresses = [{ underlay = "silvus", address = "10.1.0.1:9000" }]
         let resolved = ResolvedConfig::load(args).unwrap();
         assert_eq!(resolved.peers[0].name, "cli");
         assert!(resolved.tagged_peers.is_empty());
+    }
+
+    #[test]
+    fn scalar_cli_values_override_configured_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("avian.toml");
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 1
+[node]
+name = "configured"
+role = "aircraft"
+[peat]
+bind = "127.0.0.1:9000"
+storage = "configured-state"
+formation_id = "configured-formation"
+formation_key_file = "configured.key"
+peer_retry_seconds = 30
+[mavlink]
+address = "udpin:127.0.0.1:14550"
+flight_stack = "ardupilot"
+telemetry_hz = 1.0
+retry_seconds = 10
+"#,
+        )
+        .unwrap();
+        let args = CliArgs::parse_from([
+            "mesh-agent",
+            "--config",
+            path.to_str().unwrap(),
+            "--name",
+            "cli",
+            "--bind",
+            "127.0.0.1:9100",
+            "--storage",
+            "cli-state",
+            "--formation-id",
+            "cli-formation",
+            "--formation-key-file",
+            "cli.key",
+            "--peer-retry-seconds",
+            "3",
+            "--mavlink-address",
+            "udpin:127.0.0.1:14553",
+            "--flight-stack",
+            "px4",
+            "--telemetry-hz",
+            "4",
+            "--mavlink-retry-seconds",
+            "2",
+        ]);
+        let resolved = ResolvedConfig::load(args).unwrap();
+        assert_eq!(resolved.name, "cli");
+        assert_eq!(resolved.bind, "127.0.0.1:9100".parse().unwrap());
+        assert_eq!(resolved.storage, directory.path().join("cli-state"));
+        assert_eq!(resolved.formation_id, "cli-formation");
+        assert_eq!(
+            resolved.formation_key_file,
+            directory.path().join("cli.key")
+        );
+        assert_eq!(resolved.peer_retry_seconds, 3);
+        assert_eq!(
+            resolved.mavlink_address.as_deref(),
+            Some("udpin:127.0.0.1:14553")
+        );
+        assert_eq!(resolved.flight_stack, Some(MavlinkStack::Px4));
+        assert_eq!(resolved.telemetry_hz, 4.0);
+        assert_eq!(resolved.mavlink_retry_seconds, 2);
+    }
+
+    #[test]
+    fn execute_mode_is_rejected_for_hardware() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("avian.toml");
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 1
+[node]
+name = "air-1"
+role = "aircraft"
+[peat]
+formation_key_file = "formation.key"
+[commands]
+mode = "execute"
+environment = "hardware"
+signing_key_file = "ground.key"
+"#,
+        )
+        .unwrap();
+        let error = ResolvedConfig::load(cli(path)).unwrap_err().to_string();
+        assert!(error.contains("only when environment = \"sitl\""));
+    }
+
+    #[test]
+    fn production_examples_decode() {
+        for (name, contents) in [
+            (
+                "aircraft.toml",
+                include_str!("../../../config/aircraft.toml.example"),
+            ),
+            (
+                "ground.toml",
+                include_str!("../../../config/ground.toml.example"),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            ResolvedConfig::load(cli(path)).unwrap();
+        }
     }
 
     #[test]

@@ -1,0 +1,80 @@
+# Production Linux ground-node example. macOS field tests should use the same
+# values with storage and socket paths writable by the local operator.
+schema_version = 1
+
+[node]
+name = "ground-001"
+role = "ground"
+
+[peat]
+bind = "0.0.0.0:9000"
+storage = "/var/lib/avian"
+formation_id = "mission-alpha"
+formation_key_file = "formation.key"
+max_mesh_peers = 4
+peer_retry_seconds = 5
+
+[[peers]]
+name = "aircraft-001"
+endpoint_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[[peers.addresses]]
+underlay = "silvus"
+address = "10.40.0.1:9000"
+
+[[peers.addresses]]
+underlay = "satellite"
+address = "172.22.0.1:9000"
+
+[sockets]
+control = "/run/avian/control.sock"
+payload = "/run/avian/payload-events.sock"
+link_observation = "/run/avian/link-observations.sock"
+max_message_bytes = 65536
+
+# Ground nodes use this key to issue commands. dry_run permits issuance without
+# granting this node hardware execution authority.
+[commands]
+mode = "dry_run"
+environment = "hardware"
+signing_key_file = "keys/ground-001.key"
+state_file = "command-state.json"
+lifetime_ms = 5000
+poll_ms = 250
+ack_timeout_ms = 1500
+retries = 1
+
+[radio]
+enabled = true
+observation_interval_seconds = 10
+probe_timeout_ms = 1000
+probe_listen = "0.0.0.0:9200"
+
+[[radio.devices]]
+name = "ground-4200"
+base_url = "https://10.41.0.2"
+credentials_file = "secrets/ground-4200.json"
+local_node_id = 2
+
+[[radio.devices]]
+name = "air-sl5200"
+base_url = "https://10.41.0.1"
+credentials_file = "secrets/air-sl5200.json"
+local_node_id = 1
+
+[[radio.probes]]
+peer = "aircraft-001"
+underlay = "silvus"
+address = "10.40.0.1:9200"
+
+[[radio.probes]]
+peer = "aircraft-001"
+underlay = "satellite"
+address = "172.22.0.1:9200"
+
+[[radio.links]]
+first = "aircraft-001"
+second = "ground-001"
+underlay = "silvus"
+first_radio_node_id = 1
+second_radio_node_id = 2

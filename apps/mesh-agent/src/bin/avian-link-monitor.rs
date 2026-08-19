@@ -531,4 +531,24 @@ mod tests {
             Err("missing distance calibration")
         );
     }
+
+    #[tokio::test]
+    async fn missing_radio_credentials_becomes_sanitized_degradation() {
+        let directory = tempfile::tempdir().unwrap();
+        let observation = observe_radio(
+            &mesh_agent::config::RadioDeviceConfig {
+                name: "air-radio".into(),
+                base_url: "https://192.0.2.1".into(),
+                credentials_file: directory.path().join("missing.json"),
+                local_node_id: Some(1),
+            },
+            1,
+        )
+        .await;
+        assert!(!observation.api_fresh);
+        assert_eq!(observation.errors, vec!["credentials_unavailable"]);
+        assert!(format!("{observation:?}")
+            .find(directory.path().to_str().unwrap())
+            .is_none());
+    }
 }

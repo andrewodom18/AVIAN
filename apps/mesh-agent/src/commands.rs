@@ -151,7 +151,11 @@ impl CommandRuntime {
             match command.verify(key, now_ms) {
                 Ok(()) => {
                     verified = true;
-                    if self
+                    if command.expires_at_ms.saturating_sub(command.issued_at_ms)
+                        > self.config.lifetime_ms
+                    {
+                        Some("command lifetime exceeds the configured acceptance window".to_owned())
+                    } else if self
                         .state
                         .highest_nonce_by_issuer
                         .get(command.issuer.as_str())
@@ -446,5 +450,31 @@ mod tests {
         assert!(!ack.accepted);
         assert!(!ack.executed);
         assert!(ack.detail.contains("not locked"));
+    }
+
+    #[test]
+    fn signed_command_cannot_extend_the_acceptance_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let (config, signing) = config(directory.path(), CommandMode::DryRun);
+        let command = EmergencyCommand::issue(
+            &signing,
+            Uuid::new_v4(),
+            NodeId::from("ground"),
+            NodeId::from("air"),
+            1_000,
+            6_001,
+            1,
+            EmergencyAction::ReturnToLaunch,
+        )
+        .unwrap();
+        let mut runtime = CommandRuntime::load(config, NodeId::from("air")).unwrap();
+        let CommandEvaluation::Rejected(ack) = runtime.evaluate(&command, 2_000, true).unwrap()
+        else {
+            panic!("expected rejection");
+        };
+        assert!(ack.verified);
+        assert!(!ack.accepted);
+        assert!(!ack.executed);
+        assert!(ack.detail.contains("acceptance window"));
     }
 }
