@@ -818,9 +818,9 @@ fn parse_tagged_peers(peers: &[FilePeer]) -> anyhow::Result<Vec<TaggedPeer>> {
                 .collect::<Vec<_>>();
             addresses.sort_by_key(|value| match value.underlay {
                 Underlay::Silvus => 0,
-                Underlay::Satellite => 1,
-                Underlay::Ethernet => 2,
-                Underlay::Wifi => 3,
+                Underlay::Ethernet => 1,
+                Underlay::Wifi => 2,
+                Underlay::Satellite => 3,
                 Underlay::Other => 4,
             });
             Ok(TaggedPeer {
@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_relative_paths_and_orders_silvus_first() {
+    fn resolves_relative_paths_and_orders_local_links_before_satellite() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("avian.toml");
         std::fs::write(
@@ -923,8 +923,14 @@ endpoint_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 underlay = "satellite"
 address = "10.2.0.1:9000"
 [[peers.addresses]]
+underlay = "wifi"
+address = "10.3.0.1:9000"
+[[peers.addresses]]
 underlay = "silvus"
 address = "10.1.0.1:9000"
+[[peers.addresses]]
+underlay = "ethernet"
+address = "10.4.0.1:9000"
 "#,
         )
         .unwrap();
@@ -939,8 +945,17 @@ address = "10.1.0.1:9000"
             directory.path().join("command-state.json")
         );
         assert_eq!(
-            resolved.tagged_peers[0].addresses[0].underlay,
-            Underlay::Silvus
+            resolved.tagged_peers[0]
+                .addresses
+                .iter()
+                .map(|address| address.underlay)
+                .collect::<Vec<_>>(),
+            vec![
+                Underlay::Silvus,
+                Underlay::Ethernet,
+                Underlay::Wifi,
+                Underlay::Satellite,
+            ]
         );
     }
 
