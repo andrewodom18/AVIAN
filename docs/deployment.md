@@ -69,19 +69,29 @@ that service after installation so it receives the updated group membership.
 ## Normal operation
 
 ```sh
-avianctl status
-avianctl status --json
-avianctl status --json --require-ready
-avianctl records --class telemetry
-avianctl records --class bulk
-avianctl records --class mission
-avianctl records --class acknowledgement
+sudo avianctl status
+sudo avianctl status --json
+sudo avianctl status --json --require-ready
+sudo avianctl records --class telemetry
+sudo avianctl records --class bulk
+sudo avianctl records --class mission
+sudo avianctl records --class acknowledgement
 ```
 
 `--require-ready` exits nonzero when a configured peer, required MAVLink lock,
 or required fresh radio observation is missing. The unqualified status command
 still returns the full degraded state. Record classes expose remote telemetry,
 image manifests, detections, and acknowledgements without copying JPEG bytes.
+The control and link-observation sockets are owner-only (`avian`, mode `0600`)
+because they can issue commands or affect operational status. The payload
+socket is the only group-writable ingress (`0660`) so the stardogOS `rolex`
+service can submit strict image/detection metadata. Linux operators therefore
+run `avianctl` through `sudo`; the optional
+[AVIAN Ground UI](https://github.com/andrewodom18/avian-ground-ui) follows the
+same owner-only boundary and exposes no command endpoint. Install that
+companion repository on a ground device with `sudo ./deploy/install.sh
+--enable`, then open `http://127.0.0.1:4178/` on that device. It is loopback-
+only, observational, and not required for mesh operation.
 
 Useful service diagnostics:
 

@@ -136,7 +136,7 @@ For a Linux companion installation:
 sudo ./deploy/install.sh
 # Provision /etc/avian/avian.toml and private formation/key files first.
 sudo systemctl enable --now avian-mesh-agent avian-link-monitor
-avianctl status --json --require-ready
+sudo avianctl status --json --require-ready
 ```
 
 The installer also accepts `--bin-dir` for prebuilt release binaries and
@@ -163,6 +163,8 @@ The [signed RTL guide](docs/emergency-rtl.md) covers key provisioning, real-Cube
 dry run, and the SITL-only execution procedure.
 The [implementation-status ledger](docs/implementation-status.md) separates
 automated behavior from hardware acceptance still requiring field evidence.
+The [fieldable implementation audit](docs/fieldable-audit.md) maps every plan
+requirement to code, automated evidence, and any remaining hardware proof.
 The [Silvus integration guide](docs/silvus.md) defines the current radio
 boundary and multi-underlay peer format.
 The [ARC radio-plugin guide](docs/arc-radio-plugin.md) defines the local

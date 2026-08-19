@@ -76,7 +76,7 @@ third peer. Verify on each Pi:
 
 ```sh
 sudo systemctl is-active avian-mesh-agent.service
-avianctl status --json
+sudo avianctl status --json
 ```
 
 Record the endpoint IDs, restart both services, and confirm the endpoint IDs do
@@ -109,8 +109,8 @@ Using the operator-owned network/radio procedure, disable only the Silvus data
 route. Do not modify the radio through AVIAN. Capture:
 
 ```sh
-avianctl status --json
-journalctl -u avian-mesh-agent -u avian-link-monitor --since "5 minutes ago"
+sudo avianctl status --json
+sudo journalctl -u avian-mesh-agent -u avian-link-monitor --since "5 minutes ago"
 ```
 
 PEAT should disconnect and reconnect using the peer's tagged `satellite`

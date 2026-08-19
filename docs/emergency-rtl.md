@@ -22,8 +22,10 @@ aircraft. Configure the ground signing key and the aircraft issuer/public-key
 pair as shown in the production examples. Node name and issuer ID must match.
 
 Issuer nonce state, processed command IDs, receiver nonce state, pending
-execution, and pending acknowledgements are atomically persisted under the
-configured AVIAN storage directory. Preserve that state during upgrades.
+execution, and pending acknowledgements are atomically persisted at the
+configured `commands.state_file`. Relative paths resolve from the TOML file's
+directory; production examples use `/var/lib/avian/command-state.json`.
+Preserve that state during upgrades.
 
 ## Real Cube dry-run acceptance
 
@@ -39,8 +41,8 @@ After the aircraft status shows the expected MAVLink system lock, issue from
 the ground node:
 
 ```sh
-avianctl emergency rtl --target aircraft-001
-avianctl records --class acknowledgement
+sudo avianctl emergency rtl --target aircraft-001
+sudo avianctl records --class acknowledgement
 ```
 
 The acknowledgement must show `verified = true`, `accepted = true`, `executed
@@ -77,8 +79,10 @@ flight controller.
    stable endpoint IDs and configure them as peers.
 4. In the SITL console, establish a safe airborne state (`GUIDED`, arm, and a
    short takeoff) using the normal ArduPilot test procedure.
-5. Confirm `avianctl status --json --require-ready` reports the SITL system lock.
-6. Issue `avianctl emergency rtl --target sitl-aircraft` on the ground node.
+5. Confirm `avianctl status --json --require-ready` reports the SITL system lock
+   (use `sudo` for an installed Linux service).
+6. Issue `avianctl emergency rtl --target sitl-aircraft` on the ground node
+   (use `sudo` for an installed Linux service).
 7. Confirm SITL changes to RTL and emits a correlated `COMMAND_ACK`. Inspect the
    durable acknowledgement and require `verified`, `accepted`, and `executed`
    to be true with the accepted MAVLink result.
