@@ -62,8 +62,12 @@ closes the currently tracked transport session. It does not change
 configuration on the aircraft, revoke formation membership or credentials, or
 erase records that already synchronized to the ground device. An authorized
 aircraft or another formation peer can therefore establish an inbound or
-relayed mesh path and continue synchronizing records. Paste the aircraft's
-connection code again to restore the ground-initiated direct pairing.
+relayed mesh path and continue synchronizing records. AVIAN Ground nevertheless
+filters its aircraft overview to the agent's currently configured peers, so a
+removed aircraft's peer row, cached or live telemetry, and payload summaries
+disappear immediately and remain hidden after refresh or restart. Paste the
+aircraft's connection code again to restore the ground-initiated direct pairing
+and overview data.
 
 Only aircraft added through a connection code are shown as removable. Static
 TOML peers and signed managed-membership peers cannot be removed through the
