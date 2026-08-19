@@ -91,7 +91,23 @@ run `avianctl` through `sudo`; the optional
 same owner-only boundary and exposes no command endpoint. Install that
 companion repository on a ground device with `sudo ./deploy/install.sh
 --enable`, then open `http://127.0.0.1:4178/` on that device. It is loopback-
-only, observational, and not required for mesh operation.
+only, observational, and not required for mesh operation. Status refreshes at
+10-second intervals and bounded log/record feeds at 30-second intervals;
+background tabs pause polling. Active warnings are expandable, and events are
+searchable, filterable, ordered, and paginated.
+
+To view the dashboard from an operator laptop without exposing another network
+listener, forward the Pi's loopback port over SSH:
+
+```sh
+ssh -N -L 4178:127.0.0.1:4178 avian-operator@ground-device
+```
+
+Open `http://127.0.0.1:4178/` on the laptop. If the underlying Ethernet,
+Wi-Fi, or overlay path changes, the dashboard and AVIAN services continue on
+the ground device, but the existing SSH session ends and must be re-established
+through a reachable address. `jq` is optional operator tooling and is not an
+AVIAN or dashboard runtime dependency.
 
 Useful service diagnostics:
 

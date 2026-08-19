@@ -2,8 +2,8 @@
 
 Audit date: 2026-08-19
 
-Audited code: AVIAN `dev` at `6894b54` or later; stardogOS `odom-dev` at
-`f841d0e`; AVIAN Ground UI `dev` at `66f57d7`
+Audited code: AVIAN `dev` at `64f1e23` or later; stardogOS `odom-dev` at
+`966d1e8`; AVIAN Ground UI `dev` at `22c7311` or later
 
 Plan source: AVIAN Fieldable Implementation Plan supplied by the operator
 
@@ -64,10 +64,11 @@ python3 -m unittest discover -s tests -v          # stardogOS: 35 passed
 python3 -m pytest -q                              # KLV: 258 passed
 ```
 
-The native Pi, real Cube, real radio, route-failover, and SITL rows remain
-explicitly `Not run` in the
-[implementation-status ledger](implementation-status.md). They cannot be
-substituted with simulation or inferred from unit tests.
+The [implementation-status ledger](implementation-status.md) records a
+2026-08-19 Pi 5 installation snapshot separately from the automated audit.
+That snapshot proves active AVIAN, dashboard, MAVProxy, MediaMTX, Pi-stream,
+and local Cube connectivity, but it does not substitute for the still-open
+ground-peer, radio, route-failover, and SITL acceptance runs.
 
 ## Ground UI decision
 
@@ -95,4 +96,7 @@ Its Rust bridge, React export, exact Host/Origin checks, outbound field
 projection, credential/image redaction, systemd sandbox, and transactional
 installer pass native checks plus clean ARM64 Debian Rust/Node builds. A
 standard repository security scan found three medium browser-boundary issues;
-all three were fixed before commit `66f57d7`.
+all three were fixed before commit `66f57d7`. Commit `22c7311` additionally
+uses 10-second status polling, 30-second bounded log/record polling, pauses
+background-tab polling, expands every active warning, and provides searchable,
+filterable, ordered, paginated events instead of an unbounded visual feed.
