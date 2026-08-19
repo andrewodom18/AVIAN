@@ -39,7 +39,9 @@ socket addresses. It writes only the public peer descriptor to
 attempts the connection immediately. The write is atomic and mode `0600`.
 Paired peers survive agent and ground-device restarts.
 Pasting a corrected code for the same dynamically paired aircraft name safely
-replaces the prior public identity and addresses.
+replaces the prior public identity and addresses. If the old aircraft is still
+connected, AVIAN requires the replacement endpoint to connect successfully
+before it commits the change or drops the working link.
 
 Codes for another formation, malformed or secret-bearing codes, loopback or
 multicast addresses, duplicate identities, name conflicts, managed-membership

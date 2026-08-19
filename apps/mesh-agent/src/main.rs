@@ -846,7 +846,30 @@ async fn configure_peer(
         paired_peer.clone(),
         config.max_mesh_peers,
     )?;
-    paired_peers::persist(paired_peer_path, &staged.persisted)?;
+    let candidate_descriptor = staged
+        .peers
+        .iter()
+        .find(|peer| peer.name == name)
+        .cloned()
+        .context("paired peer disappeared during validation")?;
+    let replacing_connected_peer = staged
+        .replaced_descriptor
+        .as_ref()
+        .is_some_and(|peer| node.is_peer_connected(peer));
+    let candidate_was_connected = node.is_peer_connected(&candidate_descriptor);
+    if replacing_connected_peer && !candidate_was_connected {
+        let _ = time::timeout(Duration::from_secs(2), node.connect(&candidate_descriptor)).await;
+        anyhow::ensure!(
+            node.is_peer_connected(&candidate_descriptor),
+            "replacement aircraft is unreachable; kept the existing live connection"
+        );
+    }
+    if let Err(error) = paired_peers::persist(paired_peer_path, &staged.persisted) {
+        if replacing_connected_peer && !candidate_was_connected {
+            let _ = node.disconnect(&candidate_descriptor);
+        }
+        return Err(error);
+    }
 
     *persisted_paired_peers = staged.persisted;
     *peers = staged.peers;
@@ -854,10 +877,7 @@ async fn configure_peer(
     if let Some(replaced_descriptor) = staged.replaced_descriptor {
         node.disconnect(&replaced_descriptor)?;
     }
-    let descriptor = peers
-        .iter()
-        .find(|peer| peer.name == name)
-        .context("paired peer disappeared during validation")?;
+    let descriptor = &candidate_descriptor;
     if !node.is_peer_connected(descriptor) {
         let _ = time::timeout(Duration::from_secs(2), node.connect(descriptor)).await;
     }
