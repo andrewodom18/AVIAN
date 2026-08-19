@@ -408,6 +408,13 @@ fn average(values: impl Iterator<Item = f64>) -> Option<f64> {
 
 fn read_credentials(path: &Path) -> anyhow::Result<Credentials> {
     validate_private_permissions(path)?;
+    const MAX_CREDENTIAL_BYTES: u64 = 65_536;
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading radio credential metadata {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.len() <= MAX_CREDENTIAL_BYTES,
+        "radio credentials exceed {MAX_CREDENTIAL_BYTES} bytes"
+    );
     let encoded = std::fs::read(path)
         .with_context(|| format!("reading radio credentials {}", path.display()))?;
     serde_json::from_slice(&encoded)
@@ -417,7 +424,12 @@ fn read_credentials(path: &Path) -> anyhow::Result<Credentials> {
 #[cfg(unix)]
 fn validate_private_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)?.permissions().mode();
+    let metadata = std::fs::metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "radio credentials must be a regular file"
+    );
+    let mode = metadata.permissions().mode();
     anyhow::ensure!(mode & 0o077 == 0, "radio credentials must have mode 0600");
     Ok(())
 }

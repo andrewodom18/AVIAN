@@ -221,7 +221,11 @@ fn receive_connection(
             }
         };
         if let MavMessage::COMMAND_ACK(ack) = &message {
-            if ack.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH {
+            if ack.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH
+                && pending
+                    .as_ref()
+                    .is_some_and(|request| request.request.target_system_id == header.system_id)
+            {
                 if let Some(pending) = pending.take() {
                     let outcome = if ack.result == MavResult::MAV_RESULT_ACCEPTED {
                         MavlinkCommandOutcome::Accepted
@@ -598,6 +602,15 @@ mod tests {
             };
             assert_eq!(command.command, MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH);
             assert_eq!(command.target_system, 42);
+            connection
+                .send(
+                    &header(41),
+                    &MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+                        command: MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                        result: MavResult::MAV_RESULT_ACCEPTED,
+                    }),
+                )
+                .unwrap();
             connection
                 .send(
                     &header(42),

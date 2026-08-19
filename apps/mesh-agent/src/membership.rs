@@ -8,6 +8,8 @@ use mesh_peat::PeerDescriptor;
 use serde::Deserialize;
 
 const MEMBERSHIP_SCHEMA_VERSION: u16 = 1;
+const MAX_MEMBERSHIP_BYTES: u64 = 1_048_576;
+const MAX_MEMBER_NAME_BYTES: usize = 128;
 
 #[derive(Debug)]
 pub struct MembershipSelection {
@@ -40,6 +42,17 @@ pub fn load_membership(
     local_endpoint_id_hex: &str,
     max_neighbors: usize,
 ) -> anyhow::Result<MembershipSelection> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading membership metadata from {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "membership manifest {} must be a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= MAX_MEMBERSHIP_BYTES,
+        "membership manifest exceeds {MAX_MEMBERSHIP_BYTES} bytes"
+    );
     let encoded = std::fs::read_to_string(path)
         .with_context(|| format!("reading membership manifest from {}", path.display()))?;
     select_membership(
@@ -77,18 +90,22 @@ fn select_membership(
         "membership generation must be positive"
     );
 
+    anyhow::ensure!(
+        manifest.formation_id.len() <= MAX_MEMBER_NAME_BYTES
+            && is_safe_identifier(&manifest.formation_id),
+        "membership formation ID must contain 1-{MAX_MEMBER_NAME_BYTES} safe characters"
+    );
+    for member in &manifest.members {
+        anyhow::ensure!(
+            member.name.len() <= MAX_MEMBER_NAME_BYTES && is_safe_identifier(&member.name),
+            "membership node names must contain 1-{MAX_MEMBER_NAME_BYTES} safe characters"
+        );
+    }
     let node_ids: Vec<NodeId> = manifest
         .members
         .iter()
         .map(|member| NodeId::from(member.name.clone()))
         .collect();
-    anyhow::ensure!(
-        manifest
-            .members
-            .iter()
-            .all(|member| !member.name.trim().is_empty()),
-        "membership contains an empty node name"
-    );
     let topology = TopologyPlanner { max_neighbors }
         .plan(&node_ids)
         .context("planning membership overlay")?;
@@ -140,6 +157,13 @@ fn select_membership(
         members: node_ids,
         peers,
     })
+}
+
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[cfg(test)]
@@ -200,6 +224,22 @@ mod tests {
             "avian-test",
             "aircraft-000",
             &format!("{:064x}", 99),
+            4
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_member_names() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&manifest(5, "avian-test")).unwrap();
+        value["members"][2]["name"] = serde_json::json!("aircraft-002\nforged");
+        let encoded = value.to_string();
+        assert!(select_membership(
+            &encoded,
+            "avian-test",
+            "aircraft-000",
+            &format!("{:064x}", 1),
             4
         )
         .is_err());

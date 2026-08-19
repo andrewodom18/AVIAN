@@ -56,7 +56,7 @@ pub fn bind(path: &Path) -> anyhow::Result<UnixDatagram> {
     }
     let socket = UnixDatagram::bind(path)
         .with_context(|| format!("binding link socket {}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("setting link socket permissions on {}", path.display()))?;
     Ok(socket)
 }
@@ -69,4 +69,24 @@ pub async fn send(path: &Path, observation: LinkMonitorObservation) -> anyhow::R
         .await
         .with_context(|| format!("sending link observation to {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn observation_socket_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("link.sock");
+        let socket = bind(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(socket);
+    }
 }

@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::config::{CommandConfig, CommandMode};
 
 const STATE_SCHEMA_VERSION: u16 = 1;
+const MAX_KEY_FILE_BYTES: u64 = 4_096;
 
 pub struct CommandRuntime {
     config: CommandConfig,
@@ -281,6 +282,18 @@ fn read_verifying_key(path: &Path) -> anyhow::Result<VerifyingKey> {
 }
 
 fn read_key_bytes(path: &Path) -> anyhow::Result<[u8; 32]> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading key metadata {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "key {} must be a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= MAX_KEY_FILE_BYTES,
+        "key {} exceeds {MAX_KEY_FILE_BYTES} bytes",
+        path.display()
+    );
     let encoded =
         std::fs::read_to_string(path).with_context(|| format!("reading key {}", path.display()))?;
     let decoded = STANDARD
@@ -294,10 +307,14 @@ fn read_key_bytes(path: &Path) -> anyhow::Result<[u8; 32]> {
 #[cfg(unix)]
 fn validate_private_permissions(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)
-        .with_context(|| format!("reading permissions for {}", path.display()))?
-        .permissions()
-        .mode();
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading permissions for {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "private key {} must be a regular file",
+        path.display()
+    );
+    let mode = metadata.permissions().mode();
     anyhow::ensure!(
         mode & 0o077 == 0,
         "private key {} must not be accessible by group or other users",

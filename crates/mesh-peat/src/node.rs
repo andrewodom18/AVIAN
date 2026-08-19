@@ -514,6 +514,14 @@ mod tests {
     }
 
     #[test]
+    fn readers_accept_v1_while_new_records_emit_v2() {
+        let mut existing = mission_record();
+        existing.schema_version = 1;
+        existing.validate().unwrap();
+        assert_eq!(mission_record().schema_version, AVIAN_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn peer_descriptor_parser_rejects_short_ids() {
         assert!(matches!(
             "abcd@127.0.0.1:9000".parse::<PeerDescriptor>(),
@@ -553,16 +561,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn two_nodes_converge_over_real_peat_iroh() {
+    async fn dual_address_peer_converges_over_available_fallback() {
         let storage_a = TempDir::new().unwrap();
         let storage_b = TempDir::new().unwrap();
         let shared_key = FormationKey::generate_secret();
         let node_a = PeatNode::start(node_config("avian-test/node-a", &storage_a, &shared_key))
             .await
             .unwrap();
-        let node_b = PeatNode::start(node_config("avian-test/node-b", &storage_b, &shared_key))
-            .await
-            .unwrap();
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let node_b_address = reservation.local_addr().unwrap();
+        drop(reservation);
+        let mut node_b_config = node_config("avian-test/node-b", &storage_b, &shared_key);
+        node_b_config.bind_address = node_b_address;
+        let node_b = PeatNode::start(node_b_config.clone()).await.unwrap();
 
         assert_eq!(
             derive_peat_endpoint_id(&shared_key, "avian-test/node-a").unwrap(),

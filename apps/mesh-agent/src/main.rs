@@ -665,9 +665,11 @@ async fn handle_control_request(
             detail: "record limit must be 1-500".into(),
         },
         ControlRequest::EmergencyRtl { target }
-            if !target.trim().is_empty()
+            if !target.is_empty()
                 && target.len() <= 128
-                && !target.contains(['\0', '\n', '\r']) =>
+                && target.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                }) =>
         {
             match commands.issue_rtl(NodeId::from(target), unix_time_ms()) {
                 Ok(command) => {
@@ -707,7 +709,8 @@ async fn handle_control_request(
         }
         ControlRequest::EmergencyRtl { .. } => ControlResponse::Error {
             code: "invalid_target".into(),
-            detail: "target must contain 1-128 safe characters".into(),
+            detail: "target must contain 1-128 ASCII letters, digits, dots, dashes, or underscores"
+                .into(),
         },
     };
     let _ = envelope.respond_to.send(response);
@@ -917,11 +920,14 @@ async fn process_emergency_commands(
         }
     };
     for (_, record) in records {
+        let now_ms = unix_time_ms();
+        if record.is_expired_at(now_ms) {
+            continue;
+        }
         let MeshPayload::EmergencyCommand(command) = record.payload else {
             continue;
         };
-        let now_ms = unix_time_ms();
-        let system_locked = status.mavlink.connected && status.mavlink.target_system_id.is_some();
+        let system_locked = mavlink_system_lock_is_fresh(status, now_ms);
         let evaluation = match commands.evaluate(&command, now_ms, system_locked) {
             Ok(value) => value,
             Err(error) => {
@@ -1341,11 +1347,7 @@ async fn connect_unavailable_peers(
             .find(|value| value.endpoint_id == peer.endpoint_id_hex)
             .is_some_and(|value| value.connected);
         if !node.is_peer_connected(peer) {
-            if let Err(error) = node.connect(peer).await {
-                if was_connected {
-                    eprintln!("Peer {} lost: {error}", peer.name);
-                }
-            }
+            let _ = node.connect(peer).await;
         }
         let connected = node.is_peer_connected(peer);
         if connected != was_connected {
@@ -1366,9 +1368,19 @@ async fn connect_unavailable_peers(
     }
 }
 
+fn mavlink_system_lock_is_fresh(status: &AgentStatus, now_ms: u64) -> bool {
+    status.mavlink.connected
+        && status.mavlink.target_system_id.is_some()
+        && status
+            .mavlink
+            .last_message_at_ms
+            .is_some_and(|at| now_ms.saturating_sub(at) <= 5_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mesh_agent::config::ConfiguredNodeRole;
 
     #[test]
     fn relay_runtime_configuration_sample_decodes_for_the_onboard_agent() {
@@ -1380,6 +1392,24 @@ mod tests {
         let runtime = RelayRuntimeState::new(configuration);
         assert_eq!(runtime.current_generation, 4);
         assert!(runtime.current_relay_members.is_empty());
+    }
+
+    #[test]
+    fn command_system_lock_must_be_fresh() {
+        let mut status = AgentStatus::new(
+            "air-1".into(),
+            ConfiguredNodeRole::Aircraft,
+            1_000,
+            CommandMode::DryRun,
+            true,
+            false,
+            0,
+        );
+        status.mavlink.connected = true;
+        status.mavlink.target_system_id = Some(1);
+        status.mavlink.last_message_at_ms = Some(1_000);
+        assert!(mavlink_system_lock_is_fresh(&status, 6_000));
+        assert!(!mavlink_system_lock_is_fresh(&status, 6_001));
     }
 
     #[test]

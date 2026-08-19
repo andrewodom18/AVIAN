@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::{collections::BTreeSet, fs};
 
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
@@ -9,6 +10,11 @@ use mesh_peat::PeerDescriptor;
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_SCHEMA_VERSION: u16 = 1;
+const MAX_CONFIG_BYTES: u64 = 1_048_576;
+const MAX_LOCAL_MESSAGE_BYTES: usize = 1_048_576;
+const MAX_COMMAND_ACK_TIMEOUT_MS: u64 = 5_000;
+const MAX_COMMAND_RETRIES: u8 = 3;
+const MAX_COMMAND_ACK_BUDGET_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -581,7 +587,7 @@ impl ResolvedConfig {
                         issuer
                     })
                     .collect(),
-                state_file: resolve_path(&storage, commands.state_file),
+                state_file: resolve_path(base, commands.state_file),
                 lifetime_ms: commands.lifetime_ms,
                 poll_ms: commands.poll_ms,
                 ack_timeout_ms: commands.ack_timeout_ms,
@@ -609,12 +615,8 @@ impl ResolvedConfig {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        if self.name.trim().is_empty() {
-            bail!("node name cannot be empty");
-        }
-        if self.formation_id.trim().is_empty() {
-            bail!("formation ID cannot be empty");
-        }
+        validate_identifier(&self.name, "node name")?;
+        validate_identifier(&self.formation_id, "formation ID")?;
         if !self.telemetry_hz.is_finite() || !(0.1..=20.0).contains(&self.telemetry_hz) {
             bail!("telemetry_hz must be between 0.1 and 20.0");
         }
@@ -626,8 +628,19 @@ impl ResolvedConfig {
         if self.peers.len() > self.max_mesh_peers {
             bail!("configured peers exceed max_mesh_peers");
         }
-        if self.relay_evaluation_ms == 0 || self.sockets.max_message_bytes == 0 {
-            bail!("relay evaluation and socket message limits must be positive");
+        if self.relay_evaluation_ms == 0 {
+            bail!("relay evaluation interval must be positive");
+        }
+        if !(1_024..=MAX_LOCAL_MESSAGE_BYTES).contains(&self.sockets.max_message_bytes) {
+            bail!("socket message limit must be between 1024 and {MAX_LOCAL_MESSAGE_BYTES}");
+        }
+        let socket_paths = [
+            &self.sockets.control,
+            &self.sockets.payload,
+            &self.sockets.link_observation,
+        ];
+        if socket_paths.iter().collect::<BTreeSet<_>>().len() != socket_paths.len() {
+            bail!("control, payload, and link-observation sockets must use distinct paths");
         }
         if self.mavlink_address.is_some() != self.flight_stack.is_some() {
             bail!("MAVLink address and flight stack must be configured together");
@@ -652,16 +665,64 @@ impl ResolvedConfig {
         {
             bail!("command timing values must be positive");
         }
+        if self.commands.ack_timeout_ms > MAX_COMMAND_ACK_TIMEOUT_MS
+            || self.commands.retries > MAX_COMMAND_RETRIES
+        {
+            bail!(
+                "command ACK timeout must not exceed {MAX_COMMAND_ACK_TIMEOUT_MS} ms and retries must not exceed {MAX_COMMAND_RETRIES}"
+            );
+        }
+        if self
+            .commands
+            .ack_timeout_ms
+            .saturating_mul(u64::from(self.commands.retries) + 1)
+            > MAX_COMMAND_ACK_BUDGET_MS
+        {
+            bail!(
+                "command ACK timeout multiplied by attempts must not exceed {MAX_COMMAND_ACK_BUDGET_MS} ms"
+            );
+        }
+        if self.commands.issuers.len() > 32 {
+            bail!("command configuration cannot contain more than 32 issuers");
+        }
+        let mut issuer_ids = BTreeSet::new();
+        for issuer in &self.commands.issuers {
+            validate_identifier(&issuer.id, "command issuer ID")?;
+            if !issuer_ids.insert(issuer.id.as_str()) {
+                bail!("command issuer IDs must be unique");
+            }
+        }
+        let mut peer_names = BTreeSet::new();
+        let mut peer_endpoints = BTreeSet::new();
+        for peer in &self.peers {
+            validate_identifier(&peer.name, "peer name")?;
+            if !peer_names.insert(peer.name.as_str())
+                || !peer_endpoints.insert(peer.endpoint_id_hex.as_str())
+            {
+                bail!("configured peer names and endpoint IDs must be unique");
+            }
+        }
         if self.radio.enabled
             && (self.radio.observation_interval_seconds == 0 || self.radio.probe_timeout_ms == 0)
         {
             bail!("radio observation interval and probe timeout must be positive");
         }
+        if self.radio.devices.len() > 16
+            || self.radio.probes.len() > 64
+            || self.radio.links.len() > 64
+        {
+            bail!("radio configuration exceeds 16 devices, 64 probes, or 64 links");
+        }
+        let mut radio_names = BTreeSet::new();
+        for device in &self.radio.devices {
+            validate_identifier(&device.name, "radio device name")?;
+            if !radio_names.insert(device.name.as_str()) {
+                bail!("radio device names must be unique");
+            }
+        }
         for probe in &self.radio.probes {
-            if probe.peer.trim().is_empty()
-                || !(1..=100).contains(&probe.packets)
-                || !(32..=1_400).contains(&probe.payload_bytes)
-            {
+            validate_identifier(&probe.peer, "radio probe peer")?;
+            if !(1..=100).contains(&probe.packets) || !(32..=1_400).contains(&probe.payload_bytes) {
                 bail!("radio probes require a peer, 1-100 packets, and 32-1400 byte payloads");
             }
             probe
@@ -709,7 +770,12 @@ pub fn validate_private_file_permissions(_path: &Path, _label: &str) -> anyhow::
 }
 
 fn read_config(path: &Path) -> anyhow::Result<FileConfig> {
-    let encoded = std::fs::read_to_string(path)
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("reading AVIAN configuration metadata {}", path.display()))?;
+    if metadata.len() > MAX_CONFIG_BYTES {
+        bail!("AVIAN configuration exceeds {MAX_CONFIG_BYTES} bytes");
+    }
+    let encoded = fs::read_to_string(path)
         .with_context(|| format!("reading AVIAN configuration {}", path.display()))?;
     let config: FileConfig = toml::from_str(&encoded)
         .with_context(|| format!("decoding AVIAN configuration {}", path.display()))?;
@@ -721,6 +787,18 @@ fn read_config(path: &Path) -> anyhow::Result<FileConfig> {
         );
     }
     Ok(config)
+}
+
+fn validate_identifier(value: &str, label: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        bail!("{label} must contain 1-128 ASCII letters, digits, dots, dashes, or underscores");
+    }
+    Ok(())
 }
 
 fn parse_tagged_peers(peers: &[FilePeer]) -> anyhow::Result<Vec<TaggedPeer>> {
@@ -855,6 +933,10 @@ address = "10.1.0.1:9000"
         assert_eq!(
             resolved.formation_key_file,
             directory.path().join("formation.key")
+        );
+        assert_eq!(
+            resolved.commands.state_file,
+            directory.path().join("command-state.json")
         );
         assert_eq!(
             resolved.tagged_peers[0].addresses[0].underlay,
@@ -1006,6 +1088,57 @@ signing_key_file = "ground.key"
             std::fs::write(&path, contents).unwrap();
             ResolvedConfig::load(cli(path)).unwrap();
         }
+    }
+
+    #[test]
+    fn duplicate_socket_paths_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("avian.toml");
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 1
+[node]
+name = "air-1"
+role = "aircraft"
+[peat]
+formation_key_file = "formation.key"
+[sockets]
+control = "same.sock"
+payload = "same.sock"
+link_observation = "link.sock"
+max_message_bytes = 65536
+[commands]
+ack_timeout_ms = 1000
+retries = 1
+"#,
+        )
+        .unwrap();
+        let error = ResolvedConfig::load(cli(path)).unwrap_err().to_string();
+        assert!(error.contains("distinct paths"));
+    }
+
+    #[test]
+    fn unbounded_command_retry_budget_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("avian.toml");
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 1
+[node]
+name = "air-1"
+role = "aircraft"
+[peat]
+formation_key_file = "formation.key"
+[commands]
+ack_timeout_ms = 2000
+retries = 2
+"#,
+        )
+        .unwrap();
+        let error = ResolvedConfig::load(cli(path)).unwrap_err().to_string();
+        assert!(error.contains("multiplied by attempts"));
     }
 
     #[test]
