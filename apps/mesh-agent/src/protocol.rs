@@ -1,7 +1,10 @@
+use std::net::SocketAddr;
+
 use mesh_core::DeliveryClass;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::Underlay;
 use crate::status::AgentStatus;
 
 pub const LOCAL_PROTOCOL_VERSION: u16 = 1;
@@ -21,15 +24,50 @@ pub enum ControlRequest {
     EmergencyRtl {
         target: String,
     },
+    ConfigurePeer {
+        formation_id: String,
+        name: String,
+        endpoint_id: String,
+        addresses: Vec<PeerConnectionAddress>,
+    },
+    ConnectionInfo {
+        addresses: Vec<PeerConnectionAddress>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlResponse {
-    Status { status: Box<AgentStatus> },
-    Records { records: Vec<RecordView> },
-    CommandIssued { command_id: String },
-    Error { code: String, detail: String },
+    Status {
+        status: Box<AgentStatus>,
+    },
+    Records {
+        records: Vec<RecordView>,
+    },
+    CommandIssued {
+        command_id: String,
+    },
+    PeerConfigured {
+        name: String,
+        connected: bool,
+    },
+    ConnectionInfo {
+        formation_id: String,
+        name: String,
+        endpoint_id: String,
+        addresses: Vec<PeerConnectionAddress>,
+    },
+    Error {
+        code: String,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerConnectionAddress {
+    pub underlay: Underlay,
+    pub address: SocketAddr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,5 +135,17 @@ mod tests {
         assert!(decode_request(unknown).is_err());
         let wrong = br#"{"protocol_version":2,"body":{"type":"status"}}"#;
         assert!(decode_request(wrong).is_err());
+    }
+
+    #[test]
+    fn connection_request_is_strict_and_versioned() {
+        let encoded = br#"{"protocol_version":1,"body":{"type":"configure_peer","formation_id":"mission-alpha","name":"aircraft-001","endpoint_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","addresses":[{"underlay":"ethernet","address":"192.0.2.4:9000"}]}}"#;
+        let request = decode_request(encoded).unwrap();
+        assert!(
+            matches!(request, ControlRequest::ConfigurePeer { name, .. } if name == "aircraft-001")
+        );
+
+        let unknown = br#"{"protocol_version":1,"body":{"type":"configure_peer","formation_id":"mission-alpha","name":"aircraft-001","endpoint_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","addresses":[{"underlay":"ethernet","address":"192.0.2.4:9000","secret":"no"}]}}"#;
+        assert!(decode_request(unknown).is_err());
     }
 }

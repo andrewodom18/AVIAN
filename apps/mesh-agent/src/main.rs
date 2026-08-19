@@ -24,11 +24,13 @@ mod membership;
 use membership::load_membership;
 use mesh_agent::commands::{AckOutcome, CommandEvaluation, CommandRuntime};
 use mesh_agent::config::{
-    validate_private_file_permissions, CliArgs, CommandMode, ResolvedConfig, Underlay,
+    validate_private_file_permissions, CliArgs, CommandMode, ConfiguredNodeRole, ResolvedConfig,
+    TaggedAddress, TaggedPeer, Underlay,
 };
 use mesh_agent::link_monitor_protocol;
+use mesh_agent::paired_peers;
 use mesh_agent::payload_ingress::{self, PayloadEvent};
-use mesh_agent::protocol::{ControlRequest, ControlResponse, RecordView};
+use mesh_agent::protocol::{ControlRequest, ControlResponse, PeerConnectionAddress, RecordView};
 use mesh_agent::status::{
     AgentStatus, PeerAddressStatus, PeerStatus, RadioDeviceStatus, UnderlayStatus,
 };
@@ -144,23 +146,43 @@ async fn main() -> anyhow::Result<()> {
     let local_peer = node
         .peer_descriptor()
         .context("reading local PEAT address")?;
-    let (peers, swarm_members, membership_generation) = if let Some(path) = &args.membership_file {
-        let selection = load_membership(
-            path,
-            &args.formation_id,
-            &args.name,
-            &node.endpoint_id_hex(),
+    let (mut peers, swarm_members, membership_generation) =
+        if let Some(path) = &args.membership_file {
+            let selection = load_membership(
+                path,
+                &args.formation_id,
+                &args.name,
+                &node.endpoint_id_hex(),
+                args.max_mesh_peers,
+            )?;
+            println!(
+                "Membership generation {} selected {} direct PEAT neighbors",
+                selection.generation,
+                selection.peers.len()
+            );
+            (selection.peers, selection.members, selection.generation)
+        } else {
+            (args.peers.clone(), vec![node_id.clone()], 0)
+        };
+    let paired_peer_path = args.storage.join("paired-peers.json");
+    let mut persisted_paired_peers = paired_peers::load(&paired_peer_path)?;
+    anyhow::ensure!(
+        args.role == ConfiguredNodeRole::Ground || persisted_paired_peers.is_empty(),
+        "paired peers are permitted only on a ground node"
+    );
+    anyhow::ensure!(
+        args.membership_file.is_none() || persisted_paired_peers.is_empty(),
+        "paired peers cannot be combined with a managed membership file"
+    );
+    let mut tagged_peers = args.tagged_peers.clone();
+    for paired_peer in persisted_paired_peers.iter().cloned() {
+        merge_runtime_peer(
+            &mut peers,
+            &mut tagged_peers,
+            paired_peer,
             args.max_mesh_peers,
         )?;
-        println!(
-            "Membership generation {} selected {} direct PEAT neighbors",
-            selection.generation,
-            selection.peers.len()
-        );
-        (selection.peers, selection.members, selection.generation)
-    } else {
-        (args.peers.clone(), vec![node_id.clone()], 0)
-    };
+    }
     let started_at_ms = unix_time_ms();
     let mut status = AgentStatus::new(
         args.name.clone(),
@@ -174,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
             .saturating_mul(3_000),
     );
     status.node.endpoint_id = Some(node.endpoint_id_hex());
-    status.peers = peer_statuses(&args, &peers, started_at_ms);
+    status.peers = peer_statuses(&tagged_peers, &peers, started_at_ms);
     publish_node_advertisement(&node, &node_id, node_profile(&args, &node_id)?).await?;
     let (control_sender, mut control_receiver) = mpsc::channel(32);
     let control_task = spawn_control_server(
@@ -254,6 +276,11 @@ async fn main() -> anyhow::Result<()> {
                         &node,
                         &mut status,
                         &mut command_runtime,
+                        &args,
+                        &paired_peer_path,
+                        &mut persisted_paired_peers,
+                        &mut peers,
+                        &mut tagged_peers,
                         control,
                     ).await;
                 }
@@ -592,15 +619,14 @@ async fn publish_node_advertisement(
 }
 
 fn peer_statuses(
-    config: &ResolvedConfig,
+    tagged_peers: &[TaggedPeer],
     peers: &[PeerDescriptor],
     now_ms: u64,
 ) -> Vec<PeerStatus> {
     peers
         .iter()
         .map(|peer| {
-            let tagged = config
-                .tagged_peers
+            let tagged = tagged_peers
                 .iter()
                 .find(|configured| configured.name == peer.name);
             let addresses = peer
@@ -629,10 +655,16 @@ fn peer_statuses(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_control_request(
     node: &PeatNode,
     status: &mut AgentStatus,
     commands: &mut CommandRuntime,
+    config: &ResolvedConfig,
+    paired_peer_path: &std::path::Path,
+    persisted_paired_peers: &mut Vec<TaggedPeer>,
+    peers: &mut Vec<PeerDescriptor>,
+    tagged_peers: &mut Vec<TaggedPeer>,
     envelope: ControlEnvelope,
 ) {
     let response = match envelope.request {
@@ -712,8 +744,319 @@ async fn handle_control_request(
             detail: "target must contain 1-128 ASCII letters, digits, dots, dashes, or underscores"
                 .into(),
         },
+        ControlRequest::ConfigurePeer {
+            formation_id,
+            name,
+            endpoint_id,
+            addresses,
+        } => {
+            match configure_peer(
+                node,
+                status,
+                config,
+                paired_peer_path,
+                persisted_paired_peers,
+                peers,
+                tagged_peers,
+                formation_id,
+                name,
+                endpoint_id,
+                addresses,
+            )
+            .await
+            {
+                Ok((name, connected)) => ControlResponse::PeerConfigured { name, connected },
+                Err(error) => ControlResponse::Error {
+                    code: "peer_configuration_rejected".into(),
+                    detail: error.to_string(),
+                },
+            }
+        }
+        ControlRequest::ConnectionInfo { mut addresses }
+            if config.role == ConfiguredNodeRole::Aircraft
+                && !addresses.is_empty()
+                && addresses.len() <= 8
+                && addresses.iter().all(valid_pairing_address) =>
+        {
+            addresses.sort_by_key(|value| underlay_priority(value.underlay));
+            addresses.dedup_by_key(|value| value.address);
+            ControlResponse::ConnectionInfo {
+                formation_id: config.formation_id.clone(),
+                name: config.name.clone(),
+                endpoint_id: node.endpoint_id_hex(),
+                addresses,
+            }
+        }
+        ControlRequest::ConnectionInfo { .. } => ControlResponse::Error {
+            code: "invalid_connection_addresses".into(),
+            detail: "connection codes require an aircraft node and 1-8 routable unicast addresses"
+                .into(),
+        },
     };
     let _ = envelope.respond_to.send(response);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn configure_peer(
+    node: &PeatNode,
+    status: &mut AgentStatus,
+    config: &ResolvedConfig,
+    paired_peer_path: &std::path::Path,
+    persisted_paired_peers: &mut Vec<TaggedPeer>,
+    peers: &mut Vec<PeerDescriptor>,
+    tagged_peers: &mut Vec<TaggedPeer>,
+    formation_id: String,
+    name: String,
+    endpoint_id: String,
+    addresses: Vec<PeerConnectionAddress>,
+) -> anyhow::Result<(String, bool)> {
+    anyhow::ensure!(
+        config.role == ConfiguredNodeRole::Ground,
+        "aircraft pairing is available only on a ground node"
+    );
+    anyhow::ensure!(
+        config.membership_file.is_none(),
+        "managed-membership nodes cannot accept local pairing changes"
+    );
+    anyhow::ensure!(
+        formation_id == config.formation_id,
+        "connection code belongs to a different AVIAN formation"
+    );
+
+    let mut addresses = addresses
+        .into_iter()
+        .map(|value| TaggedAddress {
+            underlay: value.underlay,
+            address: value.address,
+        })
+        .collect::<Vec<_>>();
+    addresses.sort_by_key(|value| underlay_priority(value.underlay));
+    addresses.dedup_by_key(|value| value.address);
+    let paired_peer = TaggedPeer {
+        name: name.clone(),
+        endpoint_id,
+        addresses,
+    };
+
+    let staged = stage_paired_peer(
+        &config.peers,
+        persisted_paired_peers,
+        peers,
+        tagged_peers,
+        paired_peer.clone(),
+        config.max_mesh_peers,
+    )?;
+    paired_peers::persist(paired_peer_path, &staged.persisted)?;
+
+    *persisted_paired_peers = staged.persisted;
+    *peers = staged.peers;
+    *tagged_peers = staged.tagged_peers;
+    if let Some(replaced_descriptor) = staged.replaced_descriptor {
+        node.disconnect(&replaced_descriptor)?;
+    }
+    let descriptor = peers
+        .iter()
+        .find(|peer| peer.name == name)
+        .context("paired peer disappeared during validation")?;
+    if !node.is_peer_connected(descriptor) {
+        let _ = time::timeout(Duration::from_secs(2), node.connect(descriptor)).await;
+    }
+    let connected = node.is_peer_connected(descriptor);
+
+    let previous = std::mem::take(&mut status.peers);
+    status.peers = peer_statuses(tagged_peers, peers, unix_time_ms());
+    for peer in &mut status.peers {
+        peer.connected = peers
+            .iter()
+            .find(|candidate| candidate.endpoint_id_hex == peer.endpoint_id)
+            .is_some_and(|candidate| node.is_peer_connected(candidate));
+        if let Some(old) = previous
+            .iter()
+            .find(|candidate| candidate.endpoint_id == peer.endpoint_id)
+        {
+            if old.connected == peer.connected {
+                peer.last_transition_at_ms = old.last_transition_at_ms;
+            }
+            peer.selected_underlay = old.selected_underlay;
+        }
+    }
+    if let Some(peer) = status.peers.iter_mut().find(|peer| peer.name == name) {
+        peer.connected = connected;
+    }
+    println!("Paired ground node with aircraft '{name}'");
+    Ok((name, connected))
+}
+
+struct StagedPairedPeer {
+    persisted: Vec<TaggedPeer>,
+    peers: Vec<PeerDescriptor>,
+    tagged_peers: Vec<TaggedPeer>,
+    replaced_descriptor: Option<PeerDescriptor>,
+}
+
+fn stage_paired_peer(
+    configured_peers: &[PeerDescriptor],
+    persisted_paired_peers: &[TaggedPeer],
+    peers: &[PeerDescriptor],
+    tagged_peers: &[TaggedPeer],
+    paired_peer: TaggedPeer,
+    max_mesh_peers: usize,
+) -> anyhow::Result<StagedPairedPeer> {
+    let static_peer = configured_peers
+        .iter()
+        .find(|peer| peer.name == paired_peer.name);
+    if let Some(static_peer) = static_peer {
+        anyhow::ensure!(
+            static_peer.endpoint_id_hex == paired_peer.endpoint_id,
+            "peer name is managed by the agent configuration and cannot be replaced"
+        );
+    }
+    let replacing_dynamic = static_peer.is_none()
+        && persisted_paired_peers.iter().any(|peer| {
+            peer.name == paired_peer.name && peer.endpoint_id != paired_peer.endpoint_id
+        });
+    let replaced_descriptor = if replacing_dynamic {
+        peers
+            .iter()
+            .find(|peer| peer.name == paired_peer.name)
+            .cloned()
+    } else {
+        None
+    };
+
+    let mut next_persisted = persisted_paired_peers.to_vec();
+    if let Some(existing) = next_persisted
+        .iter_mut()
+        .find(|peer| peer.name == paired_peer.name)
+    {
+        *existing = paired_peer.clone();
+    } else {
+        next_persisted.push(paired_peer.clone());
+    }
+    next_persisted.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut next_peers = peers.to_vec();
+    let mut next_tagged_peers = tagged_peers.to_vec();
+    if replacing_dynamic {
+        next_peers.retain(|peer| peer.name != paired_peer.name);
+        next_tagged_peers.retain(|peer| peer.name != paired_peer.name);
+    }
+    merge_runtime_peer(
+        &mut next_peers,
+        &mut next_tagged_peers,
+        paired_peer,
+        max_mesh_peers,
+    )?;
+    Ok(StagedPairedPeer {
+        persisted: next_persisted,
+        peers: next_peers,
+        tagged_peers: next_tagged_peers,
+        replaced_descriptor,
+    })
+}
+
+fn merge_runtime_peer(
+    peers: &mut Vec<PeerDescriptor>,
+    tagged_peers: &mut Vec<TaggedPeer>,
+    mut paired_peer: TaggedPeer,
+    max_mesh_peers: usize,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        valid_pairing_identifier(&paired_peer.name),
+        "invalid peer name"
+    );
+    anyhow::ensure!(
+        !paired_peer.addresses.is_empty() && paired_peer.addresses.len() <= 8,
+        "a paired peer must have 1-8 addresses"
+    );
+    anyhow::ensure!(
+        paired_peer.addresses.iter().all(|value| {
+            valid_pairing_address(&PeerConnectionAddress {
+                underlay: value.underlay,
+                address: value.address,
+            })
+        }),
+        "paired addresses must be routable unicast endpoints with a nonzero port"
+    );
+    paired_peer
+        .addresses
+        .sort_by_key(|value| underlay_priority(value.underlay));
+    paired_peer.addresses.dedup_by_key(|value| value.address);
+    let descriptor = PeerDescriptor::with_addresses(
+        paired_peer.name.clone(),
+        paired_peer.endpoint_id.clone(),
+        paired_peer
+            .addresses
+            .iter()
+            .map(|value| value.address)
+            .collect(),
+    )?;
+
+    anyhow::ensure!(
+        !peers.iter().any(|peer| {
+            peer.name != descriptor.name && peer.endpoint_id_hex == descriptor.endpoint_id_hex
+        }),
+        "endpoint identity is already assigned to another peer"
+    );
+    if let Some(existing) = peers.iter_mut().find(|peer| peer.name == descriptor.name) {
+        anyhow::ensure!(
+            existing.endpoint_id_hex == descriptor.endpoint_id_hex,
+            "peer name is already assigned to a different endpoint"
+        );
+        *existing = descriptor;
+    } else {
+        anyhow::ensure!(
+            peers.len() < max_mesh_peers,
+            "configured peer limit is reached"
+        );
+        peers.push(descriptor);
+    }
+    if let Some(existing) = tagged_peers
+        .iter_mut()
+        .find(|peer| peer.name == paired_peer.name)
+    {
+        *existing = paired_peer;
+    } else {
+        tagged_peers.push(paired_peer);
+    }
+    Ok(())
+}
+
+fn valid_pairing_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn valid_pairing_address(value: &PeerConnectionAddress) -> bool {
+    value.address.port() != 0 && valid_pairing_ip(value.address.ip())
+}
+
+fn valid_pairing_ip(value: std::net::IpAddr) -> bool {
+    match value {
+        std::net::IpAddr::V4(value) => {
+            !value.is_unspecified()
+                && !value.is_multicast()
+                && !value.is_loopback()
+                && !value.is_broadcast()
+        }
+        std::net::IpAddr::V6(value) => value.to_ipv4_mapped().map_or_else(
+            || !value.is_unspecified() && !value.is_multicast() && !value.is_loopback(),
+            |mapped| valid_pairing_ip(mapped.into()),
+        ),
+    }
+}
+
+fn underlay_priority(value: Underlay) -> u8 {
+    match value {
+        Underlay::Silvus => 0,
+        Underlay::Ethernet => 1,
+        Underlay::Wifi => 2,
+        Underlay::Satellite => 3,
+        Underlay::Other => 4,
+    }
 }
 
 async fn ingest_payload_event(
@@ -1454,5 +1797,96 @@ mod tests {
 
         let malformed = valid.replace("\"sample_window_ms\":500", "\"sample_window_ms\":0");
         assert!(decode_relay_observation(malformed.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn paired_peer_is_validated_ordered_and_bounded() {
+        let mut peers = Vec::new();
+        let mut tagged = Vec::new();
+        let paired = TaggedPeer {
+            name: "aircraft-001".into(),
+            endpoint_id: "a".repeat(64),
+            addresses: vec![
+                TaggedAddress {
+                    underlay: Underlay::Satellite,
+                    address: "198.51.100.7:9000".parse().unwrap(),
+                },
+                TaggedAddress {
+                    underlay: Underlay::Ethernet,
+                    address: "192.0.2.4:9000".parse().unwrap(),
+                },
+            ],
+        };
+        merge_runtime_peer(&mut peers, &mut tagged, paired, 2).unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].addresses()[0], "192.0.2.4:9000".parse().unwrap());
+        assert_eq!(tagged[0].addresses[0].underlay, Underlay::Ethernet);
+
+        let name_conflict = TaggedPeer {
+            endpoint_id: "b".repeat(64),
+            ..tagged[0].clone()
+        };
+        assert!(merge_runtime_peer(&mut peers, &mut tagged, name_conflict, 2).is_err());
+        let invalid_address = TaggedPeer {
+            name: "aircraft-002".into(),
+            endpoint_id: "c".repeat(64),
+            addresses: vec![TaggedAddress {
+                underlay: Underlay::Ethernet,
+                address: "127.0.0.1:9000".parse().unwrap(),
+            }],
+        };
+        assert!(merge_runtime_peer(&mut peers, &mut tagged, invalid_address, 2).is_err());
+        for address in ["255.255.255.255:9000", "[::ffff:127.0.0.1]:9000"] {
+            assert!(!valid_pairing_address(&PeerConnectionAddress {
+                underlay: Underlay::Ethernet,
+                address: address.parse().unwrap(),
+            }));
+        }
+    }
+
+    #[test]
+    fn corrected_dynamic_pairing_replaces_identity_but_static_pairing_does_not() {
+        let old = TaggedPeer {
+            name: "aircraft-001".into(),
+            endpoint_id: "a".repeat(64),
+            addresses: vec![TaggedAddress {
+                underlay: Underlay::Ethernet,
+                address: "192.0.2.4:9000".parse().unwrap(),
+            }],
+        };
+        let replacement = TaggedPeer {
+            endpoint_id: "b".repeat(64),
+            addresses: vec![TaggedAddress {
+                underlay: Underlay::Satellite,
+                address: "198.51.100.7:9000".parse().unwrap(),
+            }],
+            ..old.clone()
+        };
+        let mut peers = Vec::new();
+        let mut tagged = Vec::new();
+        merge_runtime_peer(&mut peers, &mut tagged, old.clone(), 2).unwrap();
+
+        let staged =
+            stage_paired_peer(&[], &tagged, &peers, &tagged, replacement.clone(), 2).unwrap();
+        assert_eq!(staged.persisted, vec![replacement.clone()]);
+        assert_eq!(staged.tagged_peers, vec![replacement]);
+        assert_eq!(staged.peers[0].endpoint_id_hex, "b".repeat(64));
+        assert_eq!(
+            staged.replaced_descriptor.unwrap().endpoint_id_hex,
+            "a".repeat(64)
+        );
+
+        assert!(stage_paired_peer(
+            &peers,
+            &tagged,
+            &peers,
+            &tagged,
+            TaggedPeer {
+                endpoint_id: "c".repeat(64),
+                ..old
+            },
+            2,
+        )
+        .is_err());
     }
 }

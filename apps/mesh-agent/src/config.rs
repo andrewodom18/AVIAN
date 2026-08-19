@@ -160,14 +160,16 @@ pub struct ResolvedConfig {
     pub radio: RadioConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaggedPeer {
     pub name: String,
     pub endpoint_id: String,
     pub addresses: Vec<TaggedAddress>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaggedAddress {
     pub underlay: Underlay,
     pub address: SocketAddr,

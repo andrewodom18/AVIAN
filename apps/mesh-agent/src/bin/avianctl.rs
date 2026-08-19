@@ -1,13 +1,19 @@
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
+use mesh_agent::config::Underlay;
 use mesh_agent::control::request;
-use mesh_agent::protocol::{ControlRequest, ControlResponse};
+use mesh_agent::protocol::{ControlRequest, ControlResponse, PeerConnectionAddress};
 use mesh_core::DeliveryClass;
 use rand_core::OsRng;
 
@@ -44,6 +50,36 @@ enum Command {
         #[command(subcommand)]
         command: EmergencyCommand,
     },
+    ConnectionCode {
+        /// Public aircraft endpoint in UNDERLAY=IP:PORT form. Repeat for fallbacks.
+        #[arg(long = "address", required = true)]
+        addresses: Vec<ConnectionAddressArg>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ConnectionAddressArg(PeerConnectionAddress);
+
+impl FromStr for ConnectionAddressArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (underlay, address) = value
+            .split_once('=')
+            .ok_or_else(|| "address must use UNDERLAY=IP:PORT".to_owned())?;
+        let underlay = match underlay {
+            "silvus" => Underlay::Silvus,
+            "ethernet" => Underlay::Ethernet,
+            "wifi" => Underlay::Wifi,
+            "satellite" => Underlay::Satellite,
+            "other" => Underlay::Other,
+            _ => return Err("underlay must be silvus, ethernet, wifi, satellite, or other".into()),
+        };
+        let address = address
+            .parse::<SocketAddr>()
+            .map_err(|_| "address must contain a valid IP and port".to_owned())?;
+        Ok(Self(PeerConnectionAddress { underlay, address }))
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -165,6 +201,41 @@ async fn main() -> anyhow::Result<()> {
                 other => response_error(other),
             }
         }
+        Command::ConnectionCode { addresses } => {
+            anyhow::ensure!(
+                (1..=8).contains(&addresses.len()),
+                "connection code requires 1-8 addresses"
+            );
+            let response = request(
+                &args.socket,
+                args.max_message_bytes,
+                ControlRequest::ConnectionInfo {
+                    addresses: addresses.into_iter().map(|value| value.0).collect(),
+                },
+            )
+            .await?;
+            match response {
+                ControlResponse::ConnectionInfo {
+                    formation_id,
+                    name,
+                    endpoint_id,
+                    addresses,
+                } => {
+                    let encoded = serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1,
+                        "formation_id": formation_id,
+                        "aircraft": {
+                            "name": name,
+                            "endpoint_id": endpoint_id,
+                            "addresses": addresses
+                        }
+                    }))?;
+                    println!("AVIAN1.{}", URL_SAFE_NO_PAD.encode(encoded));
+                    Ok(())
+                }
+                other => response_error(other),
+            }
+        }
     }
 }
 
@@ -218,4 +289,24 @@ fn write_new(path: &Path, value: &str, mode: u32) -> anyhow::Result<()> {
     writeln!(file, "{value}")?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_address_argument_is_strict() {
+        let parsed = "ethernet=192.0.2.4:9000"
+            .parse::<ConnectionAddressArg>()
+            .unwrap();
+        assert_eq!(parsed.0.underlay, Underlay::Ethernet);
+        assert_eq!(parsed.0.address, "192.0.2.4:9000".parse().unwrap());
+        assert!("ethernet=not-an-address"
+            .parse::<ConnectionAddressArg>()
+            .is_err());
+        assert!("secret=192.0.2.4:9000"
+            .parse::<ConnectionAddressArg>()
+            .is_err());
+    }
 }

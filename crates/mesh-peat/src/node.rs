@@ -318,6 +318,23 @@ impl PeatNode {
             .any(|endpoint_id| endpoint_id.to_string() == peer.endpoint_id_hex)
     }
 
+    /// Closes and forgets the current transport connection for a peer.
+    /// Runtime configuration remains the caller's responsibility.
+    pub fn disconnect(&self, peer: &PeerDescriptor) -> Result<(), PeatNodeError> {
+        let endpoint_id = peer
+            .endpoint_id_hex
+            .parse()
+            .map_err(|_| PeatNodeError::InvalidEndpointId)?;
+        if let Some(connection) = self.backend.transport().get_connection(&endpoint_id) {
+            connection.close(200u32.into(), b"peer removed from local configuration");
+        }
+        self.backend.transport().remove_connection(&endpoint_id);
+        self.backend
+            .coordinator()
+            .clear_peer_sync_state(endpoint_id);
+        Ok(())
+    }
+
     pub async fn put(&self, record_id: &str, record: &AvianRecord) -> Result<(), PeatNodeError> {
         validate_record_id(record_id)?;
         record.validate()?;
