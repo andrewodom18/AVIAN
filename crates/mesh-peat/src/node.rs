@@ -224,6 +224,7 @@ impl FromStr for PeerDescriptor {
 
 /// A runnable AVIAN node backed by PEAT's persistent Automerge sync engine and
 /// formation-authenticated Iroh QUIC transport. Hosted relays remain disabled.
+#[derive(Clone)]
 pub struct PeatNode {
     name: String,
     backend: Arc<AutomergeBackend>,
@@ -311,11 +312,15 @@ impl PeatNode {
     }
 
     pub fn is_peer_connected(&self, peer: &PeerDescriptor) -> bool {
+        self.is_endpoint_connected(&peer.endpoint_id_hex)
+    }
+
+    pub fn is_endpoint_connected(&self, endpoint_id_hex: &str) -> bool {
         self.backend
             .transport()
             .connected_peers()
             .iter()
-            .any(|endpoint_id| endpoint_id.to_string() == peer.endpoint_id_hex)
+            .any(|endpoint_id| endpoint_id.to_string() == endpoint_id_hex)
     }
 
     /// Closes and forgets the current transport connection for a peer.

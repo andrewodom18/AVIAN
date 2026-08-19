@@ -268,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             _ = peer_retry.tick() => {
-                connect_unavailable_peers(&node, &peers, &mut status).await;
+                schedule_unavailable_peer_connections(&node, &peers, &mut status);
             }
             control = control_receiver.recv() => {
                 if let Some(control) = control {
@@ -668,9 +668,12 @@ async fn handle_control_request(
     envelope: ControlEnvelope,
 ) {
     let response = match envelope.request {
-        ControlRequest::Status { .. } => ControlResponse::Status {
-            status: Box::new(status.snapshot(unix_time_ms())),
-        },
+        ControlRequest::Status { .. } => {
+            update_peer_connection_states(node, status);
+            ControlResponse::Status {
+                status: Box::new(status.snapshot(unix_time_ms())),
+            }
+        }
         ControlRequest::ListRecords { class, limit } if (1..=500).contains(&limit) => {
             match node.scan(class).await {
                 Ok(mut records) => {
@@ -1832,35 +1835,35 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-async fn connect_unavailable_peers(
+fn schedule_unavailable_peer_connections(
     node: &PeatNode,
     peers: &[PeerDescriptor],
     status: &mut AgentStatus,
 ) {
+    update_peer_connection_states(node, status);
     for peer in peers {
-        let was_connected = status
-            .peers
-            .iter()
-            .find(|value| value.endpoint_id == peer.endpoint_id_hex)
-            .is_some_and(|value| value.connected);
         if !node.is_peer_connected(peer) {
-            let _ = node.connect(peer).await;
+            let node = node.clone();
+            let peer = peer.clone();
+            tokio::spawn(async move {
+                let _ = time::timeout(Duration::from_secs(2), node.connect(&peer)).await;
+            });
         }
-        let connected = node.is_peer_connected(peer);
+    }
+}
+
+fn update_peer_connection_states(node: &PeatNode, status: &mut AgentStatus) {
+    for peer_status in &mut status.peers {
+        let was_connected = peer_status.connected;
+        let connected = node.is_endpoint_connected(&peer_status.endpoint_id);
         if connected != was_connected {
             if connected {
-                println!("Peer {} recovered", peer.name);
+                println!("Peer {} recovered", peer_status.name);
             } else {
-                eprintln!("Peer {} unavailable; reconnecting", peer.name);
+                eprintln!("Peer {} unavailable; reconnecting", peer_status.name);
             }
-            if let Some(peer_status) = status
-                .peers
-                .iter_mut()
-                .find(|value| value.endpoint_id == peer.endpoint_id_hex)
-            {
-                peer_status.connected = connected;
-                peer_status.last_transition_at_ms = unix_time_ms();
-            }
+            peer_status.connected = connected;
+            peer_status.last_transition_at_ms = unix_time_ms();
         }
     }
 }
