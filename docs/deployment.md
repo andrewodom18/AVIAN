@@ -163,12 +163,14 @@ sockets, and log files. Run `avian-ground-ui` as a third LaunchAgent with the
 same local control socket and `--disable-journal`. Verify all three processes
 after login before flight; the HTTP listener must remain on `127.0.0.1`.
 
-The Mac peer should list the aircraft's preferred direct/Silvus address first
-and its ZeroTier-over-Starshield address second. The aircraft should list the
-corresponding Mac addresses in the same order. This symmetric configuration
+The Mac peer should list every usable aircraft address, and the aircraft should
+list the corresponding Mac addresses. AVIAN normalizes them to Silvus,
+Ethernet, Wi-Fi, satellite, then other, so local links are attempted before the
+higher-latency ZeroTier-over-Starshield fallback. This symmetric configuration
 avoids relying on which endpoint wins PEAT's deterministic connection
 initiation. A cable removal can then interrupt the direct session and trigger a
-retry through the satellite-tagged address without taking down the local UI.
+retry through Wi-Fi or the satellite-tagged address without taking down the
+local UI.
 
 ## Failure recovery
 

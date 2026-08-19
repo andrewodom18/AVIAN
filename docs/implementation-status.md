@@ -5,7 +5,7 @@ It is intentionally conservative: the milestone is not complete until every
 required field row contains dated, sanitized evidence.
 
 Last automated verification: 2026-08-19 on macOS and Debian Linux
-(`dev` at `8cf3499` or later).
+(`dev` at `43296fd` or later).
 
 ## Implemented and automated
 
