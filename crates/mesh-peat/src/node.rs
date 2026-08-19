@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use mesh_core::{DeliveryClass, DeliveryPolicy, MeshPayload, NodeId};
@@ -25,6 +26,8 @@ const TELEMETRY_COLLECTION: &str = "telemetry";
 const BULK_COLLECTION: &str = "bulk";
 const RECORD_FIELD: &str = "record";
 const MAX_PEER_ADDRESSES: usize = 8;
+const PEER_ADDRESS_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const PEER_ADDRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Versioned application record stored in PEAT. The envelope keeps transport
 /// and persistence metadata outside the payload's domain schema.
@@ -257,10 +260,21 @@ impl PeatNode {
             .await?;
         backend.start_sync().await?;
 
-        Ok(Self {
+        let node = Self {
             name: config.name,
             backend,
+        };
+        tokio::time::timeout(PEER_ADDRESS_WAIT_TIMEOUT, async {
+            loop {
+                if node.backend.blob_store().bound_addr_string().is_some() {
+                    break;
+                }
+                tokio::time::sleep(PEER_ADDRESS_POLL_INTERVAL).await;
+            }
         })
+        .await
+        .map_err(|_| PeatNodeError::NoBoundAddress)?;
+        Ok(node)
     }
 
     pub fn name(&self) -> &str {
@@ -619,6 +633,26 @@ mod tests {
         assert_eq!(received, record);
         node_a.shutdown().await.unwrap();
         node_b.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wildcard_bind_exposes_a_peer_address_before_start_returns() {
+        let storage = TempDir::new().unwrap();
+        let shared_key = FormationKey::generate_secret();
+        let mut config = node_config("avian-test/wildcard", &storage, &shared_key);
+        config.bind_address = "0.0.0.0:0".parse().unwrap();
+        let node = PeatNode::start(config).await.unwrap();
+
+        let descriptor = node
+            .peer_descriptor()
+            .expect("a started wildcard PEAT node should expose a reachable address");
+
+        assert!(!descriptor.addresses().is_empty());
+        assert!(descriptor
+            .addresses()
+            .iter()
+            .all(|address| !address.ip().is_unspecified()));
+        node.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
