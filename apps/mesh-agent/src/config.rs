@@ -680,6 +680,33 @@ impl ResolvedConfig {
     }
 }
 
+/// Reject secrets that are not regular files or are readable by another user.
+///
+/// Public verification keys are intentionally not passed through this helper.
+#[cfg(unix)]
+pub fn validate_private_file_permissions(path: &Path, label: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("reading permissions for {label} {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "{label} {} must be a regular file",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.permissions().mode() & 0o077 == 0,
+        "{label} {} must not be accessible by group or other users",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn validate_private_file_permissions(_path: &Path, _label: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
 fn read_config(path: &Path) -> anyhow::Result<FileConfig> {
     let encoded = std::fs::read_to_string(path)
         .with_context(|| format!("reading AVIAN configuration {}", path.display()))?;
@@ -777,6 +804,20 @@ fn default_probe_payload_bytes() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_reject_group_read_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret.key");
+        std::fs::write(&path, "secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(validate_private_file_permissions(&path, "test secret").is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        validate_private_file_permissions(&path, "test secret").unwrap();
+    }
 
     fn cli(config: PathBuf) -> CliArgs {
         CliArgs::parse_from(["mesh-agent", "--config", config.to_str().unwrap()])

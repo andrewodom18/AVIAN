@@ -23,7 +23,9 @@ mod membership;
 
 use membership::load_membership;
 use mesh_agent::commands::{AckOutcome, CommandEvaluation, CommandRuntime};
-use mesh_agent::config::{CliArgs, CommandMode, ResolvedConfig, Underlay};
+use mesh_agent::config::{
+    validate_private_file_permissions, CliArgs, CommandMode, ResolvedConfig, Underlay,
+};
 use mesh_agent::link_monitor_protocol;
 use mesh_agent::payload_ingress::{self, PayloadEvent};
 use mesh_agent::protocol::{ControlRequest, ControlResponse, RecordView};
@@ -114,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         .map(load_relay_runtime_configuration)
         .transpose()?
         .map(RelayRuntimeState::new);
+    validate_private_file_permissions(&args.formation_key_file, "formation key")?;
     let formation_key = std::fs::read_to_string(&args.formation_key_file).with_context(|| {
         format!(
             "reading formation key from {}",

@@ -1,0 +1,42 @@
+[Unit]
+Description=AVIAN PEAT mesh companion service
+Documentation=https://github.com/andrewodom18/AVIAN
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/avian/avian.toml
+
+[Service]
+Type=simple
+User=avian
+Group=avian
+UMask=0007
+ExecStart=/usr/local/bin/mesh-agent --config /etc/avian/avian.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+RuntimeDirectory=avian
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+StateDirectory=avian
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
