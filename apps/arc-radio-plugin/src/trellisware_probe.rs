@@ -62,7 +62,7 @@ pub async fn run(args: &TrellisWareProbeArgs) -> anyhow::Result<()> {
     };
 
     loop {
-        let observation = reader
+        let observation = match reader
             .read_observation(
                 NodeId::from(args.source.clone()),
                 management_ip(&args.radio_url),
@@ -70,13 +70,35 @@ pub async fn run(args: &TrellisWareProbeArgs) -> anyhow::Result<()> {
                 false,
             )
             .await
-            .context("reading TW-950 observation")?;
-        emit(&observation, args.output.as_deref())?;
+            .context("reading TW-950 observation")
+        {
+            Ok(observation) => observation,
+            Err(error) if args.watch => {
+                eprintln!("TW-950 probe iteration failed; retrying: {error:#}");
+                tokio::time::sleep(Duration::from_secs(args.interval_seconds)).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = emit(&observation, args.output.as_deref()) {
+            if !args.watch {
+                return Err(error);
+            }
+            eprintln!("TW-950 probe output failed; retrying: {error:#}");
+            tokio::time::sleep(Duration::from_secs(args.interval_seconds)).await;
+            continue;
+        }
         if let Some(session) = session.as_ref() {
-            session
+            let publish = session
                 .put(RADIO_OBSERVATIONS_TOPIC, serde_json::to_vec(&observation)?)
                 .await
-                .map_err(|error| anyhow::anyhow!("publishing TW-950 observation: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("publishing TW-950 observation: {error}"));
+            if let Err(error) = publish {
+                if !args.watch {
+                    return Err(error);
+                }
+                eprintln!("TW-950 probe publish failed; retrying: {error:#}");
+            }
         }
         if !args.watch {
             break;
@@ -89,11 +111,26 @@ pub async fn run(args: &TrellisWareProbeArgs) -> anyhow::Result<()> {
 fn emit(observation: &RadioDeviceObservation, output: Option<&Path>) -> anyhow::Result<()> {
     let encoded = serde_json::to_string_pretty(observation)?;
     if let Some(path) = output {
-        std::fs::write(path, format!("{encoded}\n"))
-            .with_context(|| format!("writing TW-950 observation to {}", path.display()))?;
+        atomic_write(path, format!("{encoded}\n").as_bytes())?;
     } else {
         println!("{encoded}");
     }
+    Ok(())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating temporary output beside {}", path.display()))?;
+    std::io::Write::write_all(&mut temporary, contents)
+        .with_context(|| format!("writing temporary output for {}", path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing {} atomically", path.display()))?;
     Ok(())
 }
 
@@ -103,11 +140,10 @@ fn read_optional(path: Option<&Path>) -> anyhow::Result<Option<Vec<u8>>> {
 }
 
 fn management_ip(url: &str) -> Option<String> {
-    url.split("://")
-        .nth(1)?
-        .split(['/', ':'])
-        .next()
-        .map(str::to_owned)
+    reqwest::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(|host| host.trim_matches(['[', ']']).to_owned())
 }
 
 async fn open_zenoh(endpoint: &str) -> anyhow::Result<zenoh::Session> {
@@ -146,6 +182,14 @@ mod tests {
         assert_eq!(
             management_ip("https://10.1.0.11/agent/"),
             Some("10.1.0.11".into())
+        );
+    }
+
+    #[test]
+    fn extracts_bracketed_ipv6_management_host() {
+        assert_eq!(
+            management_ip("https://[fe80::21e:3fff:fe20:9a10]:8443/agent/"),
+            Some("[fe80::21e:3fff:fe20:9a10]".trim_matches(['[', ']']).into())
         );
     }
 }

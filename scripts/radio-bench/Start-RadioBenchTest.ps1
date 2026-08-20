@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ArcRoot = (Join-Path $env:USERPROFILE 'Desktop\Work Docs\arc-edge\arc-uas-avian-radio'),
+    [string]$AvianRoot = (Join-Path $env:USERPROFILE 'Desktop\AVIAN'),
     [string]$ArcUrl = 'https://localhost:3000/home/devices'
 )
 
@@ -23,6 +24,7 @@ Read-Host 'Leave the radio Ethernet cable unplugged and press Enter to restart t
 if (-not (Test-Path -LiteralPath $ArcRoot)) {
     throw "ARC repository was not found at '$ArcRoot'."
 }
+if (-not (Test-Path -LiteralPath $AvianRoot)) { throw "AVIAN repository was not found at '$AvianRoot'." }
 
 $composeFile = Join-Path $ArcRoot 'infra\dev\docker-compose.yml'
 $uiRoot = Join-Path $ArcRoot 'services\arc-ui'
@@ -45,7 +47,9 @@ Write-Host 'No simulated radio or local-sim container is present.' -ForegroundCo
 Write-Section 'Restart the real-hardware-safe services'
 Push-Location $ArcRoot
 try {
-    & docker compose --project-name arc-avian-local --file $composeFile up --detach --no-build comms dev-bridge flight-recorder landing-advisor
+    & docker compose --project-name arc-avian-local --file $composeFile build comms dev-bridge flight-recorder landing-advisor
+    if ($LASTEXITCODE -ne 0) { throw 'ARC backend build failed.' }
+    & docker compose --project-name arc-avian-local --file $composeFile up --detach comms dev-bridge flight-recorder landing-advisor
     if ($LASTEXITCODE -ne 0) { throw 'ARC backend startup failed.' }
 } finally {
     Pop-Location
@@ -60,30 +64,35 @@ Write-Section 'Start the real AVIAN-to-ARC discovery path'
 $linkManagerName = 'arc-avian-real-link-manager'
 $linkManagerExists = & docker ps -a --filter "name=^/$linkManagerName$" --format '{{.Names}}'
 if ($linkManagerExists) {
-    & docker start $linkManagerName *> $null
+    throw "Container '$linkManagerName' already exists. Run Stop-RadioBenchTest.ps1 before starting a new evidence run."
 } else {
     & docker run --detach `
         --name $linkManagerName `
-        --restart unless-stopped `
+        --rm `
         --volume 'arc-avian-local_arc-ipc:/run/arc' `
         'arc-link-manager:dev' `
         --device-id "$env:COMPUTERNAME-radio-bench" *> $null
 }
 if ($LASTEXITCODE -ne 0) { throw 'The real ARC Link Manager failed to start.' }
 
-$avianPlugin = Join-Path $env:USERPROFILE 'Desktop\AVIAN\target\debug\arc-radio-plugin.exe'
-if (-not (Test-Path -LiteralPath $avianPlugin)) {
-    throw "The AVIAN radio plugin was not found at '$avianPlugin'."
+$existingPlugins = @(Get-CimInstance Win32_Process -Filter "Name = 'arc-radio-plugin.exe'")
+if ($existingPlugins.Count -gt 0) { throw 'An AVIAN radio plugin is already running. Stop it before starting an evidence run.' }
+Push-Location $AvianRoot
+try {
+    & cargo build --locked -p arc-radio-plugin
+    if ($LASTEXITCODE -ne 0) { throw 'AVIAN radio plugin build failed.' }
+} finally {
+    Pop-Location
 }
+$avianPlugin = Join-Path $AvianRoot 'target\debug\arc-radio-plugin.exe'
+if (-not (Test-Path -LiteralPath $avianPlugin)) { throw "The AVIAN radio plugin was not produced at '$avianPlugin'." }
 $discoveryDirectory = Join-Path $env:USERPROFILE 'Desktop\Radio Test Results\live-discovery'
 New-Item -ItemType Directory -Force -Path $discoveryDirectory | Out-Null
-Get-CimInstance Win32_Process -Filter "Name = 'arc-radio-plugin.exe'" |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 $discoveryStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $discoveryOutput = Join-Path $discoveryDirectory 'latest-discovery.json'
 $discoveryStdout = Join-Path $discoveryDirectory "avian-discovery-$discoveryStamp.out.log"
 $discoveryStderr = Join-Path $discoveryDirectory "avian-discovery-$discoveryStamp.err.log"
-Start-Process -FilePath $avianPlugin `
+$avianProcess = Start-Process -FilePath $avianPlugin `
     -ArgumentList @(
         'trellisware-discover', '--probe-ip', '10.1.0.2', '--watch',
         '--interval-seconds', '2', '--zenoh-endpoint', 'tcp/127.0.0.1:7447',
@@ -91,7 +100,20 @@ Start-Process -FilePath $avianPlugin `
     ) `
     -WindowStyle Hidden `
     -RedirectStandardOutput $discoveryStdout `
-    -RedirectStandardError $discoveryStderr
+    -RedirectStandardError $discoveryStderr `
+    -PassThru
+$arcCommit = (& git -C $ArcRoot rev-parse HEAD).Trim()
+$avianCommit = (& git -C $AvianRoot rev-parse HEAD).Trim()
+$linkManagerImage = (& docker image inspect arc-link-manager:dev --format '{{.Id}}').Trim()
+[pscustomobject]@{
+    CapturedAt = (Get-Date).ToString('o')
+    ArcCommit = $arcCommit
+    AvianCommit = $avianCommit
+    AvianPluginSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $avianPlugin).Hash
+    AvianPluginProcessId = $avianProcess.Id
+    LinkManagerImageId = $linkManagerImage
+    ComposeFileSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $composeFile).Hash
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $discoveryDirectory "bench-manifest-$discoveryStamp.json")
 Write-Host 'AVIAN is watching the Windows neighbor table and publishing real TW-950 discoveries to ARC.' -ForegroundColor Green
 
 Write-Section 'Restart the ARC UI'

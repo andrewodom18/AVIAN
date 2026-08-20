@@ -111,14 +111,8 @@ function Invoke-RadioTest {
     $hasPcIp = @($addresses | Where-Object IPAddress -eq $PcIp).Count -gt 0
 
     if (-not $hasPcIp) {
-        Write-Host "$Adapter does not currently have $PcIp/$PrefixLength." -ForegroundColor Yellow
-        $configure = Read-Host "Configure that PC-side address now? This does not change the radio. [Y/N]"
-        if ($configure -match '^(?i)y(es)?$') {
-            Set-NetIPInterface -InterfaceAlias $Adapter -AddressFamily IPv4 -Dhcp Disabled
-            New-NetIPAddress -InterfaceAlias $Adapter -IPAddress $PcIp -PrefixLength $PrefixLength | Out-Null
-            Write-Host "Configured $Adapter as $PcIp/$PrefixLength with no gateway." -ForegroundColor Green
-            $hasPcIp = $true
-        }
+        Write-Host "$Adapter does not currently have $PcIp/$PrefixLength. This read-only test will not change it." -ForegroundColor Yellow
+        Write-Host "Run Enable-RadioEthernet.ps1 separately to capture a recovery snapshot and add the bench address." -ForegroundColor Yellow
     }
 
     Write-Host "Waiting up to 90 seconds for $RadioIp to answer..."
@@ -218,7 +212,7 @@ function Invoke-RadioTest {
 }
 
 Write-Section 'AVIAN automated radio access test'
-Write-Host 'This test is read-only for the radio. It checks Ethernet, ICMP, ARP identity, management ports, web responses, and CHUD.'
+Write-Host 'This test is read-only for both the radio and workstation networking. It checks Ethernet, ICMP, ARP identity, management ports, web responses, and CHUD.'
 Write-Host 'Because both known radios currently use 10.1.0.2, test them one at a time.' -ForegroundColor Yellow
 
 Get-NetAdapter -Physical | Format-Table Name, Status, LinkSpeed, MacAddress, InterfaceDescription -AutoSize

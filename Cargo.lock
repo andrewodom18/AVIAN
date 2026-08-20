@@ -160,6 +160,7 @@ dependencies = [
  "mesh-core",
  "mesh-peat",
  "microhard-control",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "streamcaster-control",

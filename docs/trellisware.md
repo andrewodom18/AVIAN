@@ -13,7 +13,8 @@ radio-in-the-loop development, not the production configuration path.
 AVIAN can also publish credential-independent discovery records to
 `local/link/radio/discovery/v1`. These identify the physical radio by MAC and
 report network reachability separately from management authentication, so ARC
-can show `certificate required` instead of hiding a reachable radio.
+can show a reachable radio without inventing an authentication requirement.
+TCP reachability alone is reported with authentication `unknown`.
 
 Observed fields include the physical device ID/MAC, model, serial number,
 firmware, system alias, operating state, battery level, active preset, and
@@ -68,8 +69,9 @@ repository does not contain an authorized TrellisWare client identity.
 
 CHUD's device lifecycle distinguishes `reachable`, `identified`,
 `auth-failed`, `confirmed`, `connected`, and `stale`. ARC intentionally keeps an
-`auth-failed` radio visible as reachable and labels its management access
-`certificate required`; this is not a generic fetch failure.
+`auth-failed` radio visible as discovered and labels its management access
+`rejected`. A client-certificate requirement is shown only when an actual
+TLS/application-layer exchange identifies that specific requirement.
 
 ## AVIAN diagnostic discovery before credentials are available
 

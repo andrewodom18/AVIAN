@@ -11,17 +11,16 @@ clap.workspace = true
 mesh-core = { path = "../../crates/mesh-core" }
 mesh-peat = { path = "../../crates/mesh-peat" }
 microhard-control = { path = "../../crates/microhard-control" }
+reqwest.workspace = true
 streamcaster-control = { path = "../../crates/streamcaster-control" }
 trellisware-control = { path = "../../crates/trellisware-control" }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zenoh.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true
