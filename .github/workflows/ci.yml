@@ -17,6 +17,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install cargo-audit
+        run: |
+          if ! cargo audit --version 2>/dev/null | grep -q 'cargo-audit 0.22.2'; then
+            cargo install cargo-audit --version 0.22.2 --locked
+          fi
+
+      - name: Reject unapproved dependency advisories
+        run: cargo audit
+
   rust-quality:
     name: Rust quality and tests
     runs-on: ubuntu-latest
@@ -25,10 +42,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-        with:
-          just-version: "1.57.0"
+      - name: Install just without external API credentials
+        run: |
+          if ! just --version 2>/dev/null | grep -q 'just 1.57.0'; then
+            cargo install just --version 1.57.0 --locked
+          fi
 
       - name: Cache Cargo inputs and build output
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -45,9 +63,68 @@ jobs:
         run: |
           rustc --version --verbose
           cargo --version --verbose
+          just --version
 
       - name: Run the local verification contract
         run: just verify
+
+  feature-and-release:
+    name: Feature and release build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install just without external API credentials
+        run: |
+          if ! just --version 2>/dev/null | grep -q 'just 1.57.0'; then
+            cargo install just --version 1.57.0 --locked
+          fi
+
+      - name: Exercise all features and release compilation
+        run: just feature-check
+
+  coverage:
+    name: Coverage floor
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install coverage tooling
+        run: |
+          rustup component add llvm-tools-preview
+          if ! cargo llvm-cov --version 2>/dev/null | grep -q 'cargo-llvm-cov 0.9.0'; then
+            cargo install cargo-llvm-cov --version 0.9.0 --locked
+          fi
+          if ! just --version 2>/dev/null | grep -q 'just 1.57.0'; then
+            cargo install just --version 1.57.0 --locked
+          fi
+
+      - name: Enforce the measured coverage floor
+        run: just coverage
+
+  radio-mutations:
+    name: Vendor identifier mutation test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install mutation tooling
+        run: |
+          if ! cargo mutants --version 2>/dev/null | grep -q 'cargo-mutants 27.1.0'; then
+            cargo install cargo-mutants --version 27.1.0 --locked
+          fi
+          if ! just --version 2>/dev/null | grep -q 'just 1.57.0'; then
+            cargo install just --version 1.57.0 --locked
+          fi
+
+      - name: Require every viable vendor-identifier mutant to be caught
+        run: just mutate-radio
 
   container-build:
     name: arc-radio-plugin container
@@ -57,54 +134,58 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-        with:
-          just-version: "1.57.0"
+      - name: Install just without external API credentials
+        run: |
+          if ! just --version 2>/dev/null | grep -q 'just 1.57.0'; then
+            cargo install just --version 1.57.0 --locked
+          fi
 
-      - name: Build container without publishing
-        run: just docker-build
+      - name: Build and smoke-test the non-root container
+        run: just docker-smoke
 
-  powershell-parse:
-    name: PowerShell bench scripts
-    runs-on: windows-latest
-    timeout-minutes: 10
+  powershell-quality:
+    name: PowerShell bench quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Parse every radio bench script
-        shell: pwsh
-        run: |
-          $parseErrors = @()
-          Get-ChildItem scripts/radio-bench -Filter *.ps1 | ForEach-Object {
-            $tokens = $null
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile(
-              $_.FullName,
-              [ref]$tokens,
-              [ref]$errors
-            ) | Out-Null
-            $parseErrors += $errors
-          }
-
-          if ($parseErrors.Count -gt 0) {
-            $parseErrors | Format-List
-            throw "$($parseErrors.Count) PowerShell parse error(s) found."
-          }
+      - name: Parse, analyze, and mock-test bench scripts
+        run: >-
+          docker run --rm
+          --volume "${PWD}:/workspace"
+          --workdir /workspace
+          mcr.microsoft.com/powershell:7.5-ubuntu-24.04@sha256:042240d57ec9e47e511033b92625a8d95875ee5860af3015992c248b58a8be81
+          pwsh -NoLogo -NoProfile -File scripts/ci/Test-PowerShell.ps1
 
   required:
     name: AVIAN CI required
     if: always()
-    needs: [rust-quality, container-build, powershell-parse]
+    needs:
+      - dependency-audit
+      - rust-quality
+      - feature-and-release
+      - coverage
+      - radio-mutations
+      - container-build
+      - powershell-quality
     runs-on: ubuntu-latest
     steps:
       - name: Require every pipeline lane
         env:
+          AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           RUST_RESULT: ${{ needs.rust-quality.result }}
+          FEATURE_RESULT: ${{ needs.feature-and-release.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+          MUTATION_RESULT: ${{ needs.radio-mutations.result }}
           CONTAINER_RESULT: ${{ needs.container-build.result }}
-          POWERSHELL_RESULT: ${{ needs.powershell-parse.result }}
+          POWERSHELL_RESULT: ${{ needs.powershell-quality.result }}
         run: |
+          test "$AUDIT_RESULT" = success
           test "$RUST_RESULT" = success
+          test "$FEATURE_RESULT" = success
+          test "$COVERAGE_RESULT" = success
+          test "$MUTATION_RESULT" = success
           test "$CONTAINER_RESULT" = success
           test "$POWERSHELL_RESULT" = success
