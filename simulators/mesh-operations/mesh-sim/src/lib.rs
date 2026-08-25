@@ -974,7 +974,7 @@ fn visual_step(
             VisualLink {
                 source: source.to_string(),
                 target: target.to_string(),
-                transport: "MANET / PEAT".to_owned(),
+                transport: "AVIAN".to_owned(),
                 state: state.to_owned(),
                 latency_ms: if is_degraded { 240 } else { 38 },
                 signal_quality: if is_degraded { 0.28 } else { 0.91 },

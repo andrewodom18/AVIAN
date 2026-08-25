@@ -21,6 +21,7 @@ test("visualizer shell exposes playback and topology surfaces", () => {
   }
   assert.match(html, /What the AVIAN simulator actually does/);
   assert.match(html, /Executed 200-aircraft scale run/);
+  assert.match(html, /AVIAN MESH · PEAT-ENABLED MANET/);
 });
 
 test("visualizer renders individual scale nodes and guided pacing", () => {
@@ -76,6 +77,7 @@ test("mesh-sim emits the visualizer schema", () => {
   assert.equal(maximum.metrics.active_links, 801);
   assert.equal(maximum.metrics.connected_components, 1);
   assert.equal(maximum.metrics.mission_synced_nodes, 201);
+  assert.ok(maximum.links.every((link) => link.transport === "AVIAN"));
   assert.ok(maximum.nodes.every((node) => node.mission_synced));
   assert.equal(maximum.formation_summary.ground_partition_continuity_verified, true);
   assert.equal(maximum.formation_summary.distributed_loss_nodes, 20);
