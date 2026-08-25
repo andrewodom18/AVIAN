@@ -6,8 +6,8 @@ behavior and must not enable physical radio writes by default.
 
 ## Mesh operations
 
-`mesh-operations/` contains the Rust `mesh-sim` engine and its local web
-visualizer. It demonstrates CHUD-style radio discovery and configuration,
+`mesh-operations/` contains the Rust `mesh-sim` engine, its local web
+visualizer, and a loopback-only CHUD contract emulator. It demonstrates CHUD-style radio discovery and configuration,
 leaderless mesh formation, mission synchronization, changing paths during
 distributed node loss, and recovery across 200 simulated aircraft plus one GCS.
 
@@ -16,6 +16,17 @@ Run it from the repository root:
 ```powershell
 .\scripts\Start-AVIAN-Visualizer.ps1
 ```
+
+Run the deterministic validation matrix and API contract tests with:
+
+```powershell
+.\scripts\Invoke-SimulatorValidation.ps1
+```
+
+The report covers logical per-hop delivery for 5-200 aircraft, topology
+invariants, synthetic loss, partition recovery, and reproducibility. It is not
+RF, hardware, or flight-validation evidence. See
+[`docs/simulator-validation.md`](../docs/simulator-validation.md).
 
 ## RF Planning Suite
 

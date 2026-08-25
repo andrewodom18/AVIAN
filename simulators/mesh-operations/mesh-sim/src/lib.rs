@@ -15,6 +15,9 @@ use thiserror::Error;
 use uuid::Uuid;
 use vehicle_adapters::{SimulatedVehicleAdapter, VehicleAdapter};
 
+pub mod peat_validation;
+pub mod validation;
+
 const DEMONSTRATED_AIRCRAFT_COUNT: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

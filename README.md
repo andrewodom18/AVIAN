@@ -57,6 +57,7 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `vehicle-adapters` | Hardware-neutral ArduPilot, PX4, and Betaflight adapter contract |
 | `simulators/mesh-operations/mesh-sim` | Deterministic failure, rerouting, and recovery simulation |
 | `simulators/mesh-operations/visualizer` | Local stakeholder console driven by a verified `mesh-sim` topology trace |
+| `simulators/mesh-operations/chud-emulator` | Loopback-only CHUD contract emulator for ARC discovery and guarded configuration tests |
 | `simulators/rf-planning-suite` | Local RF link-budget, capacity, topology, and multi-node planning simulator |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
@@ -175,6 +176,8 @@ overlay and what remains to validate on real radios.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
 The [visual mesh simulation](docs/visual-simulation.md) replays verified node,
 link, partition, failover, and recovery state in a local browser console.
+The [simulator validation guide](docs/simulator-validation.md) defines the
+seeded event model, CHUD contract emulator, evidence report, and claim limits.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
 The [field runbooks](docs/field-runbooks.md) cover Pi-to-Mac, Pi-to-Pi, real
 Cube metadata, Silvus, and ZeroTier-over-Starshield recovery checks.
