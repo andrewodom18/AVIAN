@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ArcRoot = (Join-Path $env:USERPROFILE 'Desktop\Work Docs\arc-edge\arc-uas-avian-radio'),
+    [string]$AvianRoot = (Join-Path $env:USERPROFILE 'Desktop\AVIAN'),
     [string]$ArcUrl = 'https://localhost:3000/home/devices'
 )
 
@@ -28,6 +29,17 @@ $composeFile = Join-Path $ArcRoot 'infra\dev\docker-compose.yml'
 $uiRoot = Join-Path $ArcRoot 'services\arc-ui'
 if (-not (Test-Path -LiteralPath $composeFile)) { throw "Compose file was not found at '$composeFile'." }
 if (-not (Test-Path -LiteralPath $uiRoot)) { throw "ARC UI was not found at '$uiRoot'." }
+
+$bridgeSource = Join-Path $ArcRoot 'services\dev-bridge\src\api.rs'
+$swarmBuilder = Join-Path $uiRoot 'src\components\Devices\RadioSwarmBuilder.tsx'
+if (-not (Test-Path -LiteralPath $bridgeSource) -or -not (Test-Path -LiteralPath $swarmBuilder)) {
+    throw @"
+This ARC checkout does not contain the ticket #42 CHUD-backed radio routes and
+RadioSwarmBuilder UI. Unmodified ARC main can run beside AVIAN, but it cannot
+exercise the guided radio workflow without ARC changes. Use the reviewed ARC
+integration worktree for radio testing; see docs/arc-main-compatibility.md.
+"@
+}
 
 Write-Section 'Check Docker and simulator state'
 & docker info *> $null
@@ -71,7 +83,7 @@ if ($linkManagerExists) {
 }
 if ($LASTEXITCODE -ne 0) { throw 'The real ARC Link Manager failed to start.' }
 
-$avianPlugin = Join-Path $env:USERPROFILE 'Desktop\AVIAN\target\debug\arc-radio-plugin.exe'
+$avianPlugin = Join-Path $AvianRoot 'target\debug\arc-radio-plugin.exe'
 if (-not (Test-Path -LiteralPath $avianPlugin)) {
     throw "The AVIAN radio plugin was not found at '$avianPlugin'."
 }

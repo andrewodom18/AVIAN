@@ -68,12 +68,12 @@ Microhard foundation is documented in the [Microhard integration guide](docs/mic
 
 TrellisWare TW-950 bench integration is documented in the [TrellisWare integration guide](docs/trellisware.md).
 
-## ARC and StreamCaster integration
+## ARC and radio integration
 
 CHUD is the authority for desired and effective physical radio configuration.
-Its own UI/API is the only physical radio configuration path. ARC renders
-read-only topology and opens a selected hardware MAC in CHUD; it does not
-render settings or proxy configuration transactions. The AVIAN
+Its API is the only physical radio configuration path. ARC may render CHUD's
+normalized settings and guide an operator through CHUD-backed transactions,
+but it never contacts a radio or implements a vendor write directly. The AVIAN
 `arc-radio-plugin` validates planning intent and synchronizes PEAT mesh state.
 It does not call CHUD or StreamCaster configuration methods and does not
 communicate with a flight controller.
@@ -92,6 +92,12 @@ The current integration provides:
 
 Zero connected radios is a valid local state. ARC should show an empty live
 mesh instead of treating the absence of hardware as a service failure.
+
+The single-plug ARC workflow for discovering, configuring, verifying,
+and adding radios one at a time is documented in the [swarm-builder workflow](docs/arc-radio-swarm-builder.md).
+The [ARC main compatibility guide](docs/arc-main-compatibility.md) records the
+current mainline contracts, the traffic boundary for identification images,
+and the radio surfaces that are not yet present in ARC main.
 
 Validate the integration without radio hardware:
 
