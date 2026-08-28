@@ -18,7 +18,10 @@ writes every machine result and operator answer beneath
 `Desktop\Radio Test Results\full-avian-arc-validation`. It is read-only for
 the radios: configuration apply/readback/rollback and automatic authenticated
 ARC session attestation are reported as blocked until their remaining safety
-and transport gates are complete.
+and transport gates are complete. The compatibility PKCS#12 identity is
+converted to a restricted temporary PEM only for the read; cleanup is verified
+before the walkthrough continues. A derived IPv6 link-local address is treated
+as a candidate and must answer directly before the RF-path monitor runs.
 
 For the guided two-radio workflow—including separate reachability checks,
 blank-password PKCS#12 authentication attempts, evidence capture, and an

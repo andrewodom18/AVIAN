@@ -109,6 +109,68 @@ function Convert-MacToLinkLocal {
     return 'fe80::{0:x}:{1:x}:{2:x}:{3:x}' -f $groups
 }
 
+function Get-OpenSslPath {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'),
+        (Join-Path $env:ProgramFiles 'Git\mingw64\bin\openssl.exe'),
+        (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin\openssl.exe')
+    )
+    $openssl = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $openssl) { throw 'OpenSSL was not found. Install Git for Windows or supply a PEM identity instead.' }
+    return $openssl
+}
+
+function New-TemporaryClientIdentityPem {
+    $openssl = Get-OpenSslPath
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "avian-radio-identity-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $grant = "${currentIdentity}:(OI)(CI)F"
+    & icacls.exe $temporaryRoot '/inheritance:r' '/grant:r' $grant '/grant:r' 'SYSTEM:(OI)(CI)F' *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item -LiteralPath $temporaryRoot -Force -ErrorAction SilentlyContinue
+        throw 'Could not restrict the temporary client-identity directory.'
+    }
+    $pemPath = Join-Path $temporaryRoot 'client-identity.pem'
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $openssl pkcs12 -in $ClientIdentityPkcs12 -passin 'pass:' -nodes -out $pemPath *> $null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $pemPath)) {
+        Remove-TemporaryClientIdentity -TemporaryRoot $temporaryRoot
+        throw 'The blank-password PKCS#12 identity could not be converted for the read-only probe.'
+    }
+    return [pscustomobject]@{ Root = $temporaryRoot; Pem = $pemPath }
+}
+
+function Remove-TemporaryClientIdentity {
+    param([string]$TemporaryRoot)
+    if (-not $TemporaryRoot) { return }
+    $resolved = [System.IO.Path]::GetFullPath($TemporaryRoot)
+    $expectedParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+    if (-not $resolved.StartsWith($expectedParent, [StringComparison]::OrdinalIgnoreCase) -or
+        -not ([System.IO.Path]::GetFileName($resolved)).StartsWith('avian-radio-identity-', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove unexpected temporary path: $resolved"
+    }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Wait-ScopedIPv6Reply {
+    param([string]$Address, [int]$InterfaceIndex, [int]$TimeoutSeconds = 20)
+    $target = "${Address}%$InterfaceIndex"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $reply = (& ping.exe -6 -n 1 -w 900 $target 2>&1 | Out-String)
+        if ($reply -match '(?i)TTL[= ]\d+') { return $true }
+        Start-Sleep -Seconds 2
+    } until ((Get-Date) -ge $deadline)
+    return $false
+}
+
 function Invoke-AuthenticatedRead {
     param(
         [int]$Sequence,
@@ -132,21 +194,27 @@ function Invoke-AuthenticatedRead {
 
     $observationPath = Join-Path $OutputDirectory 'authenticated-observation.json'
     $probeLog = Join-Path $OutputDirectory 'authenticated-probe.log'
-    $arguments = @(
-        'trellisware-probe',
-        '--radio-url', "https://$RadioIp",
-        '--source', $source,
-        '--client-identity-pkcs12', $ClientIdentityPkcs12,
-        '--accept-invalid-server-certificate',
-        '--output', $observationPath
-    )
-    $previousErrorAction = $ErrorActionPreference
+    $temporaryIdentity = $null
     try {
-        $ErrorActionPreference = 'Continue'
-        & $Probe @arguments *> $probeLog
-        $exitCode = $LASTEXITCODE
+        $temporaryIdentity = New-TemporaryClientIdentityPem
+        $arguments = @(
+            'trellisware-probe',
+            '--radio-url', "https://$RadioIp",
+            '--source', $source,
+            '--client-identity-pem', $temporaryIdentity.Pem,
+            '--accept-invalid-server-certificate',
+            '--output', $observationPath
+        )
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $Probe @arguments *> $probeLog
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
     } finally {
-        $ErrorActionPreference = $previousErrorAction
+        if ($temporaryIdentity) { Remove-TemporaryClientIdentity -TemporaryRoot $temporaryIdentity.Root }
     }
     if ($exitCode -eq 0 -and (Test-Path -LiteralPath $observationPath)) {
         Add-Checkpoint -Phase "radio-$Sequence" -Check 'Authenticated read' -Result 'pass' -Detail "Blank-password-compatible identity read $source."
@@ -281,6 +349,27 @@ try {
     }
     Add-Checkpoint -Phase 'preflight' -Check 'Dedicated Ethernet address' -Result 'pass' -Detail "$EthernetAdapter has $PcIp/$PrefixLength and status $($adapter.Status)."
     Add-Checkpoint -Phase 'preflight' -Check 'Client identity' -Result 'pass' -Detail 'The blank-password-compatible PKCS#12 bundle is available outside the repository.'
+    $openssl = Get-OpenSslPath
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $openssl pkcs12 -in $ClientIdentityPkcs12 -passin 'pass:' -noout *> $null
+        $pkcs12Exit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($pkcs12Exit -ne 0) { throw 'The selected PKCS#12 bundle did not accept a blank password.' }
+    $temporaryIdentityTest = $null
+    try {
+        $temporaryIdentityTest = New-TemporaryClientIdentityPem
+        if (-not (Test-Path -LiteralPath $temporaryIdentityTest.Pem)) { throw 'Temporary PEM conversion did not produce an identity.' }
+    } finally {
+        if ($temporaryIdentityTest) { Remove-TemporaryClientIdentity -TemporaryRoot $temporaryIdentityTest.Root }
+    }
+    if ($temporaryIdentityTest -and (Test-Path -LiteralPath $temporaryIdentityTest.Root)) {
+        throw 'Temporary client-identity material was not removed after the preflight conversion test.'
+    }
+    Add-Checkpoint -Phase 'preflight' -Check 'Blank-password identity decoding' -Result 'pass' -Detail 'OpenSSL decoded the compatibility bundle into a restricted temporary PEM and cleanup was verified.'
     $unsafeQuestionInterpolation = Select-String -LiteralPath $PSCommandPath -Pattern '\$[A-Za-z_][A-Za-z0-9_]*\?'
     if ($unsafeQuestionInterpolation) {
         throw "Unsafe PowerShell question-mark interpolation remains at line $($unsafeQuestionInterpolation.LineNumber)."
@@ -290,7 +379,7 @@ try {
     if ($knownLinkLocal -ne 'fe80::21e:3fff:fe20:9a10') {
         throw "MAC-to-link-local derivation returned an unexpected address: $knownLinkLocal"
     }
-    Add-Checkpoint -Phase 'preflight' -Check 'Link-local identity derivation' -Result 'pass' -Detail 'Known TrellisWare MAC produced the expected scoped IPv6 address.'
+    Add-Checkpoint -Phase 'preflight' -Check 'Candidate link-local derivation' -Result 'pass' -Detail 'Known TrellisWare MAC produced the expected EUI-64 candidate; live reachability is tested separately.'
 
     Write-Section 'Build the locked read-only probe'
     Push-Location $AvianRoot
@@ -337,21 +426,25 @@ try {
     Write-Host "Radio 2 direct address: $radio2LinkLocal"
     Write-Host 'Power both radios. Connect only Radio 2 to Ethernet. Leave Radio 1 Ethernet-unplugged.' -ForegroundColor Yellow
     Confirm-Exact -Prompt 'Confirm both antennas are installed, both radios are powered, and only Radio 2 has Ethernet.' -Expected 'MESH READY'
-    $meshRoot = Join-Path $script:RunRoot 'two-radio-mesh'
-    & (Join-Path $PSScriptRoot 'Monitor-TwoRadioMesh.ps1') `
-        -EthernetAdapter $EthernetAdapter `
-        -DirectRadioIPv6 $radio2LinkLocal `
-        -RemoteRadioIPv6 $radio1LinkLocal `
-        -ResultsRoot $meshRoot
-    if (Read-YesNo -Question 'Did PowerShell show Radio 2 direct reachability?') {
-        Add-Checkpoint -Phase 'mesh' -Check 'Direct radio reachability' -Result 'pass' -Detail 'Operator observed the directly attached radio.'
+    $interfaceIndex = [int](Get-NetAdapter -Name $EthernetAdapter -ErrorAction Stop).ifIndex
+    Write-Host 'Checking whether the directly attached radio actually answers its candidate IPv6 endpoint...'
+    if (-not (Wait-ScopedIPv6Reply -Address $radio2LinkLocal -InterfaceIndex $interfaceIndex)) {
+        Add-Checkpoint -Phase 'mesh' -Check 'Direct IPv6 management endpoint' -Result 'blocked' -Detail 'The derived candidate did not answer. This does not prove RF failure; confirm a live IPv6 endpoint or provision distinct management IPs before remote-path validation.'
+        Add-Checkpoint -Phase 'mesh' -Check 'Remote RF-path reachability' -Result 'blocked' -Detail 'Skipped because the directly attached IPv6 management endpoint was not confirmed.'
+        Write-Host 'RF-path validation is blocked, not failed. The two radios need distinct reachable management endpoints or a confirmed vendor neighbor API.' -ForegroundColor Yellow
     } else {
-        Add-Checkpoint -Phase 'mesh' -Check 'Direct radio reachability' -Result 'fail' -Detail (Read-RequiredText -Prompt 'What failed?')
-    }
-    if (Read-YesNo -Question 'Did PowerShell show Radio 1 reachable while its Ethernet remained disconnected?') {
-        Add-Checkpoint -Phase 'mesh' -Check 'Remote RF-path reachability' -Result 'pass' -Detail 'Operator observed the remote radio through the directly attached radio.'
-    } else {
-        Add-Checkpoint -Phase 'mesh' -Check 'Remote RF-path reachability' -Result 'fail' -Detail (Read-RequiredText -Prompt 'What failed?')
+        Add-Checkpoint -Phase 'mesh' -Check 'Direct IPv6 management endpoint' -Result 'pass' -Detail "Radio 2 answered ${radio2LinkLocal}%$interfaceIndex."
+        $meshRoot = Join-Path $script:RunRoot 'two-radio-mesh'
+        & (Join-Path $PSScriptRoot 'Monitor-TwoRadioMesh.ps1') `
+            -EthernetAdapter $EthernetAdapter `
+            -DirectRadioIPv6 $radio2LinkLocal `
+            -RemoteRadioIPv6 $radio1LinkLocal `
+            -ResultsRoot $meshRoot
+        if (Read-YesNo -Question 'Did PowerShell show Radio 1 reachable while its Ethernet remained disconnected?') {
+            Add-Checkpoint -Phase 'mesh' -Check 'Remote RF-path reachability' -Result 'pass' -Detail 'Operator observed the remote radio through the directly attached radio.'
+        } else {
+            Add-Checkpoint -Phase 'mesh' -Check 'Remote RF-path reachability' -Result 'fail' -Detail (Read-RequiredText -Prompt 'What failed?')
+        }
     }
 
     if ($SkipApplicationStartup) {

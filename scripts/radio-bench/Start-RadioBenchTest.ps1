@@ -49,8 +49,33 @@ integration worktree for radio testing; see docs/arc-main-compatibility.md.
 }
 
 Write-Section 'Check Docker and simulator state'
-& docker info *> $null
-if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop is not running.' }
+$previousErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & docker info *> $null
+    $dockerReady = $LASTEXITCODE -eq 0
+} finally {
+    $ErrorActionPreference = $previousErrorAction
+}
+if (-not $dockerReady) {
+    $dockerDesktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+    if (-not (Test-Path -LiteralPath $dockerDesktop)) { throw 'Docker Desktop is not installed in the expected location.' }
+    Write-Host 'Docker Desktop is not running; starting it now...' -ForegroundColor Yellow
+    Start-Process -FilePath $dockerDesktop -WindowStyle Hidden
+    $deadline = (Get-Date).AddMinutes(2)
+    do {
+        Start-Sleep -Seconds 3
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & docker info *> $null
+            $dockerReady = $LASTEXITCODE -eq 0
+        } finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+    } until ($dockerReady -or (Get-Date) -ge $deadline)
+    if (-not $dockerReady) { throw 'Docker Desktop did not become ready within two minutes.' }
+}
 
 $simContainers = @(
     & docker ps -a --format '{{.Names}}|{{.Command}}' |
