@@ -198,7 +198,7 @@ function Invoke-OneRadioPhase {
     } else {
         Add-Checkpoint -Phase "radio-$Sequence" -Check 'Stable hardware identity' -Result 'fail' -Detail 'No MAC was learned from the neighbor table.'
     }
-    if (-not (Read-YesNo -Question "Did the physical result shown above match what you observed for Radio $Sequence?")) {
+    if (-not (Read-YesNo -Question "Did the physical result shown above match what you observed for Radio ${Sequence}?")) {
         $note = Read-RequiredText -Prompt 'What looked wrong?'
         Add-Checkpoint -Phase "radio-$Sequence" -Check 'Operator observation' -Result 'fail' -Detail $note
     } else {
@@ -281,6 +281,11 @@ try {
     }
     Add-Checkpoint -Phase 'preflight' -Check 'Dedicated Ethernet address' -Result 'pass' -Detail "$EthernetAdapter has $PcIp/$PrefixLength and status $($adapter.Status)."
     Add-Checkpoint -Phase 'preflight' -Check 'Client identity' -Result 'pass' -Detail 'The blank-password-compatible PKCS#12 bundle is available outside the repository.'
+    $unsafeQuestionInterpolation = Select-String -LiteralPath $PSCommandPath -Pattern '\$[A-Za-z_][A-Za-z0-9_]*\?'
+    if ($unsafeQuestionInterpolation) {
+        throw "Unsafe PowerShell question-mark interpolation remains at line $($unsafeQuestionInterpolation.LineNumber)."
+    }
+    Add-Checkpoint -Phase 'preflight' -Check 'Interactive prompt interpolation' -Result 'pass' -Detail 'Question-mark prompts use braced variables and are safe under StrictMode.'
     $knownLinkLocal = Convert-MacToLinkLocal -MacAddress '00:1e:3f:20:9a:10'
     if ($knownLinkLocal -ne 'fe80::21e:3fff:fe20:9a10') {
         throw "MAC-to-link-local derivation returned an unexpected address: $knownLinkLocal"
