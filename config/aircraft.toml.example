@@ -61,6 +61,14 @@ observation_interval_seconds = 10
 probe_timeout_ms = 1000
 probe_listen = "0.0.0.0:9200"
 
+# Explicit local attachment identity. This is published over the authenticated
+# AVIAN formation so ARC can attest an operator-created drone/radio assignment.
+# It never configures the radio and never uses an IP address as identity.
+[radio.attachment]
+drone_id = "aircraft-001"
+mac_address = "00:1e:3f:20:9a:10"
+radio_node_id = "1"
+
 [[radio.devices]]
 name = "air-sl5200"
 base_url = "https://10.41.0.1"

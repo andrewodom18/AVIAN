@@ -6,10 +6,10 @@ use clap::Parser;
 use mesh_agent::control::{spawn_control_server, ControlEnvelope};
 use mesh_core::{
     Capability, DeliveryClass, InFlightRelayDecision, InFlightRelayPlanner, LinkMonitorObservation,
-    MeshPayload, NodeId, NodeProfile, NodeRole, RelayBroadcastPair, RelayLinkObservation,
-    RelayObservationPublication, RelayObservationTrafficGovernor, RelayRuntimeAction,
-    RelayRuntimeConfiguration, RelayRuntimeSnapshot, SwarmStatusSummary, SwarmTrafficPolicy,
-    Telemetry, TelemetryPublication, TelemetryTrafficGovernor, TransportKind,
+    MeshPayload, NodeId, NodeProfile, NodeRole, RadioAttachmentAssertion, RelayBroadcastPair,
+    RelayLinkObservation, RelayObservationPublication, RelayObservationTrafficGovernor,
+    RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot, SwarmStatusSummary,
+    SwarmTrafficPolicy, Telemetry, TelemetryPublication, TelemetryTrafficGovernor, TransportKind,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
@@ -209,6 +209,9 @@ async fn main() -> anyhow::Result<()> {
     status.node.endpoint_id = Some(node.endpoint_id_hex());
     status.peers = peer_statuses(&tagged_peers, &peers, started_at_ms);
     publish_node_advertisement(&node, &node_id, node_profile(&args, &node_id)?).await?;
+    if let Some(attachment) = &args.radio.attachment {
+        publish_radio_attachment(&node, &node_id, attachment).await?;
+    }
     let (control_sender, mut control_receiver) = mpsc::channel(32);
     let control_task = spawn_control_server(
         args.sockets.control.clone(),
@@ -632,6 +635,31 @@ async fn publish_node_advertisement(
     )?;
     node.put(&format!("node-advertisement/{node_id}"), &record)
         .await?;
+    Ok(())
+}
+
+async fn publish_radio_attachment(
+    node: &PeatNode,
+    node_id: &NodeId,
+    configured: &mesh_agent::config::RadioAttachmentConfig,
+) -> anyhow::Result<()> {
+    let assertion = RadioAttachmentAssertion::new(
+        unix_time_ms(),
+        node_id.clone(),
+        configured.drone_id.clone(),
+        configured.mac_address.clone(),
+        configured.radio_node_id.clone(),
+    )?;
+    let record = AvianRecord::new(
+        node_id.clone(),
+        1,
+        DeliveryClass::Mission,
+        unix_time_ms(),
+        MeshPayload::RadioAttachmentAssertion(assertion),
+    )?;
+    node.put(&format!("radio-attachment/{node_id}"), &record)
+        .await
+        .context("publishing local radio attachment assertion")?;
     Ok(())
 }
 
