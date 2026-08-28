@@ -1,8 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$ArcRoot = (Join-Path $env:USERPROFILE 'Desktop\Work Docs\arc-edge\arc-uas-avian-radio'),
-    [string]$AvianRoot = (Join-Path $env:USERPROFILE 'Desktop\AVIAN'),
-    [string]$ArcUrl = 'https://localhost:3000/home/devices'
+    [string]$ArcRoot = (Join-Path $env:USERPROFILE 'Desktop\arc-uas-main-20260827'),
+    [string]$AvianRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')),
+    [string]$ArcUrl = 'https://localhost:3000/home/devices',
+    [switch]$SkipStartupPrompt,
+    [switch]$SkipBrowser,
+    [switch]$SkipConnectionMonitor
 )
 
 Set-StrictMode -Version Latest
@@ -19,7 +22,9 @@ Write-Host 'It restarts ARC comms, the ARC bridge, recorder/advisor services, CH
 Write-Host 'It starts AVIAN real-radio discovery and the real ARC Link Manager.'
 Write-Host 'It does not start a simulated radio, simulated node, or MAVLink simulator.'
 Write-Host 'After startup, the monitor will explain and record each connection milestone.'
-Read-Host 'Leave the radio Ethernet cable unplugged and press Enter to restart the application' | Out-Null
+if (-not $SkipStartupPrompt) {
+    Read-Host 'Leave the radio Ethernet cable unplugged and press Enter to restart the application' | Out-Null
+}
 
 if (-not (Test-Path -LiteralPath $ArcRoot)) {
     throw "ARC repository was not found at '$ArcRoot'."
@@ -31,8 +36,10 @@ if (-not (Test-Path -LiteralPath $composeFile)) { throw "Compose file was not fo
 if (-not (Test-Path -LiteralPath $uiRoot)) { throw "ARC UI was not found at '$uiRoot'." }
 
 $bridgeSource = Join-Path $ArcRoot 'services\dev-bridge\src\api.rs'
-$swarmBuilder = Join-Path $uiRoot 'src\components\Devices\RadioSwarmBuilder.tsx'
-if (-not (Test-Path -LiteralPath $bridgeSource) -or -not (Test-Path -LiteralPath $swarmBuilder)) {
+$legacySwarmBuilder = Join-Path $uiRoot 'src\components\Devices\RadioSwarmBuilder.tsx'
+$fleetNetworkBuilder = Join-Path $uiRoot 'src\components\Devices\FleetNetworkBuilder.tsx'
+if (-not (Test-Path -LiteralPath $bridgeSource) -or
+    (-not (Test-Path -LiteralPath $legacySwarmBuilder) -and -not (Test-Path -LiteralPath $fleetNetworkBuilder))) {
     throw @"
 This ARC checkout does not contain the ticket #42 CHUD-backed radio routes and
 RadioSwarmBuilder UI. Unmodified ARC main can run beside AVIAN, but it cannot
@@ -139,18 +146,21 @@ if (-not $listener) {
 }
 Write-Host "ARC UI is listening at $ArcUrl" -ForegroundColor Green
 
-Write-Section 'Open the device page in Google Chrome'
-$chromeCandidates = @(
-    (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')
-)
-$chrome = $chromeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $chrome) { throw 'Google Chrome is not installed in a standard location.' }
-Start-Process -FilePath $chrome -ArgumentList @('--new-window', $ArcUrl)
-Write-Host 'Chrome was opened to the ARC Devices page.' -ForegroundColor Green
-Write-Host 'If Chrome displays a local-certificate page, choose Advanced and continue to localhost.' -ForegroundColor Yellow
+if (-not $SkipBrowser) {
+    Write-Section 'Open the device page in Microsoft Edge'
+    $edgeCandidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
+    )
+    $edge = $edgeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $edge) { throw 'Microsoft Edge is not installed in a standard location.' }
+    Start-Process -FilePath $edge -ArgumentList @('--new-window', $ArcUrl)
+    Write-Host 'Edge was opened to the ARC Devices page.' -ForegroundColor Green
+    Write-Host 'If Edge displays a local-certificate page, choose Advanced and continue to localhost.' -ForegroundColor Yellow
+}
 
-Write-Section 'Start the connection monitor'
-$monitor = Join-Path $PSScriptRoot 'Monitor-RadioConnection.ps1'
-& $monitor
+if (-not $SkipConnectionMonitor) {
+    Write-Section 'Start the connection monitor'
+    $monitor = Join-Path $PSScriptRoot 'Monitor-RadioConnection.ps1'
+    & $monitor
+}

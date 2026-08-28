@@ -4,6 +4,22 @@ This Windows bench harness restarts the real-hardware-safe ARC/CHUD stack and re
 
 ## Run
 
+For the complete operator-led walkthrough—from preflight through individual
+identity/certificate checks, a two-radio RF-path check, ARC/CHUD startup, UI
+checkpoints, and disconnect/recovery evidence—run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-FullAvianArcValidation.ps1"
+```
+
+The full walkthrough asks explicit Y/N questions for visual ARC checks and
+writes every machine result and operator answer beneath
+`Desktop\Radio Test Results\full-avian-arc-validation`. It is read-only for
+the radios: configuration apply/readback/rollback and automatic authenticated
+ARC session attestation are reported as blocked until their remaining safety
+and transport gates are complete.
+
 For the guided two-radio workflow—including separate reachability checks,
 blank-password PKCS#12 authentication attempts, evidence capture, and an
 optional handoff to the full ARC/CHUD stack—run:
