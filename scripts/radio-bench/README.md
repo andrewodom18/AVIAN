@@ -22,6 +22,9 @@ and transport gates are complete. The compatibility PKCS#12 identity is
 converted to a restricted temporary PEM only for the read; cleanup is verified
 before the walkthrough continues. A derived IPv6 link-local address is treated
 as a candidate and must answer directly before the RF-path monitor runs.
+The default client identity is read from
+`Desktop\Work Docs\Security\OEM Certificates\oemcert-compat.p12`; it is never
+copied into the repository or written to the evidence directory.
 
 For the guided two-radio workflow—including separate reachability checks,
 blank-password PKCS#12 authentication attempts, evidence capture, and an
@@ -29,7 +32,7 @@ optional handoff to the full ARC/CHUD stack—run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-GuidedRadioValidation.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-GuidedRadioValidation.ps1"
 ```
 
 The guided workflow is read-only and requires an exact `READY` safety
@@ -46,10 +49,16 @@ run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-RadioBenchTest.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-RadioBenchTest.ps1"
 ```
 
-Follow the prompts. Leave the radio Ethernet cable unplugged until the monitor requests it. The default radio management address is `10.1.0.2`; multiple addresses may be entered as a comma-separated list.
+Follow the prompts. Leave the radio Ethernet cable unplugged until the monitor
+requests it. The launcher verifies every CHUD bind source before starting ARC,
+waits for the CHUD device API, and rebuilds the ARC dev-bridge from the selected
+ARC checkout so an older Docker image cannot silently run against newer CLI
+arguments. Keep at least 12 GiB free on the Windows system drive for that
+release build. The default radio management address is `10.1.0.2`; multiple
+addresses may be entered as a comma-separated list.
 
 The monitor distinguishes these milestones:
 

@@ -86,19 +86,58 @@ if ($simContainers.Count -gt 0) {
 }
 Write-Host 'No simulated radio or local-sim container is present.' -ForegroundColor Green
 
+$chudExists = & docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq 'chud-local' }
+if (-not $chudExists) { throw "The required external CHUD container 'chud-local' does not exist." }
+$chudInspect = & docker inspect chud-local | ConvertFrom-Json | Select-Object -First 1
+if ($LASTEXITCODE -ne 0 -or -not $chudInspect) { throw "The CHUD container definition could not be inspected." }
+$missingChudBindSources = @(
+    $chudInspect.Mounts |
+        Where-Object { $_.Type -eq 'bind' -and -not (Test-Path -LiteralPath $_.Source) } |
+        ForEach-Object { $_.Source }
+)
+if ($missingChudBindSources.Count -gt 0) {
+    throw "CHUD cannot start because these read-only bind sources are missing: $($missingChudBindSources -join ', ')"
+}
+Write-Host 'CHUD container bind sources are present.' -ForegroundColor Green
+
 Write-Section 'Restart the real-hardware-safe services'
+$freeSystemDriveGiB = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free / 1GB
+if ($freeSystemDriveGiB -lt 12) {
+    throw ("The ARC dev-bridge build requires at least 12 GiB free on {0}; only {1:N1} GiB is available." -f $env:SystemDrive, $freeSystemDriveGiB)
+}
 Push-Location $ArcRoot
 try {
+    Write-Host 'Building the ARC dev-bridge from this checkout to prevent stale-image CLI drift.' -ForegroundColor Yellow
+    & docker compose --project-name arc-avian-local --file $composeFile build dev-bridge
+    if ($LASTEXITCODE -ne 0) { throw 'ARC dev-bridge build failed.' }
     & docker compose --project-name arc-avian-local --file $composeFile up --detach --no-build comms dev-bridge flight-recorder landing-advisor
     if ($LASTEXITCODE -ne 0) { throw 'ARC backend startup failed.' }
 } finally {
     Pop-Location
 }
 
-$chudExists = & docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq 'chud-local' }
-if (-not $chudExists) { throw "The required external CHUD container 'chud-local' does not exist." }
 & docker restart chud-local *> $null
 if ($LASTEXITCODE -ne 0) { throw 'CHUD restart failed.' }
+$chudDeadline = (Get-Date).AddSeconds(75)
+$chudReady = $false
+do {
+    Start-Sleep -Seconds 2
+    $chudState = & docker inspect --format '{{.State.Status}}' chud-local
+    if ($chudState -eq 'exited' -or $chudState -eq 'dead') {
+        throw "CHUD stopped during startup with container state '$chudState'."
+    }
+    try {
+        $chudResponse = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri 'http://127.0.0.1:8443/api/radio/devices' `
+            -TimeoutSec 3
+        $chudReady = $chudResponse.StatusCode -eq 200
+    } catch {
+        $chudReady = $false
+    }
+} until ($chudReady -or (Get-Date) -ge $chudDeadline)
+if (-not $chudReady) { throw 'CHUD did not expose its device API within 75 seconds.' }
+Write-Host 'CHUD device API is healthy at http://127.0.0.1:8443/api/radio/devices.' -ForegroundColor Green
 
 Write-Section 'Start the real AVIAN-to-ARC discovery path'
 $linkManagerName = 'arc-avian-real-link-manager'
