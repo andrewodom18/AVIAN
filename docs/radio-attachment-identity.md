@@ -17,11 +17,12 @@ Add the optional block below to the aircraft's existing `[radio]` configuration:
 drone_id = "aircraft-001"
 mac_address = "00:1e:3f:20:9a:10"
 radio_node_id = "1"
+radio_serial_number = "TW950-123"
 ```
 
 `mesh-agent` validates the MAC strictly and refuses attachment assertions on non-aircraft roles. At startup it publishes a durable `RadioAttachmentAssertion` record under `radio-attachment/<avian-node-id>` through the authenticated PEAT formation.
 
-The assertion is evidence of the locally configured tuple, not proof of RF topology, radio health, or command authorization. ARC must compare it with the operator assignment and CHUD inventory before marking an association verified. A shared or unauthenticated transport must not be treated as equivalent evidence.
+The assertion is evidence of the locally configured tuple, not proof of RF topology, radio health, or command authorization. ARC must compare MAC, vendor node ID, and serial number when present with the operator assignment and a fresh CHUD-authoritative inventory record before marking an association verified. A shared, expired, diagnostic, simulated, or unauthenticated transport must not be treated as equivalent evidence.
 
 ## Current integration status
 

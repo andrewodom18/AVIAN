@@ -9,21 +9,26 @@ dev-bridge, but ARC never contacts a radio or implements a vendor write.
 
 ## CHUD prerequisite
 
-The ground-side ARC bridge reads `GET /api/radio/devices` from CHUD. A
-successful empty `devices` array is a healthy zero-radio bench, not a failure.
-CHUD discovery state is translated into vendor-neutral ARC topology; in
-particular, `auth-failed` remains visible as an online/reachable radio whose
-management access requires a client certificate.
+CHUD currently exposes device snapshots through `/api/status` and radio devices
+with driver availability through `/api/radio/devices`. The ground-side ARC
+bridge uses the latter, but must pin and validate the response shape because
+CHUD does not yet publish a unified, versioned ARC/AVIAN inventory-plus-topology
+contract. A successful empty device array is a healthy zero-radio bench, not a
+failure, and authentication failure must remain visible as reachable rather
+than becoming a generic fetch error.
 
-For a known TrellisWare factory address, prefer a static CHUD probe such as
-`tw_probe: 10.1.0.2`. Bridge-mode subnet scans can use
-`tw_probe_subnet: 10.1.0.0/16`, but require appropriate local routes/interfaces
-and raw-network privileges. Linux CHUD deployments performing full passive or
-off-subnet discovery require root or `CAP_NET_RAW` plus `CAP_NET_ADMIN`.
+CHUD's discovery core performs passive capture and active heartbeat probing on
+one selected interface. Known-address and subnet-probe settings still require
+bench confirmation in the running image. Appropriate routes and raw-network
+privileges may be required, but the current design does not simultaneously
+cover a second USB-Ethernet or RF-facing interface.
 
 Mount approved radio client identities only into CHUD's certificate directory.
 CHUD accepts PEM certificate/key pairs, bundled PEM identities, and PKCS#12
 bundles. Do not mount those identities into ARC or AVIAN.
+
+See [CHUD integration status and AVIAN boundary](chud-integration-status.md)
+for the authority gates and external gaps.
 
 Build the deployment image from the AVIAN repository root:
 

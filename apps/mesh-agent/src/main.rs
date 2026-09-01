@@ -643,13 +643,16 @@ async fn publish_radio_attachment(
     node_id: &NodeId,
     configured: &mesh_agent::config::RadioAttachmentConfig,
 ) -> anyhow::Result<()> {
-    let assertion = RadioAttachmentAssertion::new(
+    let mut assertion = RadioAttachmentAssertion::new(
         unix_time_ms(),
         node_id.clone(),
         configured.drone_id.clone(),
         configured.mac_address.clone(),
         configured.radio_node_id.clone(),
     )?;
+    if let Some(serial_number) = configured.radio_serial_number.as_deref() {
+        assertion = assertion.with_serial_number(serial_number);
+    }
     let record = AvianRecord::new(
         node_id.clone(),
         1,

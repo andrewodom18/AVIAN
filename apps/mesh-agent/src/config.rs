@@ -231,6 +231,8 @@ pub struct RadioAttachmentConfig {
     pub drone_id: String,
     pub mac_address: String,
     pub radio_node_id: Option<String>,
+    #[serde(default)]
+    pub radio_serial_number: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -736,7 +738,7 @@ impl ResolvedConfig {
             }
         }
         if let Some(attachment) = &self.radio.attachment {
-            RadioAttachmentAssertion::new(
+            let mut assertion = RadioAttachmentAssertion::new(
                 0,
                 NodeId::from(self.name.clone()),
                 attachment.drone_id.clone(),
@@ -744,6 +746,10 @@ impl ResolvedConfig {
                 attachment.radio_node_id.clone(),
             )
             .context("invalid radio attachment")?;
+            if let Some(serial_number) = attachment.radio_serial_number.as_deref() {
+                assertion = assertion.with_serial_number(serial_number);
+            }
+            assertion.validate().context("invalid radio attachment")?;
             if self.role != ConfiguredNodeRole::Aircraft {
                 bail!("radio attachment assertions may be configured only on aircraft nodes");
             }

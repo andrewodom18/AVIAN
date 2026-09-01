@@ -50,7 +50,8 @@ pub use radio::{
     RADIO_CONFIG_SCHEMA_VERSION, RADIO_VALIDATION_TARGET_NODES, SL5200_OEM_INTEGRATION_PROFILE,
 };
 pub use radio_attachment::{
-    RadioAttachmentAssertion, RadioAttachmentError, RADIO_ATTACHMENT_SCHEMA_VERSION,
+    RadioAttachmentAssertion, RadioAttachmentError, RadioAttachmentMatch,
+    RADIO_ATTACHMENT_SCHEMA_VERSION, RADIO_ATTACHMENT_SCHEMA_VERSION_V1,
 };
 pub use radio_control::{
     ArcActivationAuthorization, FleetActivationMechanism, FleetCutoverCoordinator,
@@ -90,8 +91,12 @@ pub use traffic::{
 };
 pub use vendor_radio::{
     RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
-    RadioDiscoveryMethod, RadioDiscoveryObservation, RadioEffectiveState, RadioEvidenceLevel,
-    RadioFrequencyRange, RadioIdentity, RadioManagementAuthentication, RadioManagementEndpoint,
-    RadioManagementInterface, RadioNeighborObservation, RadioNetworkMode, RadioReachabilityStatus,
-    RadioVendorId, VendorRadioError, RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION,
+    RadioDiscoveryIntakeEnvelope, RadioDiscoveryMethod, RadioDiscoveryObservation,
+    RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange, RadioIdentity,
+    RadioManagementAuthentication, RadioManagementEndpoint, RadioManagementInterface,
+    RadioManagementLifecycle, RadioNeighborObservation, RadioNetworkMode,
+    RadioObservationAuthority, RadioReachabilityStatus, RadioVendorId, VendorRadioError,
+    RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION, RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1,
+    RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_INTAKE_SCHEMA_VERSION,
+    RADIO_DISCOVERY_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION_V1,
 };

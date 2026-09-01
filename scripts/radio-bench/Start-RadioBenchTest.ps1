@@ -31,8 +31,10 @@ if (-not (Test-Path -LiteralPath $ArcRoot)) {
 }
 
 $composeFile = Join-Path $ArcRoot 'infra\dev\docker-compose.yml'
+$realHardwareComposeFile = Join-Path $PSScriptRoot 'docker-compose.real-hardware.yml'
 $uiRoot = Join-Path $ArcRoot 'services\arc-ui'
 if (-not (Test-Path -LiteralPath $composeFile)) { throw "Compose file was not found at '$composeFile'." }
+if (-not (Test-Path -LiteralPath $realHardwareComposeFile)) { throw "Real-hardware Compose override was not found at '$realHardwareComposeFile'." }
 if (-not (Test-Path -LiteralPath $uiRoot)) { throw "ARC UI was not found at '$uiRoot'." }
 
 $bridgeSource = Join-Path $ArcRoot 'services\dev-bridge\src\api.rs'
@@ -108,9 +110,9 @@ if ($freeSystemDriveGiB -lt 12) {
 Push-Location $ArcRoot
 try {
     Write-Host 'Building the ARC dev-bridge from this checkout to prevent stale-image CLI drift.' -ForegroundColor Yellow
-    & docker compose --project-name arc-avian-local --file $composeFile build dev-bridge
+    & docker compose --project-name arc-avian-local --file $composeFile --file $realHardwareComposeFile build dev-bridge
     if ($LASTEXITCODE -ne 0) { throw 'ARC dev-bridge build failed.' }
-    & docker compose --project-name arc-avian-local --file $composeFile up --detach --no-build comms dev-bridge flight-recorder landing-advisor
+    & docker compose --project-name arc-avian-local --file $composeFile --file $realHardwareComposeFile up --detach --no-build comms dev-bridge flight-recorder landing-advisor
     if ($LASTEXITCODE -ne 0) { throw 'ARC backend startup failed.' }
 } finally {
     Pop-Location
@@ -143,7 +145,9 @@ Write-Section 'Start the real AVIAN-to-ARC discovery path'
 $linkManagerName = 'arc-avian-real-link-manager'
 $linkManagerExists = & docker ps -a --filter "name=^/$linkManagerName$" --format '{{.Names}}'
 if ($linkManagerExists) {
-    & docker start $linkManagerName *> $null
+    # Comms may have been recreated by compose. Restart the link manager so
+    # its Unix-socket Zenoh session cannot remain attached to a stale socket.
+    & docker restart $linkManagerName *> $null
 } else {
     & docker run --detach `
         --name $linkManagerName `
@@ -153,6 +157,22 @@ if ($linkManagerExists) {
         --device-id "$env:COMPUTERNAME-radio-bench" *> $null
 }
 if ($LASTEXITCODE -ne 0) { throw 'The real ARC Link Manager failed to start.' }
+
+$deadline = (Get-Date).AddSeconds(30)
+$radioCoordinationReady = $false
+do {
+    try {
+        $health = Invoke-RestMethod -Uri 'http://127.0.0.1:9101/api/radio/streamcaster/health' -TimeoutSec 3
+        $radioCoordinationReady = $health.coordination_reachable -eq $true
+    } catch {
+        $radioCoordinationReady = $false
+    }
+    if (-not $radioCoordinationReady) { Start-Sleep -Seconds 2 }
+} until ($radioCoordinationReady -or (Get-Date) -ge $deadline)
+if (-not $radioCoordinationReady) {
+    throw 'ARC dev-bridge cannot query the radio coordination path. Do not connect hardware.'
+}
+Write-Host 'ARC radio coordination transport is healthy.' -ForegroundColor Green
 
 $avianPlugin = Join-Path $AvianRoot 'target\debug\arc-radio-plugin.exe'
 if (-not (Test-Path -LiteralPath $avianPlugin)) {
