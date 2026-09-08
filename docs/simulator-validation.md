@@ -38,6 +38,11 @@ reports intentionally retain the complete event ledger.
 
 ## CHUD contract emulator
 
+For the attended Windows walkthrough and checkpoint recorder, see
+[ARC emulator PowerShell walkthrough](arc-emulator-walkthrough.md). Its startup
+check currently records BLOCKED because ARC mock Fleet does not initialize the
+radio-control client; this is an outstanding integration prerequisite.
+
 Start the loopback-only emulator with:
 
 ```powershell
