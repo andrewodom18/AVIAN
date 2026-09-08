@@ -3,7 +3,7 @@ FROM rust:1-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-COPY apps/arc-radio-plugin/ apps/arc-radio-plugin/
+COPY apps/ apps/
 RUN cargo build --release --locked -p arc-radio-plugin
 
 FROM debian:bookworm-slim
