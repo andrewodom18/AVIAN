@@ -1,9 +1,11 @@
 # TrellisWare TW-950 integration
 
 CHUD is the operational discovery and configuration authority for TrellisWare
-radios. ARC consumes CHUD's read-only `/api/radio/devices` inventory, and opens
-the selected hardware MAC in CHUD for configuration. AVIAN does not replace
-CHUD's driver, certificate store, transaction engine, or operator workflow.
+radios. ARC consumes CHUD's `/api/radio/devices` inventory and may guide an
+operator through capability-derived CHUD transactions using the radio's stable
+MAC identity. CHUD still owns the driver, certificate store, snapshots,
+physical writes, readback, and audit. ARC owns the workflow journal; AVIAN does
+not replace either boundary or call CHUD.
 
 AVIAN also includes a read-only TW-950 bench probe. It can read a radio through
 its HTTPS TNC agent API and normalize the result into the vendor-neutral

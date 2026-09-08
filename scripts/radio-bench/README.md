@@ -4,7 +4,26 @@ This Windows bench harness restarts the real-hardware-safe ARC/CHUD stack and re
 
 ## Run
 
-Open PowerShell and run:
+For the guided two-radio workflow—including separate reachability checks,
+blank-password PKCS#12 authentication attempts, evidence capture, and an
+optional handoff to the full ARC/CHUD stack—run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-GuidedRadioValidation.ps1"
+```
+
+The guided workflow is read-only and requires an exact `READY` safety
+confirmation before power-up and `DISCONNECTED` between radios. It never
+connects both factory-address radios at once and does not change radio or host
+network configuration. By default it uses `Desktop\oemcert-compat.p12` with a
+blank password and a lab-only server-certificate override. Supply
+`-CaCertificatePem <path>` when the approved radio CA is available.
+Use `-PreflightOnly` to verify the adapter, bench address, certificate presence,
+and probe build without contacting a radio.
+
+To start only the existing full ARC/CHUD evidence stack, open PowerShell and
+run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass

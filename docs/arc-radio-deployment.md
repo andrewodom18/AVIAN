@@ -3,8 +3,9 @@
 The ARC radio plugin is a local PEAT/planning sidecar. It connects to the ARC
 Zenoh Unix socket, reads non-secret planning evidence, and uses PEAT for the
 durable fleet-plan record. It does not receive a radio management URL or radio
-credentials and cannot configure a physical Silvus radio. Operators perform
-physical transactions in CHUD's own UI/API; ARC only links to that UI.
+credentials and cannot configure a physical Silvus radio. ARC's guided
+swarm-builder may orchestrate normalized CHUD API transactions through
+dev-bridge, but ARC never contacts a radio or implements a vendor write.
 
 ## CHUD prerequisite
 
@@ -57,7 +58,12 @@ management endpoint. Fresh fused ARC `local/telemetry` supplies node position
 when available. Physical RF telemetry comes from the external management API.
 Operators must not treat the logical PEAT topology as a radio propagation map.
 
-The external management service owns enrollment, credentials, live capability
-inspection, volatile apply, verification, confirmation, persistence, and
-rollback. Do not put radio credentials in AVIAN, ARC canonical configuration,
-PEAT, compose variables, or logs.
+CHUD owns enrollment, credentials, live capability inspection, physical apply,
+verification, confirmation, persistence, audit, and compensating rollback.
+ARC owns only the operator workflow and its durable journal. Do not put radio
+credentials in AVIAN, ARC canonical configuration, PEAT, compose variables, or
+logs.
+
+See [ARC single-plug radio swarm onboarding](arc-radio-swarm-builder.md) for
+the sequential workflow, recovery behavior, and the distinction between
+configuration readback and RF-topology validation.
