@@ -1,5 +1,14 @@
 # Real-radio bench test
 
+## Current entry point (build, test, cleanup)
+
+Use `Desktop\Start-AVIAN-TW950-Live-Test.ps1` for new testing sessions.
+It creates fresh disposable builds, runs the live/UI regression walkthrough,
+then destroys its owned runtime/builds while retaining results, certificates
+and saved Fleet data. See [the current guide](../../docs/tw950-live-testing.md).
+The older standalone launchers and recorders below are retained for diagnostics;
+they are not the managed build-and-cleanup entry point.
+
 This Windows bench harness restarts the real-hardware-safe ARC/CHUD stack and records what happens when a powered radio is attached by Ethernet. It deliberately does not start AVIAN's radio simulator, a `local-sim` node, or the development MAVLink simulator.
 
 ## Run
