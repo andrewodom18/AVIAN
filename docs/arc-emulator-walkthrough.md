@@ -1,5 +1,7 @@
 # ARC emulator PowerShell walkthrough
 
+For today's separate demo checks, use the Desktop testing launcher without switches; see [demo readiness testing](demo-readiness-testing.md). To explicitly run this blocked integration walkthrough through that launcher, add `-RadioIntegration`.
+
 Run `scripts/Start-ArcEmulatorWalkthrough.ps1` from an interactive Windows PowerShell terminal. The guide prompts for Y/Yes, N/No, U/Unknown, S/Skip, or Q/Quit, ignoring capitalization and surrounding whitespace. Unknown records BLOCKED; skipped or interrupted tests cannot produce a passing verdict.
 
 ## Current prerequisite

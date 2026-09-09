@@ -52,6 +52,7 @@ function Save-Report {
     $script:Run.steps | Export-Csv -NoTypeInformation -Encoding UTF8 -LiteralPath (Join-Path $script:Run.directory 'steps.csv')
     $lines = @('ARC / AVIAN SIMULATION WALKTHROUGH', ('Run: ' + $script:Run.id), ('Verdict: ' + $script:Run.verdict),
         'Scope: attended process/API and UI observations; no physical radio or RF validation.', '')
+    if ($script:Run.Contains('integration_status')) { $lines += 'Integration: ' + $script:Run.integration_status; $lines += '' }
     foreach ($step in $script:Run.steps) { $lines += '[{0}] {1}: {2}' -f $step.status,$step.id,$step.detail }
     [IO.File]::WriteAllLines((Join-Path $script:Run.directory 'summary.txt'), $lines, (New-Object Text.UTF8Encoding($false)))
 }

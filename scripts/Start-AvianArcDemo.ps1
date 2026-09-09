@@ -8,6 +8,7 @@ param(
     [ValidateRange(1024,65535)][int]$TcpPort = 19100,
     [ValidateRange(1024,65535)][int]$VisualizerPort = 13211,
     [switch]$OpenBrowser,
+    [switch]$GuidedSession,
     [switch]$CheckOnly,
     [switch]$LibraryOnly
 )
@@ -40,6 +41,22 @@ function Save-DemoManifest($Value, [string]$Path) {
     if (Test-Path -LiteralPath $Path) {
         [IO.File]::Replace($temporary, $Path, "$Path.previous")
     } else { [IO.File]::Move($temporary, $Path) }
+}
+
+function Remove-DemoBuild($Manifest) {
+    if(-not $Manifest.PSObject.Properties['buildRoot']){return}
+    $parent=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'AVIAN-Test-Builds')).TrimEnd('\')
+    $path=[IO.Path]::GetFullPath($Manifest.buildRoot).TrimEnd('\')
+    if(-not $path.StartsWith($parent+'\',[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $path -Leaf) -notmatch '^test-[0-9]{8}-[0-9]{6}-[a-f0-9]{6}$'){throw 'Invalid demo build ownership.'}
+    $walk=$path
+    while($walk -and $walk.Length -ge $parent.Length){
+        if(Test-Path -LiteralPath $walk){if((Get-Item -LiteralPath $walk -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Demo build path contains a reparse point.'}}
+        $walk=Split-Path $walk -Parent
+    }
+    if(Test-Path -LiteralPath $path){
+        if(@(Get-ChildItem -LiteralPath $path -Recurse -Force | Where-Object {$_.Attributes -band [IO.FileAttributes]::ReparsePoint}).Count){throw 'Demo build contains a reparse point.'}
+        Remove-Item -LiteralPath $path -Recurse -Force
+    }
 }
 
 function Get-DemoJson([string]$Url) {
@@ -96,13 +113,13 @@ function Start-DemoProcess([string]$Name, [string]$Executable, [string[]]$Argume
 if ($LibraryOnly) { return }
 $avianRoot = Split-Path -Parent $PSScriptRoot
 $uiRoot = Join-Path $ArcRoot 'services\arc-ui'
-$bridge = Join-Path $ArcRoot 'services\dev-bridge\target\debug\dev-bridge.exe'
+$bridgeManifest = Join-Path $ArcRoot 'services\dev-bridge\Cargo.toml'
 $vite = Join-Path $uiRoot 'node_modules\vite\bin\vite.js'
 $visualizer = Join-Path $avianRoot 'simulators\mesh-operations\visualizer\server.mjs'
 $manifestPath = Join-Path $StateRoot 'active.json'
 $ports = @($UiPort,$BridgePort,$TcpPort,$VisualizerPort)
 if (@($ports | Select-Object -Unique).Count -ne 4) { throw 'Choose four different ports.' }
-foreach ($file in @($bridge,$vite,$visualizer)) {
+foreach ($file in @($bridgeManifest,$vite,$visualizer)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing local dependency: $file. No downloads were attempted." }
 }
 $node = (Get-Command node -ErrorAction Stop).Source
@@ -130,11 +147,19 @@ try {
     }
     $runDirectory = Join-Path $StateRoot ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0,6))
     New-Item -ItemType Directory -Path $runDirectory | Out-Null
+    $buildRoot=Join-Path $env:LOCALAPPDATA ('AVIAN-Test-Builds\test-'+(Split-Path $runDirectory -Leaf))
+    if(Test-Path -LiteralPath $buildRoot){throw 'Fresh demo build directory already exists.'}
+    New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
+    $bridge=Join-Path $buildRoot 'arc-target\debug\dev-bridge.exe'
+    $sessionViteConfig=Join-Path $buildRoot 'vite-session.config.mjs'
+    $configSource=([uri](Join-Path $uiRoot 'vite.config.ts')).AbsoluteUri | ConvertTo-Json -Compress
+    $cachePath=(Join-Path $buildRoot 'vite-cache') | ConvertTo-Json -Compress
+    "import original from $configSource; export default env => ({...original(env), cacheDir: $cachePath});" | Set-Content -LiteralPath $sessionViteConfig -Encoding UTF8
     $uiUrl = "http://127.0.0.1:$UiPort"
     $bridgeUrl = "http://127.0.0.1:$BridgePort"
     $networkUrl = "http://127.0.0.1:$VisualizerPort"
     $script:demoManifest = [pscustomobject]@{ schema=1; status='starting'; startedUtc=[DateTime]::UtcNow.ToString('o');
-        arcUrl="$uiUrl/home/devices"; avianUrl=$networkUrl; logs=$runDirectory; processes=@() }
+        arcUrl="$uiUrl/home/devices"; avianUrl=$networkUrl; logs=$runDirectory; buildRoot=$buildRoot; processes=@() }
     Save-DemoManifest $script:demoManifest $manifestPath
     try {
         Write-Host 'Preparing AVIAN simulation from local dependencies (offline)...'
@@ -144,10 +169,15 @@ try {
             $buildPreference = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'
-                & $cargo build --offline --locked -p mesh-sim *> "$runDirectory\simulator-build.log"
+                & $cargo build --offline --locked --target-dir "$buildRoot\avian-target" -p mesh-sim *> "$runDirectory\simulator-build.log"
             } finally { $ErrorActionPreference = $buildPreference }
             if ($LASTEXITCODE -ne 0) { throw "Offline simulator build failed. See $runDirectory\simulator-build.log" }
         } finally { Pop-Location }
+        Write-Host 'Building ARC from current source into the disposable session directory...'
+        $buildPreference=$ErrorActionPreference
+        try{$ErrorActionPreference='Continue';& $cargo build --offline --locked --manifest-path $bridgeManifest --target-dir "$buildRoot\arc-target" *> "$runDirectory\arc-build.log"}
+        finally{$ErrorActionPreference=$buildPreference}
+        if($LASTEXITCODE -ne 0){throw "ARC build failed. See $runDirectory\arc-build.log"}
         $backend = Start-DemoProcess 'arc-backend' $bridge @('--mock','--mock-detections','--video','--device-id','SIMULATION-ALPHA',
             '--port',"$TcpPort",'--http-port',"$BridgePort",'--tcp-bind','127.0.0.1','--http-bind','127.0.0.1') $ArcRoot @{
                 ARC_DEV_BRIDGE_STATE_DIR="$runDirectory\fleet-state"; ARC_DEV_BRIDGE_TEST_CONTEXT_PATH=$null;
@@ -156,10 +186,10 @@ try {
             }
         Wait-DemoJson "$bridgeUrl/api/health" $backend { param($h) $h.bridge_protocol -eq 'fleet-v2' -and $h.fleet.ok }
         $network = Start-DemoProcess 'avian-visualizer' $node @("`"$visualizer`"") $avianRoot @{
-            AVIAN_VISUALIZER_PORT="$VisualizerPort"; CARGO_NET_OFFLINE='true'
+            AVIAN_VISUALIZER_PORT="$VisualizerPort"; CARGO_NET_OFFLINE='true'; CARGO_TARGET_DIR="$buildRoot\avian-target"
         }
         Wait-DemoJson "$networkUrl/api/health" $network { param($h) $h.ok -eq $true }
-        $frontend = Start-DemoProcess 'arc-frontend' $node @("`"$vite`"",'--host','127.0.0.1','--port',"$UiPort",'--strictPort') $uiRoot @{
+        $frontend = Start-DemoProcess 'arc-frontend' $node @("`"$vite`"",'--host','127.0.0.1','--port',"$UiPort",'--strictPort','--config',"`"$sessionViteConfig`"") $uiRoot @{
             VITE_DEV_HTTP='1'; VITE_BRIDGE_URL=$bridgeUrl; VITE_ARC_WS_URL="ws://127.0.0.1:$BridgePort/ws";
             VITE_DEMO_MODE='1'; BROWSER='none'
         }
@@ -169,6 +199,7 @@ try {
     } catch {
         $failure = $_
         if (@($script:demoManifest.processes).Count -gt 0) { Stop-DemoProcesses $script:demoManifest.processes }
+        Remove-DemoBuild $script:demoManifest
         $script:demoManifest.status = 'failed'
         Save-DemoManifest $script:demoManifest $manifestPath
         throw $failure
@@ -179,7 +210,11 @@ try {
     Write-Host "Logs:            $runDirectory"
     Write-Host 'These are separate demos. ARC mock radio configuration is not integrated; real radios are not controlled.' -ForegroundColor Yellow
     Write-Host 'Voice/AI features require additional model assets. They are not included in this launch.'
-    Write-Host 'You can close this PowerShell window. Use Stop-AVIAN-ARC-Demo.ps1 to stop these services.'
+    if ($GuidedSession) {
+        Write-Host 'Keep this PowerShell window open and follow the testing prompts. The guide handles its own cleanup.'
+    } else {
+        Write-Host 'You can close this PowerShell window. Use Stop-AVIAN-ARC-Demo.ps1 to stop these services.'
+    }
     if ($OpenBrowser) {
         Start-Process $script:demoManifest.arcUrl
         Start-Process $networkUrl

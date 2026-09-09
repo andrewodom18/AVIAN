@@ -8,7 +8,8 @@ $lock = [IO.File]::Open((Join-Path $requestedStateRoot 'launcher.lock'), 'OpenOr
 try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if (@($manifest.processes).Count -gt 0) { Stop-DemoProcesses $manifest.processes }
+    Remove-DemoBuild $manifest
     $manifest.status = 'stopped'
     Save-DemoManifest $manifest $manifestPath
-    Write-Host "Demo stopped. Logs retained at $($manifest.logs). Other apps and browser tabs were left alone."
+    Write-Host "Demo stopped and disposable builds removed. Logs retained at $($manifest.logs). Other apps and browser tabs were left alone."
 } finally { $lock.Dispose() }
