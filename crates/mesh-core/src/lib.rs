@@ -90,13 +90,15 @@ pub use traffic::{
     SwarmTrafficPolicy, TelemetryPublication, TelemetryTrafficGovernor, TrafficPolicyError,
 };
 pub use vendor_radio::{
-    RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
+    normalize_radio_mac, reduce_radio_discoveries, stable_radio_source, RadioCapabilities,
+    RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
     RadioDiscoveryIntakeEnvelope, RadioDiscoveryMethod, RadioDiscoveryObservation,
-    RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange, RadioIdentity,
-    RadioManagementAuthentication, RadioManagementEndpoint, RadioManagementInterface,
-    RadioManagementLifecycle, RadioNeighborObservation, RadioNetworkMode,
-    RadioObservationAuthority, RadioReachabilityStatus, RadioVendorId, VendorRadioError,
-    RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION, RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1,
-    RADIO_DEVICE_SCHEMA_VERSION, RADIO_DISCOVERY_INTAKE_SCHEMA_VERSION,
-    RADIO_DISCOVERY_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION_V1,
+    RadioDiscoveryPolicy, RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange,
+    RadioIdentity, RadioManagementAuthentication, RadioManagementEndpoint,
+    RadioManagementInterface, RadioManagementLifecycle, RadioNeighborObservation, RadioNetworkMode,
+    RadioObservationAuthority, RadioObservationFreshness, RadioReachabilityStatus, RadioVendorId,
+    VendorRadioError, RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION,
+    RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1, RADIO_DEVICE_SCHEMA_VERSION,
+    RADIO_DISCOVERY_INTAKE_SCHEMA_VERSION, RADIO_DISCOVERY_SCHEMA_VERSION,
+    RADIO_DISCOVERY_SCHEMA_VERSION_V1,
 };

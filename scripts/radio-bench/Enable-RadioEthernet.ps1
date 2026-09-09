@@ -3,7 +3,8 @@ param(
     [string]$AdapterName = 'Ethernet 2',
     [string]$ComputerAddress = '10.1.0.20',
     [string]$RadioAddress = '10.1.0.2',
-    [int]$PrefixLength = 24
+    [int]$PrefixLength = 24,
+    [string]$SnapshotRoot = (Join-Path $env:USERPROFILE 'Desktop\Radio Test Results\network-snapshots')
 )
 
 Set-StrictMode -Version Latest
@@ -35,6 +36,17 @@ Write-Host 'No default gateway or DNS server will be assigned to this interface;
 $adapter = Get-NetAdapter -Name $AdapterName -IncludeHidden -ErrorAction SilentlyContinue
 if (-not $adapter) { throw "Adapter '$AdapterName' was not found." }
 
+New-Item -ItemType Directory -Force -Path $SnapshotRoot | Out-Null
+$snapshotPath = Join-Path $SnapshotRoot "radio-ethernet-$((Get-Date).ToString('yyyyMMdd-HHmmss')).clixml"
+[pscustomobject]@{
+    CapturedAt = (Get-Date).ToString('o')
+    Adapter = Get-NetAdapter -Name $AdapterName -IncludeHidden
+    IpInterface = @(Get-NetIPInterface -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+    Addresses = @(Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+    Routes = @(Get-NetRoute -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+} | Export-Clixml -LiteralPath $snapshotPath
+Write-Host "Saved the pre-change network snapshot to $snapshotPath" -ForegroundColor Green
+
 $pnp = Get-PnpDevice -Class Net | Where-Object FriendlyName -eq $adapter.InterfaceDescription | Select-Object -First 1
 if (-not $pnp) { throw "PnP device for '$AdapterName' was not found." }
 
@@ -47,14 +59,16 @@ if ($pnp.Problem -eq 'CM_PROB_DISABLED' -or $pnp.Status -ne 'OK') {
 Enable-NetAdapter -Name $AdapterName -Confirm:$false -ErrorAction SilentlyContinue
 Set-NetIPInterface -InterfaceAlias $AdapterName -AddressFamily IPv4 -Dhcp Disabled -InterfaceMetric 500
 
-Get-NetRoute -InterfaceAlias $AdapterName -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-    Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+$defaultRoutes = @(Get-NetRoute -InterfaceAlias $AdapterName -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
+if ($defaultRoutes.Count -gt 0) {
+    throw "Adapter '$AdapterName' has an existing default route. It was preserved; remove or migrate it deliberately before using this adapter as a dedicated radio link. Snapshot: $snapshotPath"
+}
 
 $existing = @(Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue)
 $wanted = $existing | Where-Object { $_.IPAddress -eq $ComputerAddress -and $_.PrefixLength -eq $PrefixLength } | Select-Object -First 1
 if (-not $wanted) {
-    $existing | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } |
-        Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+    # Preserve every pre-existing address. The dedicated bench address is
+    # additive and can be removed without reconstructing prior configuration.
     New-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $ComputerAddress -PrefixLength $PrefixLength | Out-Null
 }
 
@@ -66,6 +80,7 @@ $address = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -Er
 
 Write-Host "`nAdapter: $($adapter.Name) status=$($adapter.Status) link=$($adapter.LinkSpeed)" -ForegroundColor $(if ($adapter.Status -eq 'Up') { 'Green' } else { 'Yellow' })
 Write-Host "Address: $(if ($address) { "$($address.IPAddress)/$($address.PrefixLength)" } else { 'not assigned' })"
+Write-Host "Recovery snapshot: $snapshotPath"
 
 $pingReply = (& ping.exe -n 4 -w 1000 $RadioAddress 2>&1 | Out-String)
 Write-Host $pingReply

@@ -39,9 +39,11 @@ toml = "0.9"
 uuid = { version = "1", features = ["serde", "v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+p12-keystore = "0.3.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-zenoh = { version = "1", features = ["unstable"] }
+zeroize = "1"
+zenoh = { version = "1", default-features = false, features = ["unstable", "transport_tcp", "transport_unixsock-stream"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

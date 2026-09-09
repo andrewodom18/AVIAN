@@ -171,13 +171,13 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     state.write().await.latest_status = Some(status.clone());
                 }
                 let _ = session
-                    .put(TOPIC_STATUS, serde_json::to_vec(&status).unwrap_or_default())
+                    .put(TOPIC_STATUS, serde_json::to_vec(&status)?)
                     .await;
                 if let Some(observation) = status.effective.as_ref() {
                     let _ = session
                         .put(
                             TOPIC_EFFECTIVE_OBSERVATIONS,
-                            serde_json::to_vec(observation).unwrap_or_default(),
+                            serde_json::to_vec(observation)?,
                         )
                         .await;
                 }
@@ -203,7 +203,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     })
                 };
                 let _ = query
-                    .reply(query.key_expr(), serde_json::to_vec(&health).unwrap_or_default())
+                    .reply(query.key_expr(), serde_json::to_vec(&health)?)
                     .await;
             }
             _ = peat_poll.tick(), if peat.is_some() => {
@@ -216,7 +216,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     if should_publish {
                         state.write().await.latest_plan_generation = Some(generation);
                         let _ = session
-                            .put(TOPIC_FLEET_PLAN, serde_json::to_vec(&plan).unwrap_or_default())
+                            .put(TOPIC_FLEET_PLAN, serde_json::to_vec(&plan)?)
                             .await;
                     }
                 }
@@ -224,7 +224,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     let _ = session
                         .put(
                             TOPIC_MESH_OBSERVATIONS,
-                            serde_json::to_vec(&observation).unwrap_or_default(),
+                            serde_json::to_vec(&observation)?,
                         )
                         .await;
                 }
@@ -235,14 +235,14 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     let _ = session
                         .put(
                             TOPIC_MESH_OBSERVATIONS,
-                            serde_json::to_vec(&observation).unwrap_or_default(),
+                            serde_json::to_vec(&observation)?,
                         )
                         .await;
                     if observation.node.status == StreamCasterObservedStatus::Online {
                         let _ = session
                             .put(
                                 TOPIC_EFFECTIVE_OBSERVATIONS,
-                                serde_json::to_vec(&effective_observation(&observation)).unwrap_or_default(),
+                                serde_json::to_vec(&effective_observation(&observation))?,
                             )
                             .await;
                     }

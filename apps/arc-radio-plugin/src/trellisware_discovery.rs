@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -6,9 +5,10 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::Args;
 use mesh_core::{
-    NodeId, RadioDiscoveryMethod, RadioDiscoveryObservation, RadioManagementAuthentication,
-    RadioManagementEndpoint, RadioManagementLifecycle, RadioObservationAuthority,
-    RadioReachabilityStatus, RadioVendorId, RADIO_DISCOVERY_SCHEMA_VERSION,
+    reduce_radio_discoveries, stable_radio_source, RadioDiscoveryMethod, RadioDiscoveryObservation,
+    RadioDiscoveryPolicy, RadioManagementAuthentication, RadioManagementEndpoint,
+    RadioManagementLifecycle, RadioObservationAuthority, RadioReachabilityStatus, RadioVendorId,
+    RADIO_DISCOVERY_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use tokio::net::TcpStream;
@@ -40,9 +40,9 @@ pub struct TrellisWareDiscoveryArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct NeighborEntry {
-    #[serde(alias = "IPAddress", alias = "ip")]
+    #[serde(alias = "IPAddress", alias = "ip", alias = "dst")]
     ip_address: String,
-    #[serde(alias = "LinkLayerAddress", alias = "mac")]
+    #[serde(alias = "LinkLayerAddress", alias = "mac", alias = "lladdr")]
     link_layer_address: String,
     #[serde(default, alias = "InterfaceAlias", alias = "dev")]
     interface_alias: Option<String>,
@@ -56,6 +56,7 @@ struct NeighborEntry {
 #[serde(untagged)]
 enum NeighborState {
     Name(String),
+    Names(Vec<String>),
     Code(u8),
 }
 
@@ -69,26 +70,36 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
     };
 
     loop {
-        stimulate_neighbors(&args.probe_ips).await;
-        let discoveries = discover().await?;
-        emit(&discoveries, args.output.as_deref())?;
-        if let Some(session) = session.as_ref() {
-            for discovery in &discoveries {
-                session
-                    .put(RADIO_DISCOVERY_TOPIC_V2, serde_json::to_vec(discovery)?)
-                    .await
-                    .map_err(|error| anyhow::anyhow!("publishing TW-950 discovery: {error}"))?;
-                let compatibility = discovery.v1_compatibility_record();
-                session
-                    .put(
-                        RADIO_DISCOVERY_TOPIC_V1,
-                        serde_json::to_vec(&compatibility)?,
-                    )
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("publishing TW-950 v1 compatibility discovery: {error}")
-                    })?;
+        let iteration = async {
+            stimulate_neighbors(&args.probe_ips).await;
+            let discoveries = discover().await?;
+            emit(&discoveries, args.output.as_deref())?;
+            if let Some(session) = session.as_ref() {
+                for discovery in &discoveries {
+                    session
+                        .put(RADIO_DISCOVERY_TOPIC_V2, serde_json::to_vec(discovery)?)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("publishing TW-950 discovery: {error}"))?;
+                    let compatibility = discovery.v1_compatibility_record();
+                    session
+                        .put(
+                            RADIO_DISCOVERY_TOPIC_V1,
+                            serde_json::to_vec(&compatibility)?,
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("publishing TW-950 v1 compatibility discovery: {error}")
+                        })?;
+                }
             }
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(error) = iteration {
+            if !args.watch {
+                return Err(error);
+            }
+            eprintln!("TW-950 discovery iteration failed; retrying: {error:#}");
         }
         if !args.watch {
             break;
@@ -99,16 +110,21 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
 }
 
 async fn discover() -> anyhow::Result<Vec<RadioDiscoveryObservation>> {
-    let mut discoveries = BTreeMap::new();
+    let observed_at_ms = now_unix_ms();
+    let mut discoveries = Vec::new();
     for neighbor in system_neighbors().await? {
-        if let Some(discovery) = discovery_from_neighbor(&neighbor).await {
-            discoveries.insert(discovery.mac_address.clone(), discovery);
+        if let Some(discovery) = discovery_from_neighbor(&neighbor, observed_at_ms).await {
+            discoveries.push(discovery);
         }
     }
-    Ok(discoveries.into_values().collect())
+    reduce_radio_discoveries(discoveries, observed_at_ms, RadioDiscoveryPolicy::default())
+        .context("reducing TW-950 discovery observations")
 }
 
-async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscoveryObservation> {
+async fn discovery_from_neighbor(
+    neighbor: &NeighborEntry,
+    observed_at_ms: u64,
+) -> Option<RadioDiscoveryObservation> {
     let mac = normalize_mac(&neighbor.link_layer_address)?;
     if !is_trellisware_mac(&mac) || neighbor_state_is_inactive(neighbor.state.as_ref()) {
         return None;
@@ -152,27 +168,28 @@ async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscov
     if !reachable {
         return None;
     }
-    let compact_mac = mac.replace(':', "");
     let observed_at_ms = now_unix_ms();
+    let vendor = RadioVendorId::trellisware();
     let observation = RadioDiscoveryObservation {
         schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
         observed_at_ms,
-        source: NodeId::from(format!("radio/trellisware/{compact_mac}")),
-        vendor: RadioVendorId::trellisware(),
+        source: stable_radio_source(&vendor, &mac).ok()?,
+        vendor,
         model_hint: "tw-950".into(),
         mac_address: mac,
         serial_number: None,
         vendor_node_id: None,
         hostname: None,
         reachability: RadioReachabilityStatus::Reachable,
-        management_authentication: RadioManagementAuthentication::ClientCertificateRequired,
+        // A TCP handshake is not evidence of a certificate requirement.
+        management_authentication: RadioManagementAuthentication::Unknown,
         management_endpoints: endpoints,
         discovery_methods: vec![
             RadioDiscoveryMethod::NeighborTable,
             RadioDiscoveryMethod::Oui,
             RadioDiscoveryMethod::TcpReachability,
         ],
-        error_code: Some("client_certificate_required".into()),
+        error_code: None,
         source_authority: Some(RadioObservationAuthority::AvianDiagnostic),
         management_lifecycle: Some(RadioManagementLifecycle::Reachable),
         management_driver_available: Some(false),
@@ -292,6 +309,12 @@ fn neighbor_state_is_inactive(state: Option<&NeighborState>) -> bool {
             state.to_ascii_lowercase().as_str(),
             "unreachable" | "incomplete" | "failed"
         ),
+        NeighborState::Names(states) => states.iter().any(|state| {
+            matches!(
+                state.to_ascii_lowercase().as_str(),
+                "unreachable" | "incomplete" | "failed"
+            )
+        }),
         NeighborState::Code(state) => matches!(state, 0 | 1),
     })
 }
@@ -330,11 +353,26 @@ fn eui64_link_local(mac: &str) -> Option<Ipv6Addr> {
 fn emit(discoveries: &[RadioDiscoveryObservation], output: Option<&Path>) -> anyhow::Result<()> {
     let encoded = serde_json::to_string_pretty(discoveries)?;
     if let Some(path) = output {
-        std::fs::write(path, format!("{encoded}\n"))
-            .with_context(|| format!("writing TW-950 discoveries to {}", path.display()))?;
+        atomic_write(path, format!("{encoded}\n").as_bytes())?;
     } else {
         println!("{encoded}");
     }
+    Ok(())
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating temporary output beside {}", path.display()))?;
+    std::io::Write::write_all(&mut temporary, contents)
+        .with_context(|| format!("writing temporary output for {}", path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("replacing {} atomically", path.display()))?;
     Ok(())
 }
 
@@ -380,6 +418,15 @@ mod tests {
             Some("00:1e:3f:20:9a:10")
         );
         assert!(is_trellisware_mac("00:1e:3f:20:9a:10"));
+    }
+
+    #[test]
+    fn parses_linux_iproute2_neighbor_shape() {
+        let encoded = br#"[{"dst":"10.1.0.2","dev":"eth0","lladdr":"00:1e:3f:20:9a:10","state":["REACHABLE"]}]"#;
+        let entries = parse_neighbor_json(encoded).unwrap();
+        assert_eq!(entries[0].ip_address, "10.1.0.2");
+        assert_eq!(entries[0].link_layer_address, "00:1e:3f:20:9a:10");
+        assert!(!neighbor_state_is_inactive(entries[0].state.as_ref()));
     }
 
     #[test]

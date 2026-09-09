@@ -6,7 +6,7 @@
   "model_hint": "tw-950",
   "mac_address": "00:1e:3f:20:9a:10",
   "reachability": "reachable",
-  "management_authentication": "client_certificate_required",
+  "management_authentication": "unknown",
   "management_endpoints": [
     {
       "address": "10.1.0.2",
@@ -25,6 +25,5 @@
     "neighbor_table",
     "oui",
     "tcp_reachability"
-  ],
-  "error_code": "client_certificate_required"
+  ]
 }

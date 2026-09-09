@@ -18,9 +18,18 @@ AVIAN can also publish credential-independent diagnostic discovery records to
 `local/link/radio/discovery/v2`, with a stripped compatibility projection on
 `local/link/radio/discovery/v1`. These identify the physical radio by MAC and
 report network reachability separately from management authentication, so ARC
-can show `certificate required` instead of hiding a reachable radio. They are
-explicitly `avian_diagnostic`, do not claim a CHUD management driver, and can
-never authorize configuration or measured RF topology.
+can show a reachable radio without inventing an authentication requirement.
+TCP reachability alone is reported with authentication `unknown`.
+
+Discovery ingestion canonicalizes colon-, dash-, dotted-, and compact-form MAC
+addresses to one physical identity. A bounded reducer retains only fresh
+observations, rejects excessive future clock skew, and lets newer evidence win
+even when it reports that a previously reachable radio is now unreachable.
+Equal-time duplicates are resolved by deterministic evidence strength. These
+rules prevent stale or duplicate records from inflating the live fleet.
+
+These observations are explicitly `avian_diagnostic`, do not claim a CHUD
+management driver, and never authorize configuration or measured RF topology.
 
 Observed fields include the physical device ID/MAC, model, serial number,
 firmware, system alias, operating state, battery level, active preset, and
@@ -74,11 +83,11 @@ into CHUD and keep passwords outside ARC configuration, AVIAN, PEAT, source
 control, and logs. The filenames and passwords above are placeholders; the
 repository does not contain an authorized TrellisWare client identity.
 
-The ARC/AVIAN contract requires CHUD to distinguish discovered, reachable,
-authenticated, managed, connected, and stale states. ARC should keep an
-authentication-failed radio visible as reachable and label its management
-access `certificate required`; this is not a generic fetch failure. Verify the
-exact lifecycle vocabulary against the deployed CHUD API before mapping it.
+CHUD's device lifecycle distinguishes `reachable`, `identified`,
+`auth-failed`, `confirmed`, `connected`, and `stale`. ARC intentionally keeps an
+`auth-failed` radio visible as discovered and labels its management access
+`rejected`. A client-certificate requirement is shown only when an actual
+TLS/application-layer exchange identifies that specific requirement.
 
 See [CHUD integration status and AVIAN boundary](chud-integration-status.md).
 
@@ -111,6 +120,30 @@ cargo run -p arc-radio-plugin -- trellisware-probe `
   --client-identity-pem C:\secure\tw-client-identity.pem `
   --ca-certificate-pem C:\secure\tw-radio-ca.pem
 ```
+
+The diagnostic probe also accepts a PKCS#12 client identity without converting
+or writing its private key to disk:
+
+```powershell
+cargo run -p arc-radio-plugin -- trellisware-probe `
+  --radio-url https://10.1.0.11 `
+  --source tw-ground-1 `
+  --client-identity-pkcs12 C:\secure\oemcert-compat.p12 `
+  --ca-certificate-pem C:\secure\tw-radio-ca.pem
+```
+
+Omitting `--client-identity-pkcs12-password-file` deliberately tries a blank
+password. If an issued identity has a password, put only that password in a
+restricted file and pass its path with the option; do not put the password on
+the command line. The probe keeps the password and converted in-memory PEM in
+zeroizing buffers and emits only a generic identity error.
+
+Local parser validation confirms that the issued `oemcert-compat.p12` artifact
+loads with a blank password. The similarly named `oemcert.p12` artifact did not
+pass PKCS#12 MAC-integrity validation in the pure-Rust diagnostic path. This is
+certificate-file compatibility evidence only: neither artifact has yet been
+authenticated against a physical radio, and the repository stores neither
+file, its private key, nor its bytes.
 
 For a self-signed lab certificate, `--accept-invalid-server-certificate` is an
 explicit temporary alternative to `--ca-certificate-pem`. It does not disable
