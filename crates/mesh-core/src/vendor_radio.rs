@@ -2,7 +2,9 @@
 //!
 //! Existing StreamCaster contracts remain stable while new radio families use
 //! this boundary. Vendor adapters normalize hardware data into these types;
-//! ARC remains the authority for desired configuration and activation policy.
+//! ARC owns operator intent and workflow, CHUD owns physical-radio discovery,
+//! credentials, writes, readback, and effective state, and AVIAN consumes the
+//! normalized evidence for attachment and topology decisions.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -10,7 +12,11 @@ use thiserror::Error;
 use crate::NodeId;
 
 pub const RADIO_DEVICE_SCHEMA_VERSION: u16 = 1;
-pub const RADIO_DISCOVERY_SCHEMA_VERSION: u16 = 1;
+pub const RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1: u16 = 1;
+pub const RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION: u16 = 2;
+pub const RADIO_DISCOVERY_SCHEMA_VERSION_V1: u16 = 1;
+pub const RADIO_DISCOVERY_SCHEMA_VERSION: u16 = 2;
+pub const RADIO_DISCOVERY_INTAKE_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RadioVendorId(String);
@@ -113,6 +119,25 @@ pub enum RadioManagementAuthentication {
     Rejected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioObservationAuthority {
+    ChudAuthoritative,
+    AvianDiagnostic,
+    Simulation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioManagementLifecycle {
+    Discovered,
+    Reachable,
+    Authenticated,
+    Managed,
+    Connected,
+    Stale,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RadioManagementEndpoint {
@@ -136,6 +161,8 @@ pub struct RadioDiscoveryObservation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_number: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     pub reachability: RadioReachabilityStatus,
     pub management_authentication: RadioManagementAuthentication,
@@ -143,11 +170,24 @@ pub struct RadioDiscoveryObservation {
     pub discovery_methods: Vec<RadioDiscoveryMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_authority: Option<RadioObservationAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_lifecycle: Option<RadioManagementLifecycle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_driver_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
 }
 
 impl RadioDiscoveryObservation {
     pub fn validate(&self) -> Result<(), VendorRadioError> {
-        if self.schema_version != RADIO_DISCOVERY_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            RADIO_DISCOVERY_SCHEMA_VERSION_V1 | RADIO_DISCOVERY_SCHEMA_VERSION
+        ) {
             return Err(VendorRadioError::UnsupportedDiscoverySchemaVersion(
                 self.schema_version,
             ));
@@ -169,7 +209,98 @@ impl RadioDiscoveryObservation {
         if self.discovery_methods.is_empty() {
             return Err(VendorRadioError::MissingDiscoveryMethods);
         }
+        if self.schema_version == RADIO_DISCOVERY_SCHEMA_VERSION {
+            validate_v2_metadata(
+                self.observed_at_ms,
+                self.source_authority,
+                self.management_lifecycle,
+                self.management_driver_available,
+                self.observation_revision,
+                self.expires_at_ms,
+            )?;
+        }
         Ok(())
+    }
+
+    pub fn is_fresh_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.is_some_and(|expiry| now_ms <= expiry)
+    }
+
+    /// Returns true only for a fresh CHUD record that is safe to use as the
+    /// identity and management target for a configuration workflow.
+    pub fn is_authoritative_for_configuration_at(&self, now_ms: u64) -> bool {
+        self.validate().is_ok()
+            && self.schema_version == RADIO_DISCOVERY_SCHEMA_VERSION
+            && self.source_authority == Some(RadioObservationAuthority::ChudAuthoritative)
+            && self.reachability == RadioReachabilityStatus::Reachable
+            && self.management_authentication == RadioManagementAuthentication::Authenticated
+            && matches!(
+                self.management_lifecycle,
+                Some(RadioManagementLifecycle::Managed | RadioManagementLifecycle::Connected)
+            )
+            && self.management_driver_available == Some(true)
+            && self.is_fresh_at(now_ms)
+    }
+
+    pub fn v1_compatibility_record(&self) -> Self {
+        let mut compatibility = self.clone();
+        compatibility.schema_version = RADIO_DISCOVERY_SCHEMA_VERSION_V1;
+        compatibility.vendor_node_id = None;
+        compatibility.source_authority = None;
+        compatibility.management_lifecycle = None;
+        compatibility.management_driver_available = None;
+        compatibility.observation_revision = None;
+        compatibility.expires_at_ms = None;
+        compatibility
+    }
+}
+
+/// Candidate-only envelope for submitting AVIAN's host-interface observation
+/// to CHUD. Transport authentication is external to this payload (for example,
+/// a scoped CHUD API key); successful submission never changes the embedded
+/// observation's authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioDiscoveryIntakeEnvelope {
+    pub schema_version: u16,
+    pub observation_id: String,
+    pub source_instance_id: String,
+    pub submitted_at_ms: u64,
+    pub nonce: String,
+    pub idempotency_key: String,
+    pub observation: RadioDiscoveryObservation,
+}
+
+impl RadioDiscoveryIntakeEnvelope {
+    pub fn validate_at(&self, now_ms: u64) -> Result<(), VendorRadioError> {
+        if self.schema_version != RADIO_DISCOVERY_INTAKE_SCHEMA_VERSION {
+            return Err(VendorRadioError::UnsupportedDiscoveryIntakeSchemaVersion(
+                self.schema_version,
+            ));
+        }
+        validate_token("observation_id", &self.observation_id)?;
+        validate_token("source_instance_id", &self.source_instance_id)?;
+        validate_token("nonce", &self.nonce)?;
+        validate_token("idempotency_key", &self.idempotency_key)?;
+        if self.submitted_at_ms < self.observation.observed_at_ms
+            || self.submitted_at_ms > now_ms.saturating_add(300_000)
+        {
+            return Err(VendorRadioError::InvalidDiscoveryIntakeTimestamp);
+        }
+        self.observation.validate()?;
+        if self.observation.schema_version != RADIO_DISCOVERY_SCHEMA_VERSION
+            || self.observation.source_authority != Some(RadioObservationAuthority::AvianDiagnostic)
+        {
+            return Err(VendorRadioError::InvalidDiscoveryIntakeAuthority);
+        }
+        if !self.observation.is_fresh_at(now_ms) {
+            return Err(VendorRadioError::StaleDiscoveryIntakeObservation);
+        }
+        Ok(())
+    }
+
+    pub fn deduplication_identity(&self) -> (&str, &str) {
+        (&self.source_instance_id, &self.idempotency_key)
     }
 }
 
@@ -283,6 +414,8 @@ pub struct RadioIdentity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_number: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac_address: Option<String>,
@@ -329,6 +462,10 @@ pub struct RadioNeighborObservation {
     pub tx_rate_mbps: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rx_rate_mbps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_authority: Option<RadioObservationAuthority>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -349,6 +486,80 @@ pub struct RadioDeviceObservation {
     pub neighbors: Vec<RadioNeighborObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_authority: Option<RadioObservationAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_lifecycle: Option<RadioManagementLifecycle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_driver_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+}
+
+impl RadioDeviceObservation {
+    pub fn validate(&self) -> Result<(), VendorRadioError> {
+        if !matches!(
+            self.schema_version,
+            RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1 | RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION
+        ) {
+            return Err(VendorRadioError::UnsupportedObservationSchemaVersion(
+                self.schema_version,
+            ));
+        }
+        if self.schema_version == RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION {
+            validate_v2_metadata(
+                self.observed_at_ms,
+                self.source_authority,
+                self.management_lifecycle,
+                self.management_driver_available,
+                self.observation_revision,
+                self.expires_at_ms,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn is_fresh_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms.is_some_and(|expiry| now_ms <= expiry)
+    }
+
+    /// Measured links may influence live topology only when CHUD supplied a
+    /// fresh, non-simulated observation. Published estimates remain separate.
+    pub fn authoritative_neighbors_at(&self, now_ms: u64) -> &[RadioNeighborObservation] {
+        if self.validate().is_ok()
+            && !self.simulated
+            && self.source_authority == Some(RadioObservationAuthority::ChudAuthoritative)
+            && matches!(
+                self.management_lifecycle,
+                Some(RadioManagementLifecycle::Managed | RadioManagementLifecycle::Connected)
+            )
+            && self.is_fresh_at(now_ms)
+        {
+            &self.neighbors
+        } else {
+            &[]
+        }
+    }
+
+    pub fn v1_compatibility_record(&self) -> Self {
+        let mut compatibility = self.clone();
+        compatibility.schema_version = RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1;
+        compatibility.source_authority = None;
+        compatibility.management_lifecycle = None;
+        compatibility.management_driver_available = None;
+        compatibility.observation_revision = None;
+        compatibility.expires_at_ms = None;
+        if let Some(identity) = compatibility.identity.as_mut() {
+            identity.vendor_node_id = None;
+        }
+        for neighbor in &mut compatibility.neighbors {
+            neighbor.observed_at_ms = None;
+            neighbor.source_authority = None;
+        }
+        compatibility
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -357,6 +568,10 @@ pub enum VendorRadioError {
     UnsupportedSchemaVersion(u16),
     #[error("unsupported radio-discovery schema version {0}")]
     UnsupportedDiscoverySchemaVersion(u16),
+    #[error("unsupported radio-discovery intake schema version {0}")]
+    UnsupportedDiscoveryIntakeSchemaVersion(u16),
+    #[error("unsupported radio-device observation schema version {0}")]
+    UnsupportedObservationSchemaVersion(u16),
     #[error("invalid {field} token {value:?}")]
     InvalidToken { field: &'static str, value: String },
     #[error("invalid radio frequency range {minimum_mhz}..={maximum_mhz} MHz")]
@@ -381,6 +596,42 @@ pub enum VendorRadioError {
     InvalidManagementEndpoint,
     #[error("radio discovery requires at least one evidence method")]
     MissingDiscoveryMethods,
+    #[error("radio-discovery intake timestamp is invalid")]
+    InvalidDiscoveryIntakeTimestamp,
+    #[error("radio-discovery intake accepts only v2 AVIAN diagnostic observations")]
+    InvalidDiscoveryIntakeAuthority,
+    #[error("radio-discovery intake observation is stale")]
+    StaleDiscoveryIntakeObservation,
+    #[error("v2 radio observations require an explicit source authority")]
+    MissingSourceAuthority,
+    #[error("v2 radio observations require a management lifecycle")]
+    MissingManagementLifecycle,
+    #[error("v2 radio observations require management-driver availability")]
+    MissingManagementDriverAvailability,
+    #[error("v2 radio observations require a positive revision")]
+    InvalidObservationRevision,
+    #[error("v2 radio observation expiry must be later than observed_at_ms")]
+    InvalidObservationExpiry,
+}
+
+fn validate_v2_metadata(
+    observed_at_ms: u64,
+    source_authority: Option<RadioObservationAuthority>,
+    management_lifecycle: Option<RadioManagementLifecycle>,
+    management_driver_available: Option<bool>,
+    observation_revision: Option<u64>,
+    expires_at_ms: Option<u64>,
+) -> Result<(), VendorRadioError> {
+    source_authority.ok_or(VendorRadioError::MissingSourceAuthority)?;
+    management_lifecycle.ok_or(VendorRadioError::MissingManagementLifecycle)?;
+    management_driver_available.ok_or(VendorRadioError::MissingManagementDriverAvailability)?;
+    if observation_revision.is_none_or(|revision| revision == 0) {
+        return Err(VendorRadioError::InvalidObservationRevision);
+    }
+    if expires_at_ms.is_none_or(|expiry| expiry <= observed_at_ms) {
+        return Err(VendorRadioError::InvalidObservationExpiry);
+    }
+    Ok(())
 }
 
 fn validate_token(field: &'static str, value: &str) -> Result<(), VendorRadioError> {
@@ -422,6 +673,8 @@ fn validate_optional_positive(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -470,6 +723,7 @@ mod tests {
             model_hint: "tw-950".into(),
             mac_address: "00:1e:3f:20:9a:10".into(),
             serial_number: None,
+            vendor_node_id: None,
             hostname: None,
             reachability: RadioReachabilityStatus::Reachable,
             management_authentication: RadioManagementAuthentication::ClientCertificateRequired,
@@ -485,6 +739,11 @@ mod tests {
                 RadioDiscoveryMethod::TcpReachability,
             ],
             error_code: Some("client_certificate_required".into()),
+            source_authority: Some(RadioObservationAuthority::AvianDiagnostic),
+            management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+            management_driver_available: Some(false),
+            observation_revision: Some(1),
+            expires_at_ms: Some(10_001),
         };
 
         discovery.validate().unwrap();
@@ -495,5 +754,106 @@ mod tests {
             "client_certificate_required"
         );
         assert_eq!(encoded["management_endpoints"][0]["interface_index"], 6);
+        assert!(!discovery.is_authoritative_for_configuration_at(2));
+    }
+
+    #[test]
+    fn only_fresh_chud_managed_discovery_can_drive_configuration() {
+        let mut discovery = RadioDiscoveryObservation {
+            schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
+            observed_at_ms: 100,
+            source: NodeId::from("chud/radio/001e3f209a10"),
+            vendor: RadioVendorId::trellisware(),
+            model_hint: "tw-950".into(),
+            mac_address: "00:1e:3f:20:9a:10".into(),
+            serial_number: Some("TW950-123".into()),
+            vendor_node_id: Some("17".into()),
+            hostname: None,
+            reachability: RadioReachabilityStatus::Reachable,
+            management_authentication: RadioManagementAuthentication::Authenticated,
+            management_endpoints: vec![RadioManagementEndpoint {
+                address: "10.1.0.2".into(),
+                port: 443,
+                interface: Some("Ethernet 2".into()),
+                interface_index: Some(6),
+            }],
+            discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
+            error_code: None,
+            source_authority: Some(RadioObservationAuthority::ChudAuthoritative),
+            management_lifecycle: Some(RadioManagementLifecycle::Managed),
+            management_driver_available: Some(true),
+            observation_revision: Some(7),
+            expires_at_ms: Some(200),
+        };
+        assert!(discovery.is_authoritative_for_configuration_at(150));
+        assert!(!discovery.is_authoritative_for_configuration_at(201));
+        discovery.source_authority = Some(RadioObservationAuthority::Simulation);
+        assert!(!discovery.is_authoritative_for_configuration_at(150));
+    }
+
+    #[test]
+    fn measured_topology_rejects_diagnostic_and_simulated_records() {
+        let neighbor = RadioNeighborObservation {
+            peer_id: "peer-2".into(),
+            peer_ip: Some("10.1.0.3".into()),
+            rssi_dbm: Some(-60.0),
+            snr_db: Some(20.0),
+            tx_rate_mbps: Some(10.0),
+            rx_rate_mbps: Some(9.0),
+            observed_at_ms: Some(100),
+            source_authority: Some(RadioObservationAuthority::ChudAuthoritative),
+        };
+        let mut observation = RadioDeviceObservation {
+            schema_version: RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION,
+            observed_at_ms: 100,
+            source: NodeId::from("chud/radio/1"),
+            status: RadioDeviceStatus::Online,
+            simulated: false,
+            management_ip: Some("10.1.0.2".into()),
+            identity: None,
+            effective: RadioEffectiveState::default(),
+            neighbors: vec![neighbor],
+            error: None,
+            source_authority: Some(RadioObservationAuthority::ChudAuthoritative),
+            management_lifecycle: Some(RadioManagementLifecycle::Connected),
+            management_driver_available: Some(true),
+            observation_revision: Some(1),
+            expires_at_ms: Some(200),
+        };
+        assert_eq!(observation.authoritative_neighbors_at(150).len(), 1);
+        observation.simulated = true;
+        assert!(observation.authoritative_neighbors_at(150).is_empty());
+
+        let compatibility = observation.v1_compatibility_record();
+        let encoded = serde_json::to_value(compatibility).unwrap();
+        assert_eq!(encoded["schema_version"], 1);
+        assert!(encoded.get("source_authority").is_none());
+        assert!(encoded["neighbors"][0].get("observed_at_ms").is_none());
+    }
+
+    #[test]
+    fn two_hundred_radios_with_one_factory_ip_keep_distinct_identities() {
+        let identities = (0_u16..200)
+            .map(|index| {
+                let mac = format!("00:1e:3f:20:{:02x}:{:02x}", index / 256, index % 256);
+                (mac, "10.1.0.2".to_owned())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities
+                .iter()
+                .map(|(mac, _)| mac)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            200
+        );
+        assert_eq!(
+            identities
+                .iter()
+                .map(|(_, management_ip)| management_ip)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
     }
 }

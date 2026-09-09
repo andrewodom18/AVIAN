@@ -1,19 +1,26 @@
 # TrellisWare TW-950 integration
 
 CHUD is the operational discovery and configuration authority for TrellisWare
-radios. ARC consumes CHUD's read-only `/api/radio/devices` inventory, and opens
-the selected hardware MAC in CHUD for configuration. AVIAN does not replace
-CHUD's driver, certificate store, transaction engine, or operator workflow.
+radios. ARC consumes CHUD's `/api/radio/devices` inventory and may guide an
+operator through capability-derived CHUD transactions using the radio's stable
+MAC identity. CHUD still owns the driver, certificate store, snapshots,
+physical writes, readback, and audit. ARC owns the workflow journal; AVIAN does
+not replace either boundary or call CHUD.
 
 AVIAN also includes a read-only TW-950 bench probe. It can read a radio through
 its HTTPS TNC agent API and normalize the result into the vendor-neutral
 observation used by ARC's Devices page. This command is diagnostic support for
-radio-in-the-loop development, not the production configuration path.
+radio-in-the-loop development, not the production configuration path. It
+publishes full provenance on `local/link/radio/observations/v2` and a stripped
+schema-v1 compatibility record on `local/link/radio/observations/v1`.
 
-AVIAN can also publish credential-independent discovery records to
+AVIAN can also publish credential-independent diagnostic discovery records to
+`local/link/radio/discovery/v2`, with a stripped compatibility projection on
 `local/link/radio/discovery/v1`. These identify the physical radio by MAC and
 report network reachability separately from management authentication, so ARC
-can show `certificate required` instead of hiding a reachable radio.
+can show `certificate required` instead of hiding a reachable radio. They are
+explicitly `avian_diagnostic`, do not claim a CHUD management driver, and can
+never authorize configuration or measured RF topology.
 
 Observed fields include the physical device ID/MAC, model, serial number,
 firmware, system alias, operating state, battery level, active preset, and
@@ -30,19 +37,20 @@ readback behavior have been verified on both bench radios.
 
 ## CHUD discovery and certificate configuration
 
-The CHUD wiki documents both TrellisWare OUIs (`00:1E:3F` and `20:9B:60`) and
-management-IP probing for bridge-mode radios. For the current one-radio bench,
-configure the known address instead of scanning an entire `/16`:
+CHUD's discovery core recognizes both TrellisWare OUIs (`00:1E:3F` and
+`20:9B:60`) and performs passive capture plus active heartbeat probing on one
+selected interface. Treat the example below as deployment input only after the
+running CHUD image confirms the option and selected interface:
 
 ```yaml
 radios.0: TW; TrellisWare; 00:1E:3F; 100; 100; 10.1.0.0/16
 tw_probe: 10.1.0.2
 ```
 
-Use `tw_probe_subnet: 10.1.0.0/16` only when scanning is operationally required.
-Subnet probing needs local reachability to the management network and elevated
-network privileges. Linux deployments need root or `CAP_NET_RAW` plus
-`CAP_NET_ADMIN`; macOS needs `sudo` for raw discovery and off-subnet aliases.
+Do not claim simultaneous physical-Ethernet, USB-Ethernet, and over-air
+discovery: CHUD's current `SystemConfig.Iface` selects one interface. Raw-network
+permissions and routes may be prerequisites, but multi-interface fan-in and
+hot-plug handling remain external CHUD work.
 
 When the radio requires mutual TLS, CHUD accepts any of these formats:
 
@@ -66,10 +74,13 @@ into CHUD and keep passwords outside ARC configuration, AVIAN, PEAT, source
 control, and logs. The filenames and passwords above are placeholders; the
 repository does not contain an authorized TrellisWare client identity.
 
-CHUD's device lifecycle distinguishes `reachable`, `identified`,
-`auth-failed`, `confirmed`, `connected`, and `stale`. ARC intentionally keeps an
-`auth-failed` radio visible as reachable and labels its management access
-`certificate required`; this is not a generic fetch failure.
+The ARC/AVIAN contract requires CHUD to distinguish discovered, reachable,
+authenticated, managed, connected, and stale states. ARC should keep an
+authentication-failed radio visible as reachable and label its management
+access `certificate required`; this is not a generic fetch failure. Verify the
+exact lifecycle vocabulary against the deployed CHUD API before mapping it.
+
+See [CHUD integration status and AVIAN boundary](chud-integration-status.md).
 
 ## AVIAN diagnostic discovery before credentials are available
 

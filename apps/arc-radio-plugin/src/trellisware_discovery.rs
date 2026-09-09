@@ -7,15 +7,16 @@ use anyhow::{bail, Context};
 use clap::Args;
 use mesh_core::{
     NodeId, RadioDiscoveryMethod, RadioDiscoveryObservation, RadioManagementAuthentication,
-    RadioManagementEndpoint, RadioReachabilityStatus, RadioVendorId,
-    RADIO_DISCOVERY_SCHEMA_VERSION,
+    RadioManagementEndpoint, RadioManagementLifecycle, RadioObservationAuthority,
+    RadioReachabilityStatus, RadioVendorId, RADIO_DISCOVERY_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use tokio::net::TcpStream;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::process::Command;
 
-const RADIO_DISCOVERY_TOPIC: &str = "local/link/radio/discovery/v1";
+const RADIO_DISCOVERY_TOPIC_V1: &str = "local/link/radio/discovery/v1";
+const RADIO_DISCOVERY_TOPIC_V2: &str = "local/link/radio/discovery/v2";
 const TRELLISWARE_OUIS: [&str; 2] = ["001e3f", "209b60"];
 
 #[derive(Debug, Args)]
@@ -74,9 +75,19 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
         if let Some(session) = session.as_ref() {
             for discovery in &discoveries {
                 session
-                    .put(RADIO_DISCOVERY_TOPIC, serde_json::to_vec(discovery)?)
+                    .put(RADIO_DISCOVERY_TOPIC_V2, serde_json::to_vec(discovery)?)
                     .await
                     .map_err(|error| anyhow::anyhow!("publishing TW-950 discovery: {error}"))?;
+                let compatibility = discovery.v1_compatibility_record();
+                session
+                    .put(
+                        RADIO_DISCOVERY_TOPIC_V1,
+                        serde_json::to_vec(&compatibility)?,
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("publishing TW-950 v1 compatibility discovery: {error}")
+                    })?;
             }
         }
         if !args.watch {
@@ -134,33 +145,39 @@ async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscov
         endpoints.push(observed_endpoint);
     }
     let reachable = observed_reachable || link_local_reachable;
+    // A cached neighbor entry is not a live device observation. Windows can
+    // retain an OUI/MAC after the Ethernet cable is removed; require a current
+    // management TCP handshake so disconnected radios expire from the live
+    // diagnostic inventory instead of being republished forever.
+    if !reachable {
+        return None;
+    }
     let compact_mac = mac.replace(':', "");
+    let observed_at_ms = now_unix_ms();
     let observation = RadioDiscoveryObservation {
         schema_version: RADIO_DISCOVERY_SCHEMA_VERSION,
-        observed_at_ms: now_unix_ms(),
+        observed_at_ms,
         source: NodeId::from(format!("radio/trellisware/{compact_mac}")),
         vendor: RadioVendorId::trellisware(),
         model_hint: "tw-950".into(),
         mac_address: mac,
         serial_number: None,
+        vendor_node_id: None,
         hostname: None,
-        reachability: if reachable {
-            RadioReachabilityStatus::Reachable
-        } else {
-            RadioReachabilityStatus::Unreachable
-        },
-        management_authentication: if reachable {
-            RadioManagementAuthentication::ClientCertificateRequired
-        } else {
-            RadioManagementAuthentication::Unknown
-        },
+        reachability: RadioReachabilityStatus::Reachable,
+        management_authentication: RadioManagementAuthentication::ClientCertificateRequired,
         management_endpoints: endpoints,
         discovery_methods: vec![
             RadioDiscoveryMethod::NeighborTable,
             RadioDiscoveryMethod::Oui,
             RadioDiscoveryMethod::TcpReachability,
         ],
-        error_code: reachable.then_some("client_certificate_required".into()),
+        error_code: Some("client_certificate_required".into()),
+        source_authority: Some(RadioObservationAuthority::AvianDiagnostic),
+        management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+        management_driver_available: Some(false),
+        observation_revision: Some(observed_at_ms.max(1)),
+        expires_at_ms: Some(observed_at_ms.saturating_add(10_000)),
     };
     observation.validate().ok()?;
     Some(observation)

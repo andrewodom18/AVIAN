@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use mesh_core::{
     NodeId, RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
     RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange, RadioIdentity,
-    RadioManagementInterface, RadioNetworkMode, RadioVendorId, RADIO_DEVICE_SCHEMA_VERSION,
+    RadioManagementInterface, RadioManagementLifecycle, RadioNetworkMode,
+    RadioObservationAuthority, RadioVendorId, RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION,
+    RADIO_DEVICE_SCHEMA_VERSION,
 };
 use reqwest::{Certificate, Identity};
 use serde::{Deserialize, Serialize};
@@ -145,7 +147,7 @@ impl<T: TrellisWareReadTransport> TrellisWareReader<T> {
             .map(|_| RadioNetworkMode::Mesh);
 
         Ok(RadioDeviceObservation {
-            schema_version: RADIO_DEVICE_SCHEMA_VERSION,
+            schema_version: RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION,
             observed_at_ms,
             source,
             status: RadioDeviceStatus::Online,
@@ -156,6 +158,7 @@ impl<T: TrellisWareReadTransport> TrellisWareReader<T> {
                 model: model.id().to_owned(),
                 serial_number: string_value(&values, "identification/serial_number")
                     .map(str::to_owned),
+                vendor_node_id: None,
                 firmware_version: string_value(&values, "device/software/version")
                     .map(str::to_owned),
                 mac_address: Some(id.to_owned()),
@@ -176,6 +179,15 @@ impl<T: TrellisWareReadTransport> TrellisWareReader<T> {
             // lab contract. PEAT/IP reachability remains a separate overlay.
             neighbors: Vec::new(),
             error: None,
+            source_authority: Some(if simulated {
+                RadioObservationAuthority::Simulation
+            } else {
+                RadioObservationAuthority::AvianDiagnostic
+            }),
+            management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+            management_driver_available: Some(false),
+            observation_revision: Some(observed_at_ms.max(1)),
+            expires_at_ms: Some(observed_at_ms.saturating_add(30_000)),
         })
     }
 }

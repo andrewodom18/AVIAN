@@ -1,6 +1,7 @@
 use mesh_core::{
-    ArcRadioConfiguration, RadioDiscoveryObservation, StreamCasterDeviceAssignment,
-    StreamCasterOperationRequest, StreamCasterOperationStatus,
+    ArcRadioConfiguration, RadioDiscoveryIntakeEnvelope, RadioDiscoveryObservation,
+    RadioObservationAuthority, StreamCasterDeviceAssignment, StreamCasterOperationRequest,
+    StreamCasterOperationStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -16,6 +17,10 @@ const OPERATION_STATUS: &str =
     include_str!("../../../apps/arc-radio-plugin/tests/fixtures/operation-status.v1.json");
 const RADIO_DISCOVERY: &str =
     include_str!("../../../apps/arc-radio-plugin/tests/fixtures/radio-discovery.v1.json");
+const RADIO_DISCOVERY_V2: &str =
+    include_str!("../../../apps/arc-radio-plugin/tests/fixtures/radio-discovery.v2.json");
+const RADIO_DISCOVERY_INTAKE: &str =
+    include_str!("../../../apps/arc-radio-plugin/tests/fixtures/radio-discovery-intake.v1.json");
 
 fn assert_semantic_round_trip<T>(encoded: &str)
 where
@@ -25,6 +30,40 @@ where
     let typed: T = serde_json::from_value(original.clone()).unwrap();
     let round_trip = serde_json::to_value(typed).unwrap();
     assert_eq!(round_trip, original);
+}
+
+#[test]
+fn v2_radio_discovery_fixture_is_valid_and_configuration_authoritative() {
+    let discovery: RadioDiscoveryObservation = serde_json::from_str(RADIO_DISCOVERY_V2).unwrap();
+    discovery.validate().unwrap();
+    assert!(discovery.is_authoritative_for_configuration_at(15_000));
+    assert!(!discovery.is_authoritative_for_configuration_at(20_001));
+    assert_semantic_round_trip::<RadioDiscoveryObservation>(RADIO_DISCOVERY_V2);
+}
+
+#[test]
+fn avian_discovery_intake_is_fresh_diagnostic_candidate_not_chud_authority() {
+    let intake: RadioDiscoveryIntakeEnvelope =
+        serde_json::from_str(RADIO_DISCOVERY_INTAKE).unwrap();
+    intake.validate_at(12_000).unwrap();
+    assert_eq!(
+        intake.observation.source_authority,
+        Some(RadioObservationAuthority::AvianDiagnostic)
+    );
+    assert!(!intake
+        .observation
+        .is_authoritative_for_configuration_at(12_000));
+    assert_semantic_round_trip::<RadioDiscoveryIntakeEnvelope>(RADIO_DISCOVERY_INTAKE);
+
+    let mut authoritative = intake.clone();
+    authoritative.observation.source_authority = Some(RadioObservationAuthority::ChudAuthoritative);
+    assert!(authoritative.validate_at(12_000).is_err());
+    let mut simulated = intake.clone();
+    simulated.observation.source_authority = Some(RadioObservationAuthority::Simulation);
+    assert!(simulated.validate_at(12_000).is_err());
+    let mut stale = intake;
+    stale.observation.expires_at_ms = Some(11_500);
+    assert!(stale.validate_at(12_000).is_err());
 }
 
 #[test]

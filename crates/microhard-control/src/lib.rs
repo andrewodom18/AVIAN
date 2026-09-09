@@ -12,7 +12,9 @@ use async_trait::async_trait;
 use mesh_core::{
     NodeId, RadioCapabilities, RadioChannelCapability, RadioDeviceObservation, RadioDeviceStatus,
     RadioEffectiveState, RadioEvidenceLevel, RadioFrequencyRange, RadioIdentity,
-    RadioManagementInterface, RadioNetworkMode, RadioVendorId, RADIO_DEVICE_SCHEMA_VERSION,
+    RadioManagementInterface, RadioManagementLifecycle, RadioNetworkMode,
+    RadioObservationAuthority, RadioVendorId, RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION,
+    RADIO_DEVICE_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -252,6 +254,7 @@ impl<T: MicrohardCommandTransport> MicrohardReader<T> {
             vendor: RadioVendorId::microhard(),
             model: model.id().to_owned(),
             serial_number: first_field(&fields, &["serial", "serial number"]).map(str::to_owned),
+            vendor_node_id: None,
             firmware_version,
             mac_address: first_field(&fields, &["mac"]).map(str::to_owned),
             system_name: None,
@@ -278,7 +281,7 @@ impl<T: MicrohardCommandTransport> MicrohardReader<T> {
             .unwrap_or_default();
 
         Ok(RadioDeviceObservation {
-            schema_version: RADIO_DEVICE_SCHEMA_VERSION,
+            schema_version: RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION,
             observed_at_ms,
             source,
             status: RadioDeviceStatus::Online,
@@ -294,6 +297,15 @@ impl<T: MicrohardCommandTransport> MicrohardReader<T> {
             },
             neighbors: Vec::new(),
             error: None,
+            source_authority: Some(if simulated {
+                RadioObservationAuthority::Simulation
+            } else {
+                RadioObservationAuthority::AvianDiagnostic
+            }),
+            management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+            management_driver_available: Some(false),
+            observation_revision: Some(observed_at_ms.max(1)),
+            expires_at_ms: Some(observed_at_ms.saturating_add(30_000)),
         })
     }
 }
@@ -464,7 +476,10 @@ mod tests {
     fn sample_observation_matches_the_vendor_neutral_contract() {
         let encoded = include_str!("../../../examples/microhard-observation.sample.json");
         let observation: RadioDeviceObservation = serde_json::from_str(encoded).unwrap();
-        assert_eq!(observation.schema_version, RADIO_DEVICE_SCHEMA_VERSION);
+        assert_eq!(
+            observation.schema_version,
+            mesh_core::RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION_V1
+        );
         assert_eq!(
             observation.identity.unwrap().vendor,
             RadioVendorId::microhard()

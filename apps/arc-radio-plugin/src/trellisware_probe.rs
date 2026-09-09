@@ -6,7 +6,8 @@ use clap::Args;
 use mesh_core::{NodeId, RadioDeviceObservation};
 use trellisware_control::{HttpsTncAgentTransport, TrellisWareReader};
 
-const RADIO_OBSERVATIONS_TOPIC: &str = "local/link/radio/observations/v1";
+const RADIO_OBSERVATIONS_TOPIC_V1: &str = "local/link/radio/observations/v1";
+const RADIO_OBSERVATIONS_TOPIC_V2: &str = "local/link/radio/observations/v2";
 
 #[derive(Debug, Args)]
 pub struct TrellisWareProbeArgs {
@@ -74,9 +75,22 @@ pub async fn run(args: &TrellisWareProbeArgs) -> anyhow::Result<()> {
         emit(&observation, args.output.as_deref())?;
         if let Some(session) = session.as_ref() {
             session
-                .put(RADIO_OBSERVATIONS_TOPIC, serde_json::to_vec(&observation)?)
+                .put(
+                    RADIO_OBSERVATIONS_TOPIC_V2,
+                    serde_json::to_vec(&observation)?,
+                )
                 .await
                 .map_err(|error| anyhow::anyhow!("publishing TW-950 observation: {error}"))?;
+            let compatibility = observation.v1_compatibility_record();
+            session
+                .put(
+                    RADIO_OBSERVATIONS_TOPIC_V1,
+                    serde_json::to_vec(&compatibility)?,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("publishing TW-950 v1 compatibility observation: {error}")
+                })?;
         }
         if !args.watch {
             break;

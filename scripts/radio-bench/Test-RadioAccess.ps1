@@ -4,7 +4,12 @@ param(
     [string]$EthernetAdapter,
     [string]$PcIp = '10.1.0.20',
     [int]$PrefixLength = 24,
-    [string]$ResultsRoot = (Join-Path $env:USERPROFILE 'Desktop\Radio Test Results\radio-access')
+    [string]$ResultsRoot = (Join-Path $env:USERPROFILE 'Desktop\Radio Test Results\radio-access'),
+    [ValidateRange(1, 100)]
+    [int]$SequenceStart = 1,
+    [switch]$OneShot,
+    [switch]$SkipBrowserPrompt,
+    [switch]$RequireExistingPcAddress
 )
 
 Set-StrictMode -Version Latest
@@ -96,7 +101,7 @@ function Save-CurlProbe {
 }
 
 function Invoke-RadioTest {
-    param([int]$Sequence, [string]$Adapter)
+    param([int]$Sequence, [string]$Adapter, [switch]$SkipBrowser)
 
     Write-Section "Radio $Sequence connection"
     Write-Host 'Connect and power on exactly ONE radio. Do not Ethernet-connect both radios while they share 10.1.0.2.' -ForegroundColor Yellow
@@ -112,6 +117,9 @@ function Invoke-RadioTest {
 
     if (-not $hasPcIp) {
         Write-Host "$Adapter does not currently have $PcIp/$PrefixLength." -ForegroundColor Yellow
+        if ($RequireExistingPcAddress) {
+            throw "The caller requires preconfigured host networking, so no adapter setting was changed."
+        }
         $configure = Read-Host "Configure that PC-side address now? This does not change the radio. [Y/N]"
         if ($configure -match '^(?i)y(es)?$') {
             Set-NetIPInterface -InterfaceAlias $Adapter -AddressFamily IPv4 -Dhcp Disabled
@@ -197,7 +205,7 @@ function Invoke-RadioTest {
     if ($chudError) { Write-Host "CHUD detail: $chudError" -ForegroundColor Yellow }
     Write-Host "Results saved to: $directory" -ForegroundColor Green
 
-    if ($ports['443'] -or $ports['80']) {
+    if (($ports['443'] -or $ports['80']) -and -not $SkipBrowser) {
         $url = if ($ports['443']) { "https://$RadioIp/" } else { "http://$RadioIp/" }
         $open = Read-Host "Open $url in Google Chrome? [Y/N]"
         if ($open -match '^(?i)y(es)?$') {
@@ -210,8 +218,10 @@ function Invoke-RadioTest {
             if ($chrome) { Start-Process -FilePath $chrome -ArgumentList @('--new-window', $url) }
             else { Start-Process $url }
         }
-    } else {
+    } elseif (-not ($ports['443'] -or $ports['80'])) {
         Write-Host 'The radio answered no tested web-management port, so no configuration page was opened.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'Web management is reachable; browser launch was skipped by the parent workflow.' -ForegroundColor Green
     }
 
     return $summary
@@ -226,10 +236,10 @@ $EthernetAdapter = Select-EthernetAdapter -Requested $EthernetAdapter
 New-Item -ItemType Directory -Force -Path $ResultsRoot | Out-Null
 
 $allResults = @()
-$sequence = 1
+$sequence = $SequenceStart
 do {
-    $allResults += Invoke-RadioTest -Sequence $sequence -Adapter $EthernetAdapter
-    $again = Read-Host 'Disconnect this radio. Type A to test another radio, or press Enter to finish'
+    $allResults += Invoke-RadioTest -Sequence $sequence -Adapter $EthernetAdapter -SkipBrowser:$SkipBrowserPrompt
+    $again = if ($OneShot) { '' } else { Read-Host 'Disconnect this radio. Type A to test another radio, or press Enter to finish' }
     $sequence++
 } while ($again -match '^(?i)a$')
 
