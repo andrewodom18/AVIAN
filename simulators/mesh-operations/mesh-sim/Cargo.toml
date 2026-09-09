@@ -7,13 +7,16 @@ license.workspace = true
 
 [dependencies]
 ed25519-dalek.workspace = true
-mesh-core = { path = "../mesh-core" }
+mesh-core = { path = "../../../crates/mesh-core" }
+mesh-peat = { path = "../../../crates/mesh-peat" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-vehicle-adapters = { path = "../vehicle-adapters" }
+vehicle-adapters = { path = "../../../crates/vehicle-adapters" }
 
 [lints]
 workspace = true

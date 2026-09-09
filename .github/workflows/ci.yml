@@ -61,6 +61,7 @@ jobs:
         run: |
           rustc --version --verbose
           cargo --version --verbose
+          node --version
 
       - name: Run the local verification contract
         run: just verify

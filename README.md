@@ -24,8 +24,9 @@ are not required for continued operation.
   chaining, range discovery, and exact manual relay overrides.
 - A system planning ceiling of 30,000 ft MSL (9,144 m), with MSL, AGL, and
   above-launch altitude kept separate.
-- Deterministic four-node simulation covering partitions, a crashed node,
-  recovery, state convergence, and a Betaflight emergency action.
+- Deterministic four-node continuity simulation plus an executed 200-aircraft
+  `SimNetwork` scale run with one ground-control peer, bounded topology
+  construction, and mission-state convergence across all 201 logical nodes.
 
 The implementation now includes both the deterministic simulator and a real
 PEAT Automerge/Iroh peer with formation authentication, stable identity,
@@ -54,7 +55,10 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `mesh-core` | Shared messages, identity, command security, altitude rules, link scoring, and leaderless relay decisions |
 | `mesh-peat` | PEAT Automerge/Iroh node, AVIAN record store, delivery policy, and PACE configuration |
 | `vehicle-adapters` | Hardware-neutral ArduPilot, PX4, and Betaflight adapter contract |
-| `mesh-sim` | Deterministic failure and recovery simulation |
+| `simulators/mesh-operations/mesh-sim` | Deterministic failure, rerouting, and recovery simulation |
+| `simulators/mesh-operations/visualizer` | Local stakeholder console driven by a verified `mesh-sim` topology trace |
+| `simulators/mesh-operations/chud-emulator` | Loopback-only CHUD contract emulator for ARC discovery and guarded configuration tests |
+| `simulators/rf-planning-suite` | Local RF link-budget, capacity, topology, and multi-node planning simulator |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
 | `arc-radio-plugin` | Vendor-neutral radio planning, traffic assessment, PEAT encoding, observations, and guarded StreamCaster sidecar integration |
@@ -132,6 +136,7 @@ With Rust 1.91.1 installed:
 ```sh
 cargo test --workspace
 cargo run -p mesh-sim
+node simulators/mesh-operations/visualizer/server.mjs
 cargo run -p mesh-agent -- --help
 cargo run -p arc-radio-plugin -- --help
 ```
@@ -175,6 +180,10 @@ See [the architecture](docs/architecture.md) and
 The [scalability contract](docs/scalability.md) describes the 5-200 aircraft
 overlay and what remains to validate on real radios.
 The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
+The [visual mesh simulation](docs/visual-simulation.md) replays verified node,
+link, partition, failover, and recovery state in a local browser console.
+The [simulator validation guide](docs/simulator-validation.md) defines the
+seeded event model, CHUD contract emulator, evidence report, and claim limits.
 The [MAVLink guide](docs/mavlink.md) connects ArduPilot or PX4 telemetry.
 The [field runbooks](docs/field-runbooks.md) cover Pi-to-Mac, Pi-to-Pi, real
 Cube metadata, Silvus, and ZeroTier-over-Starshield recovery checks.

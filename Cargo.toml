@@ -6,7 +6,7 @@ members = [
     "apps/mission-planner",
     "crates/mesh-core",
     "crates/mesh-peat",
-    "crates/mesh-sim",
+    "simulators/mesh-operations/mesh-sim",
     "crates/microhard-control",
     "crates/streamcaster-control",
     "crates/trellisware-control",
