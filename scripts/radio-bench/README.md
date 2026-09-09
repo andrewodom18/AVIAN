@@ -19,7 +19,7 @@ checkpoints, and disconnect/recovery evidence—run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-FullAvianArcValidation.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-FullAvianArcValidation.ps1"
 ```
 
 The full walkthrough asks explicit Y/N questions for visual ARC checks and
@@ -41,7 +41,7 @@ optional handoff to the full ARC/CHUD stack—run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-GuidedRadioValidation.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-GuidedRadioValidation.ps1"
 ```
 
 The guided workflow is read-only and requires an exact `READY` safety
@@ -58,7 +58,7 @@ run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-RadioBenchTest.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-RadioBenchTest.ps1"
 ```
 
 Follow the prompts. Leave the radio Ethernet cable unplugged until the monitor
@@ -106,7 +106,7 @@ persistence, and measured-versus-logical topology:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Start-ChudAuthorityValidation.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Start-ChudAuthorityValidation.ps1"
 ```
 
 The default run is read-only and never opens a browser or changes host

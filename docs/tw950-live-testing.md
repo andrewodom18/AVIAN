@@ -114,5 +114,5 @@ comes after successful real CHUD snapshot and ARC configuration-read gates.
 The recorder's helper tests use fixtures only:
 
 ```powershell
-& "$env:USERPROFILE\Desktop\AVIAN-arc-main-compat\scripts\radio-bench\Test-Tw950LiveValidation.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\radio-bench\Test-Tw950LiveValidation.ps1"
 ```

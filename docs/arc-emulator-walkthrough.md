@@ -13,13 +13,13 @@ The guide records this as BLOCKED and stops before frontend or operator onboardi
 ## Usage
 
 ```powershell
-& "$env:USERPROFILE\Desktop\AVIAN-simulator-validation\scripts\Start-ArcEmulatorWalkthrough.ps1"
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\Start-ArcEmulatorWalkthrough.ps1"
 ```
 
 Automated startup/preflight only (no browser or interactive tests):
 
 ```powershell
-& "$env:USERPROFILE\Desktop\AVIAN-simulator-validation\scripts\Start-ArcEmulatorWalkthrough.ps1" -PreflightOnly
+& "$env:USERPROFILE\Desktop\AVIAN\scripts\Start-ArcEmulatorWalkthrough.ps1" -PreflightOnly
 ```
 
 `-ArcRoot` selects the ARC checkout. `-OutputRoot` changes the evidence directory. Ports default to 19101 (bridge HTTP), 19100 (bridge TCP), 13212 (emulator), and 13000 (UI). They must all be unused and distinct. Existing services are never reused or stopped. Required Node, installed ArcUI dependencies, and the ARC debug executable must already exist. The guide does not install, build, fetch, or update applications.

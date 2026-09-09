@@ -31,7 +31,7 @@ ARC uses the locally built `dev-bridge.exe --mock`, with mock detections/video e
 Keep these local folders and their built/installed dependencies:
 
 - `Desktop/arc-uas-main-20260827` with `services/dev-bridge/target/debug/dev-bridge.exe` and `services/arc-ui/node_modules`.
-- `Desktop/AVIAN-simulator-validation` with its locally cached Cargo dependencies.
+- `Desktop/AVIAN` with its locally cached Cargo dependencies.
 - Node.js and Cargo on PATH.
 
 The script builds mesh-sim with `--offline --locked`; it never installs or downloads missing dependencies. Cold builds may take time. Do not clean the required dependencies immediately before the demo. External map tiles or other browser resources may still need internet; this is not an offline guarantee for every ARC feature.
