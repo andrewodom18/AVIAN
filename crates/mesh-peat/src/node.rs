@@ -423,7 +423,9 @@ impl PeatNode {
     }
 
     pub async fn shutdown(&self) -> Result<(), PeatNodeError> {
-        self.backend.shutdown().await?;
+        // Stop sync and join the router tasks holding the persistent store.
+        // DataSyncBackend::shutdown alone deliberately leaves the router alive.
+        self.backend.shutdown_and_release().await?;
         Ok(())
     }
 }
@@ -713,8 +715,8 @@ mod tests {
             .unwrap();
         assert_eq!(first.endpoint_id_hex(), expected);
         first.shutdown().await.unwrap();
+        first.shutdown().await.unwrap();
         drop(first);
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let second = PeatNode::start(node_config("avian-test/stable", &storage, &shared_key))
             .await
