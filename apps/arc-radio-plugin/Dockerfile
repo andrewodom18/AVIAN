@@ -4,6 +4,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY apps/ apps/
+COPY simulators/mesh-operations/mesh-sim/ simulators/mesh-operations/mesh-sim/
 RUN cargo build --release --locked -p arc-radio-plugin
 
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241

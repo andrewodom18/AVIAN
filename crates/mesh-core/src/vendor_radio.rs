@@ -261,7 +261,9 @@ impl RadioDiscoveryObservation {
     ) -> RadioObservationFreshness {
         if self.observed_at_ms > now_ms.saturating_add(policy.max_future_skew_ms) {
             RadioObservationFreshness::Future
-        } else if now_ms.saturating_sub(self.observed_at_ms) > policy.max_age_ms {
+        } else if now_ms.saturating_sub(self.observed_at_ms) > policy.max_age_ms
+            || self.expires_at_ms.is_some_and(|expiry| now_ms > expiry)
+        {
             RadioObservationFreshness::Stale
         } else {
             RadioObservationFreshness::Fresh
@@ -708,7 +710,7 @@ impl RadioDeviceObservation {
                 self.expires_at_ms,
             )?;
         }
-        Ok(())
+        self.validate_payload()
     }
 
     pub fn is_fresh_at(&self, now_ms: u64) -> bool {
@@ -753,12 +755,7 @@ impl RadioDeviceObservation {
 }
 
 impl RadioDeviceObservation {
-    pub fn validate(&self) -> Result<(), VendorRadioError> {
-        if self.schema_version != RADIO_DEVICE_SCHEMA_VERSION {
-            return Err(VendorRadioError::UnsupportedSchemaVersion(
-                self.schema_version,
-            ));
-        }
+    fn validate_payload(&self) -> Result<(), VendorRadioError> {
         if self.observed_at_ms == 0 {
             return Err(VendorRadioError::InvalidObservationTimestamp);
         }
@@ -985,6 +982,7 @@ mod tests {
             model_hint: "tw-950".into(),
             mac_address: mac_address.into(),
             serial_number: None,
+            vendor_node_id: None,
             hostname: None,
             reachability: RadioReachabilityStatus::Reachable,
             management_authentication: RadioManagementAuthentication::Unknown,
@@ -996,6 +994,11 @@ mod tests {
             }],
             discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
             error_code: None,
+            source_authority: Some(RadioObservationAuthority::AvianDiagnostic),
+            management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+            management_driver_available: Some(false),
+            observation_revision: Some(1),
+            expires_at_ms: Some(100_000),
         }
     }
 
@@ -1011,6 +1014,7 @@ mod tests {
                 vendor: RadioVendorId::trellisware(),
                 model: "tw-950".into(),
                 serial_number: None,
+                vendor_node_id: None,
                 firmware_version: None,
                 mac_address: Some("00:1e:3f:20:9a:10".into()),
                 system_name: None,
@@ -1018,7 +1022,43 @@ mod tests {
             effective: RadioEffectiveState::default(),
             neighbors: vec![],
             error: None,
+            source_authority: None,
+            management_lifecycle: None,
+            management_driver_available: None,
+            observation_revision: None,
+            expires_at_ms: None,
         }
+    }
+
+    #[test]
+    fn v2_expiry_and_payload_guards_survive_combined_validation() {
+        let mut discovery = valid_discovery(100, "00:1e:3f:20:9a:10");
+        discovery.expires_at_ms = Some(200);
+        assert!(
+            reduce_radio_discoveries([discovery], 201, RadioDiscoveryPolicy::default())
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut observation = valid_device_observation();
+        observation.schema_version = RADIO_DEVICE_OBSERVATION_SCHEMA_VERSION;
+        observation.source_authority = Some(RadioObservationAuthority::ChudAuthoritative);
+        observation.management_lifecycle = Some(RadioManagementLifecycle::Connected);
+        observation.management_driver_available = Some(true);
+        observation.observation_revision = Some(1);
+        observation.expires_at_ms = Some(200);
+        observation.validate().unwrap();
+        observation.identity = None;
+        assert_eq!(
+            observation.validate(),
+            Err(VendorRadioError::MissingOnlineIdentity)
+        );
+        observation.identity = valid_device_observation().identity;
+        observation.source_authority = None;
+        assert_eq!(
+            observation.validate(),
+            Err(VendorRadioError::MissingSourceAuthority)
+        );
     }
 
     #[test]
@@ -1361,7 +1401,7 @@ mod tests {
             status: RadioDeviceStatus::Online,
             simulated: false,
             management_ip: Some("10.1.0.2".into()),
-            identity: None,
+            identity: valid_device_observation().identity,
             effective: RadioEffectiveState::default(),
             neighbors: vec![neighbor],
             error: None,
@@ -1418,6 +1458,7 @@ mod tests {
             model_hint: "tw-950".into(),
             mac_address: "00:1e:3f:20:9a:10".into(),
             serial_number: None,
+            vendor_node_id: None,
             hostname: None,
             reachability: RadioReachabilityStatus::Reachable,
             management_authentication: RadioManagementAuthentication::Unknown,
@@ -1437,6 +1478,11 @@ mod tests {
             ],
             discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
             error_code: None,
+            source_authority: Some(RadioObservationAuthority::AvianDiagnostic),
+            management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+            management_driver_available: Some(false),
+            observation_revision: Some(1),
+            expires_at_ms: Some(100_000),
         };
 
         discovery.validate().unwrap();
@@ -1452,6 +1498,7 @@ mod tests {
             model_hint: "tw-950".into(),
             mac_address: "00:1e:3f:20:9a:10".into(),
             serial_number: None,
+            vendor_node_id: None,
             hostname: None,
             reachability: RadioReachabilityStatus::Reachable,
             management_authentication: RadioManagementAuthentication::Unknown,
@@ -1463,6 +1510,11 @@ mod tests {
             }],
             discovery_methods: vec![RadioDiscoveryMethod::NeighborTable],
             error_code: None,
+            source_authority: Some(RadioObservationAuthority::AvianDiagnostic),
+            management_lifecycle: Some(RadioManagementLifecycle::Reachable),
+            management_driver_available: Some(false),
+            observation_revision: Some(1),
+            expires_at_ms: Some(100_000),
         };
 
         assert_eq!(
@@ -1525,6 +1577,8 @@ mod tests {
                 snr_db: Some(18.0),
                 tx_rate_mbps: Some(5.0),
                 rx_rate_mbps: Some(5.0),
+                observed_at_ms: None,
+                source_authority: None,
             },
             RadioNeighborObservation {
                 peer_id: "peer-1".into(),
@@ -1533,6 +1587,8 @@ mod tests {
                 snr_db: Some(17.0),
                 tx_rate_mbps: Some(4.0),
                 rx_rate_mbps: Some(4.0),
+                observed_at_ms: None,
+                source_authority: None,
             },
         ];
         assert_eq!(

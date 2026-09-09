@@ -110,21 +110,17 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
 }
 
 async fn discover() -> anyhow::Result<Vec<RadioDiscoveryObservation>> {
-    let observed_at_ms = now_unix_ms();
     let mut discoveries = Vec::new();
     for neighbor in system_neighbors().await? {
-        if let Some(discovery) = discovery_from_neighbor(&neighbor, observed_at_ms).await {
+        if let Some(discovery) = discovery_from_neighbor(&neighbor).await {
             discoveries.push(discovery);
         }
     }
-    reduce_radio_discoveries(discoveries, observed_at_ms, RadioDiscoveryPolicy::default())
+    reduce_radio_discoveries(discoveries, now_unix_ms(), RadioDiscoveryPolicy::default())
         .context("reducing TW-950 discovery observations")
 }
 
-async fn discovery_from_neighbor(
-    neighbor: &NeighborEntry,
-    observed_at_ms: u64,
-) -> Option<RadioDiscoveryObservation> {
+async fn discovery_from_neighbor(neighbor: &NeighborEntry) -> Option<RadioDiscoveryObservation> {
     let mac = normalize_mac(&neighbor.link_layer_address)?;
     if !is_trellisware_mac(&mac) || neighbor_state_is_inactive(neighbor.state.as_ref()) {
         return None;
