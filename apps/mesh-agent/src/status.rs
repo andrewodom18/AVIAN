@@ -6,78 +6,6 @@ use crate::config::{CommandMode, ConfiguredNodeRole, Underlay};
 
 pub const STATUS_SCHEMA_VERSION: u16 = 1;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn readiness_requires_live_identity_peer_mavlink_and_radio_evidence() {
-        let mut state = AgentStatus::new(
-            "aircraft".into(),
-            ConfiguredNodeRole::Aircraft,
-            100,
-            CommandMode::DryRun,
-            true,
-            true,
-            1000,
-        );
-        assert!(!state.snapshot(200).ready);
-        state.node.endpoint_id = Some("11".repeat(32));
-        state.mavlink.connected = true;
-        state.mavlink.target_system_id = Some(1);
-        state.mavlink.last_message_at_ms = Some(200);
-        state.radio.api_healthy = true;
-        state.radio.last_observation_at_ms = Some(200);
-        state.peers.push(PeerStatus {
-            name: "peer".into(),
-            endpoint_id: "22".repeat(32),
-            addresses: vec![],
-            connected: true,
-            last_transition_at_ms: 200,
-            selected_underlay: None,
-        });
-        let snapshot = state.snapshot(1200);
-        assert!(snapshot.ready);
-        assert_eq!(snapshot.node.uptime_ms, 1100);
-        assert_eq!(state.node.uptime_ms, 0);
-        assert!(!state.snapshot(1201).ready);
-        state.radio.last_observation_at_ms = Some(6000);
-        assert!(!state.snapshot(6000).ready);
-        state.mavlink.last_message_at_ms = Some(6000);
-        assert!(state.snapshot(6000).ready);
-        state.peers[0].connected = false;
-        assert!(!state.snapshot(6000).ready);
-        state.peers[0].connected = true;
-        state.radio.api_healthy = false;
-        assert!(!state.snapshot(6000).ready);
-        assert_eq!(state.snapshot(50).node.uptime_ms, 0);
-    }
-
-    #[test]
-    fn optional_inputs_and_error_history_remain_bounded() {
-        let mut state = AgentStatus::new(
-            "ground".into(),
-            ConfiguredNodeRole::Ground,
-            100,
-            CommandMode::DryRun,
-            false,
-            false,
-            1000,
-        );
-        state.node.endpoint_id = Some("11".repeat(32));
-        assert!(state.snapshot(200).ready);
-        for index in 0..25 {
-            state.record_error("fixture", format!("failure-{index}"), index);
-        }
-        assert_eq!(state.last_errors.len(), 20);
-        assert_eq!(state.last_errors[0].at_ms, 5);
-        assert_eq!(state.last_errors.last().unwrap().detail, "failure-24");
-        let encoded = serde_json::to_value(state.snapshot(200)).unwrap();
-        assert_eq!(encoded["schema_version"], STATUS_SCHEMA_VERSION);
-        assert_eq!(encoded["last_errors"].as_array().unwrap().len(), 20);
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentStatus {
@@ -291,4 +219,76 @@ pub struct StatusError {
     pub component: String,
     pub detail: String,
     pub at_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_requires_live_identity_peer_mavlink_and_radio_evidence() {
+        let mut state = AgentStatus::new(
+            "aircraft".into(),
+            ConfiguredNodeRole::Aircraft,
+            100,
+            CommandMode::DryRun,
+            true,
+            true,
+            1000,
+        );
+        assert!(!state.snapshot(200).ready);
+        state.node.endpoint_id = Some("11".repeat(32));
+        state.mavlink.connected = true;
+        state.mavlink.target_system_id = Some(1);
+        state.mavlink.last_message_at_ms = Some(200);
+        state.radio.api_healthy = true;
+        state.radio.last_observation_at_ms = Some(200);
+        state.peers.push(PeerStatus {
+            name: "peer".into(),
+            endpoint_id: "22".repeat(32),
+            addresses: vec![],
+            connected: true,
+            last_transition_at_ms: 200,
+            selected_underlay: None,
+        });
+        let snapshot = state.snapshot(1200);
+        assert!(snapshot.ready);
+        assert_eq!(snapshot.node.uptime_ms, 1100);
+        assert_eq!(state.node.uptime_ms, 0);
+        assert!(!state.snapshot(1201).ready);
+        state.radio.last_observation_at_ms = Some(6000);
+        assert!(!state.snapshot(6000).ready);
+        state.mavlink.last_message_at_ms = Some(6000);
+        assert!(state.snapshot(6000).ready);
+        state.peers[0].connected = false;
+        assert!(!state.snapshot(6000).ready);
+        state.peers[0].connected = true;
+        state.radio.api_healthy = false;
+        assert!(!state.snapshot(6000).ready);
+        assert_eq!(state.snapshot(50).node.uptime_ms, 0);
+    }
+
+    #[test]
+    fn optional_inputs_and_error_history_remain_bounded() {
+        let mut state = AgentStatus::new(
+            "ground".into(),
+            ConfiguredNodeRole::Ground,
+            100,
+            CommandMode::DryRun,
+            false,
+            false,
+            1000,
+        );
+        state.node.endpoint_id = Some("11".repeat(32));
+        assert!(state.snapshot(200).ready);
+        for index in 0..25 {
+            state.record_error("fixture", format!("failure-{index}"), index);
+        }
+        assert_eq!(state.last_errors.len(), 20);
+        assert_eq!(state.last_errors[0].at_ms, 5);
+        assert_eq!(state.last_errors.last().unwrap().detail, "failure-24");
+        let encoded = serde_json::to_value(state.snapshot(200)).unwrap();
+        assert_eq!(encoded["schema_version"], STATUS_SCHEMA_VERSION);
+        assert_eq!(encoded["last_errors"].as_array().unwrap().len(), 20);
+    }
 }
