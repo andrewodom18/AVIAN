@@ -2252,6 +2252,62 @@ mod tests {
     use mesh_agent::config::ConfiguredNodeRole;
 
     #[test]
+    fn discovered_and_saved_peer_statuses_keep_underlays_without_inventing_connections() {
+        let endpoint = "11".repeat(32);
+        let tagged = vec![
+            TaggedPeer {
+                name: "z-live".into(),
+                endpoint_id: endpoint.clone(),
+                addresses: vec![TaggedAddress {
+                    underlay: Underlay::Ethernet,
+                    address: "192.0.2.4:9000".parse().unwrap(),
+                }],
+            },
+            TaggedPeer {
+                name: "a-saved".into(),
+                endpoint_id: "22".repeat(32),
+                addresses: vec![TaggedAddress {
+                    underlay: Underlay::Wifi,
+                    address: "192.0.2.5:9000".parse().unwrap(),
+                }],
+            },
+        ];
+        let peers = vec![PeerDescriptor::with_addresses(
+            "z-live",
+            endpoint,
+            vec![
+                "192.0.2.4:9000".parse().unwrap(),
+                "192.0.2.9:9000".parse().unwrap(),
+            ],
+        )
+        .unwrap()];
+        let states = peer_statuses(&tagged, &peers, 300);
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].name, "a-saved");
+        assert_eq!(states[0].addresses[0].underlay, Some(Underlay::Wifi));
+        assert_eq!(states[1].addresses[0].underlay, Some(Underlay::Ethernet));
+        assert_eq!(states[1].addresses[1].underlay, None);
+        assert!(states
+            .iter()
+            .all(|peer| !peer.connected && peer.last_transition_at_ms == 300));
+        assert!(peer_statuses(&[], &[], 300).is_empty());
+    }
+
+    #[test]
+    fn transport_mapping_retains_the_supported_underlay_vocabulary() {
+        for (transport, underlay, name) in [
+            (TransportKind::Silvus, Underlay::Silvus, "silvus"),
+            (TransportKind::Satellite, Underlay::Satellite, "satellite"),
+            (TransportKind::Ethernet, Underlay::Ethernet, "ethernet"),
+            (TransportKind::Wifi, Underlay::Wifi, "wifi"),
+            (TransportKind::Other, Underlay::Other, "other"),
+        ] {
+            assert_eq!(underlay_for_transport(transport), Some(underlay));
+            assert_eq!(underlay_name(underlay), name);
+        }
+    }
+
+    #[test]
     fn relay_runtime_configuration_sample_decodes_for_the_onboard_agent() {
         let configuration: RelayRuntimeConfiguration = serde_json::from_str(include_str!(
             "../../../examples/relay-runtime-config.sample.json"
