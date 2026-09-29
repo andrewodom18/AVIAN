@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { stateStore } from "./state-store.mjs";
 
 const DEFAULT_DEVICES = [
   { mac: "00:1e:3f:20:9a:10", radio_type: "silvus", label: "AVIAN Radio 1" },
@@ -31,9 +32,21 @@ function clone(value) {
   return structuredClone(value);
 }
 
+const failure = (message, status = 400) => Object.assign(new Error(message), { status });
+const FAULTS = new Set([
+  null, "apply_error", "apply_timeout", "missing_operation_id", "readback_mismatch",
+  "operation_expired", "reboot_required", "stale_device", "authentication_failed",
+  "accepted_response_lost",
+]);
+const STATES = new Set(["connected", "unplugged", "rebooting", "stale", "authentication_failed"]);
+
 export class ChudEmulator {
-  constructor({ token = "", devices = DEFAULT_DEVICES } = {}) {
+  constructor({ token = "", devices = DEFAULT_DEVICES, stateFile, now = Date.now, maxOperations = 1000, maxEvents = 10000 } = {}) {
     this.token = token;
+    this.now = now;
+    this.maxOperations = maxOperations;
+    this.maxEvents = maxEvents;
+    this.store = stateFile ? stateStore(stateFile) : null;
     this.devices = new Map();
     for (const device of devices) {
       const mac = canonicalMac(device.mac);
@@ -52,6 +65,115 @@ export class ChudEmulator {
     this.ledger = [];
     this.fault = null;
     this.sequence = 0;
+    this.clockOffset = 0;
+    this.deviceFaults = new Map();
+    const saved = this.store?.load();
+    if (saved) this.restore(saved);
+    this.expire();
+  }
+
+  exportState() {
+    return clone({ devices: [...this.devices], operations: [...this.operations], ledger: this.ledger,
+      fault: this.fault, deviceFaults: [...this.deviceFaults], sequence: this.sequence, clockOffset: this.clockOffset });
+  }
+
+  restore(state) {
+    if (!state || !Array.isArray(state.devices) || !Array.isArray(state.operations)
+      || !Array.isArray(state.ledger) || !Array.isArray(state.deviceFaults)
+      || !Number.isSafeInteger(state.sequence) || state.sequence < 0
+      || !Number.isSafeInteger(state.clockOffset) || state.clockOffset < 0
+      || !FAULTS.has(state.fault) || state.operations.length > this.maxOperations
+      || state.ledger.length > this.maxEvents) throw new Error("invalid emulator state");
+    const devices = new Map(state.devices);
+    const operations = new Map(state.operations);
+    if (devices.size !== state.devices.length || operations.size !== state.operations.length) throw new Error("duplicate persisted identity");
+    for (const [mac, device] of devices) {
+      if (canonicalMac(mac) !== mac || device.mac !== mac || !STATES.has(device.state)
+        || !device.config || !device.meta) throw new Error("invalid persisted device");
+    }
+    for (const [id, operation] of operations) {
+      if (operation.operation_id !== id || !devices.has(operation.mac)
+        || !Number.isSafeInteger(operation.deadline_ms) || !operation.prior || !operation.desired
+        || typeof operation.awaiting_confirmation !== "boolean") throw new Error("invalid persisted operation");
+    }
+    let prior = 0;
+    for (const event of state.ledger) {
+      if (!Number.isSafeInteger(event.sequence) || event.sequence <= prior || event.sequence > state.sequence
+        || !operations.has(event.operation_id) || !["apply", "confirm", "rollback"].includes(event.action)) throw new Error("invalid persisted ledger");
+      prior = event.sequence;
+    }
+    for (const [mac, fault] of state.deviceFaults) {
+      if (!devices.has(mac) || !FAULTS.has(fault)) throw new Error("invalid persisted fault");
+    }
+    this.devices = devices;
+    this.operations = operations;
+    this.ledger = state.ledger;
+    this.fault = state.fault;
+    this.deviceFaults = new Map(state.deviceFaults);
+    this.sequence = state.sequence;
+    this.clockOffset = state.clockOffset;
+  }
+
+  mutate(action) {
+    const prior = this.exportState();
+    try {
+      const result = action();
+      this.store?.save(this.exportState());
+      return result;
+    } catch (error) {
+      this.restore(prior);
+      throw error;
+    }
+  }
+
+  timestamp() { return this.now() + this.clockOffset; }
+  faultFor(mac) { return this.deviceFaults.get(canonicalMac(mac)) ?? this.fault; }
+
+  record(action, operation, extra = {}) {
+    if (this.ledger.length >= this.maxEvents) throw failure("emulator ledger capacity reached", 507);
+    this.ledger.push({ sequence: ++this.sequence, action, operation_id: operation.operation_id,
+      mac: operation.mac, ...extra });
+  }
+
+  expire() {
+    if (![...this.operations.values()].some((op) => op.awaiting_confirmation && op.deadline_ms <= this.timestamp())) return;
+    this.mutate(() => {
+      for (const operation of this.operations.values()) {
+        if (operation.awaiting_confirmation && operation.deadline_ms <= this.timestamp()) this.rollback(operation);
+      }
+    });
+  }
+
+  rollback(operation) {
+    this.devices.get(operation.mac).config = clone(operation.prior);
+    operation.awaiting_confirmation = false;
+    operation.done = true;
+    operation.result = { rolled_back: true, state: "rolled_back" };
+    this.record("rollback", operation, { cause: "confirmation_expired" });
+  }
+
+  advance(milliseconds) {
+    if (!Number.isSafeInteger(milliseconds) || milliseconds < 0 || milliseconds > 3_600_000) throw failure("invalid clock advance");
+    this.mutate(() => { this.clockOffset += milliseconds; });
+    this.expire();
+    return this.controlState();
+  }
+
+  setDevice(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw failure("invalid device control");
+    const { mac, state, driver_available, meta } = payload;
+    const device = this.requireDevice(mac);
+    if (state !== undefined && !STATES.has(state)) throw failure("invalid device state");
+    if (driver_available !== undefined && typeof driver_available !== "boolean") throw failure("invalid driver state");
+    if (meta !== undefined && (!meta || typeof meta !== "object" || Array.isArray(meta)
+      || Object.entries(meta).some(([key, value]) => !Object.hasOwn(device.meta, key) || !value
+        || Object.entries(value).some(([name, flag]) => !["writable", "restorable", "reboot_required"].includes(name) || typeof flag !== "boolean")))) throw failure("invalid capability metadata");
+    this.mutate(() => {
+      if (state !== undefined) device.state = state;
+      if (driver_available !== undefined) device.driver_available = driver_available;
+      if (meta) for (const [key, value] of Object.entries(meta)) device.meta[key] = { ...device.meta[key], ...value };
+    });
+    return this.controlState();
   }
 
   authorize(header) {
@@ -61,25 +183,30 @@ export class ChudEmulator {
     return actual.length === expected.length && timingSafeEqual(actual, expected);
   }
 
-  setFault(fault) {
-    const supported = new Set([
-      null, "apply_error", "apply_timeout", "missing_operation_id", "readback_mismatch",
-      "operation_expired", "reboot_required", "stale_device", "authentication_failed",
-    ]);
-    if (!supported.has(fault)) throw new Error(`unsupported fault: ${fault}`);
-    this.fault = fault;
+  setFault(fault, mac) {
+    if (!FAULTS.has(fault)) throw failure(`unsupported fault: ${fault}`);
+    if (mac) this.requireDevice(mac);
+    this.mutate(() => {
+      if (mac) {
+        if (fault === null) this.deviceFaults.delete(canonicalMac(mac));
+        else this.deviceFaults.set(canonicalMac(mac), fault);
+      } else this.fault = fault;
+    });
     return this.controlState();
   }
 
   controlState() {
-    return { simulated: true, hardware_write: false, fault: this.fault };
+    return { simulated: true, hardware_write: false, fault: this.fault,
+      device_faults: Object.fromEntries(this.deviceFaults), clock_offset_ms: this.clockOffset };
   }
 
   listDevices() {
+    this.expire();
     return {
-      devices: [...this.devices.values()].map((device) => {
-        const state = this.fault === "stale_device" ? "stale"
-          : this.fault === "authentication_failed" ? "authentication_failed"
+      devices: [...this.devices.values()].filter((device) => !["unplugged", "rebooting"].includes(device.state)).map((device) => {
+        const fault = this.faultFor(device.mac);
+        const state = fault === "stale_device" ? "stale"
+          : fault === "authentication_failed" ? "authentication_failed"
             : device.state;
         const { config: _config, meta: _meta, ...summary } = device;
         return { ...summary, state };
@@ -90,9 +217,10 @@ export class ChudEmulator {
   }
 
   snapshot(mac) {
-    const device = this.requireDevice(mac);
+    this.expire();
+    const device = this.availableDevice(mac);
     const config = clone(device.config);
-    if (this.fault === "readback_mismatch") config.network_id = { value: "FAULT-INJECTED" };
+    if (this.faultFor(mac) === "readback_mismatch") config.network_id = { value: "FAULT-INJECTED" };
     return {
       mac: device.mac,
       vendor: device.radio_type,
@@ -104,61 +232,73 @@ export class ChudEmulator {
   }
 
   apply(payload) {
-    if (this.fault === "apply_error") throw Object.assign(new Error("fault-injected apply failure"), { status: 502 });
-    if (this.fault === "apply_timeout") throw Object.assign(new Error("fault-injected apply timeout"), { status: 504 });
-    const device = this.requireDevice(payload?.mac);
+    this.expire();
+    const device = this.availableDevice(payload?.mac);
+    const fault = this.faultFor(device.mac);
+    if (fault === "apply_error") throw failure("fault-injected apply failure", 502);
+    if (fault === "apply_timeout") throw failure("fault-injected apply timeout", 504);
+    if (this.operations.size >= this.maxOperations) throw failure("emulator operation capacity reached", 507);
+    if ([...this.operations.values()].some((op) => op.mac === device.mac && op.awaiting_confirmation)) throw failure("device already has an unconfirmed operation", 409);
     if (!payload?.desired || typeof payload.desired !== "object" || Array.isArray(payload.desired)) {
       throw Object.assign(new Error("desired configuration is required"), { status: 400 });
     }
-    for (const field of Object.keys(payload.desired)) {
-      if (!device.meta[field]?.writable) {
+    if (Object.keys(payload.desired).length === 0) throw failure("desired configuration is empty");
+    const timeout = payload.confirm_timeout_seconds ?? 30;
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 3600) throw failure("invalid confirmation timeout");
+    for (const [field, setting] of Object.entries(payload.desired)) {
+      if (!Object.hasOwn(device.meta, field) || !device.meta[field]?.writable || !device.meta[field]?.restorable) {
         throw Object.assign(new Error(`field is not writable: ${field}`), { status: 400 });
       }
+      if (!setting || typeof setting !== "object" || Array.isArray(setting) || !Object.hasOwn(setting, "value")) throw failure(`invalid setting: ${field}`);
     }
-    const operationId = `sim-op-${String(++this.sequence).padStart(4, "0")}`;
-    const prior = clone(device.config);
-    device.config = { ...device.config, ...clone(payload.desired) };
-    const operation = {
-      operation_id: operationId,
-      mac: device.mac,
-      desired: clone(payload.desired),
-      prior,
-      awaiting_confirmation: true,
-      done: false,
-      error: null,
-      result: null,
-      simulated: true,
-      hardware_write: false,
-    };
-    if (this.fault === "operation_expired") {
-      device.config = prior;
-      operation.awaiting_confirmation = false;
-      operation.done = true;
-      operation.result = { rolled_back: true, state: "rolled_back" };
-    }
-    this.operations.set(operationId, operation);
-    this.ledger.push({ sequence: this.sequence, action: "apply", operation_id: operationId, mac: device.mac, desired: clone(payload.desired) });
-    return {
-      operation_id: this.fault === "missing_operation_id" ? "" : operationId,
-      awaiting_confirmation: operation.awaiting_confirmation,
-      reboot_required: this.fault === "reboot_required" || Object.keys(payload.desired).some((field) => device.meta[field]?.reboot_required),
-      simulated: true,
-      hardware_write: false,
-    };
+    return this.mutate(() => {
+      const operationId = `sim-op-${String(this.sequence + 1).padStart(4, "0")}`;
+      const prior = clone(device.config);
+      device.config = { ...device.config, ...clone(payload.desired) };
+      const operation = {
+        operation_id: operationId,
+        mac: device.mac,
+        desired: clone(payload.desired),
+        prior,
+        deadline_ms: this.timestamp() + timeout * 1000,
+        awaiting_confirmation: true,
+        done: false,
+        error: null,
+        result: null,
+        simulated: true,
+        hardware_write: false,
+      };
+      this.operations.set(operationId, operation);
+      this.record("apply", operation, { desired: clone(payload.desired) });
+      if (fault === "operation_expired") this.rollback(operation);
+      return {
+        operation_id: fault === "missing_operation_id" ? "" : operationId,
+        awaiting_confirmation: operation.awaiting_confirmation,
+        reboot_required: fault === "reboot_required" || Object.keys(payload.desired).some((field) => device.meta[field]?.reboot_required),
+        simulated: true,
+        hardware_write: false,
+      };
+    });
   }
 
   confirm(payload) {
+    this.expire();
     const operation = this.operations.get(String(payload?.operation_id ?? ""));
     if (!operation) throw Object.assign(new Error("operation not found"), { status: 404 });
     if (operation.result?.rolled_back) throw Object.assign(new Error("operation already rolled back"), { status: 409 });
-    operation.awaiting_confirmation = false;
-    operation.done = true;
-    operation.result = { rolled_back: false, state: "confirmed" };
-    this.ledger.push({ sequence: ++this.sequence, action: "confirm", operation_id: operation.operation_id, mac: operation.mac });
-    return { ...clone(operation.result), operation_id: operation.operation_id, simulated: true, hardware_write: false };
+    if (operation.done) return { ...clone(operation.result), operation_id: operation.operation_id, simulated: true, hardware_write: false };
+    this.availableDevice(operation.mac);
+    return this.mutate(() => {
+      operation.awaiting_confirmation = false;
+      operation.done = true;
+      operation.result = { rolled_back: false, state: "confirmed" };
+      this.record("confirm", operation);
+      return { ...clone(operation.result), operation_id: operation.operation_id, simulated: true, hardware_write: false };
+    });
   }
 
   listOperations(mac) {
+    this.expire();
     const filter = mac ? canonicalMac(mac) : null;
     return {
       operations: [...this.operations.values()].filter((operation) => !filter || operation.mac === filter).map(clone),
@@ -168,6 +308,7 @@ export class ChudEmulator {
   }
 
   getLedger() {
+    this.expire();
     const digest = createHash("sha256").update(JSON.stringify(this.ledger)).digest("hex");
     return { events: clone(this.ledger), digest, simulated: true, hardware_write: false };
   }
@@ -177,6 +318,15 @@ export class ChudEmulator {
     try { mac = canonicalMac(value); } catch (error) { throw Object.assign(error, { status: 400 }); }
     const device = this.devices.get(mac);
     if (!device) throw Object.assign(new Error(`radio not found: ${mac}`), { status: 404 });
+    return device;
+  }
+
+  availableDevice(value) {
+    const device = this.requireDevice(value);
+    const fault = this.faultFor(device.mac);
+    if (device.state === "authentication_failed" || fault === "authentication_failed") throw failure("device authentication failed", 401);
+    if (device.state !== "connected" || fault === "stale_device") throw failure("device unavailable", 503);
+    if (!device.driver_available) throw failure("device driver unavailable", 422);
     return device;
   }
 }
