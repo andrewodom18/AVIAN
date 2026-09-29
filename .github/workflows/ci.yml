@@ -17,6 +17,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  simulator-fast:
+    name: Emulator lifecycle and schema contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned simulator test dependencies
+        run: npm ci --prefix simulators/mesh-operations --ignore-scripts --no-audit --no-fund
+      - name: Test emulator process recovery and strict schemas
+        run: npm run --prefix simulators/mesh-operations test:fast
+
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-latest

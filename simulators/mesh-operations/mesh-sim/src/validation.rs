@@ -1,58 +1,74 @@
-//! Seeded, discrete-event validation model for logical AVIAN mesh behavior.
-//!
-//! This is deliberately not an RF propagation model and does not represent
-//! hardware validation. Link delay and loss affect message delivery here,
-//! unlike the visual scenario's explanatory labels.
-
-use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, VecDeque};
+//! Seeded logical mesh validation. Time and link conditions are synthetic.
+#[path = "transport.rs"]
+pub mod transport;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use transport::{Fault, Link, Message, Policy};
 
-pub const VALIDATION_SCHEMA_VERSION: &str = "1.0.0";
+pub const VALIDATION_SCHEMA_VERSION: &str = "2.0.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Profile {
+    Recovery,
+    Congestion,
+    Loss,
+    Duplication,
+    Expiry,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationConfig {
+    pub profile: Profile,
     pub aircraft: usize,
     pub seed: u64,
     pub direct_peer_limit: usize,
     pub messages_per_node: usize,
     pub failure_percent: usize,
+    pub transport: Policy,
 }
 
 impl ValidationConfig {
     pub fn standard(aircraft: usize, seed: u64) -> Self {
         Self {
+            profile: Profile::Recovery,
             aircraft,
             seed,
             direct_peer_limit: 8,
             messages_per_node: 3,
             failure_percent: 10,
+            transport: Policy::default(),
         }
+    }
+
+    pub fn fault(aircraft: usize, seed: u64, profile: Profile) -> Self {
+        let mut config = Self::standard(aircraft, seed);
+        config.profile = profile;
+        match profile {
+            Profile::Recovery => {}
+            Profile::Congestion => {
+                config.transport.queue_capacity = 1;
+                config.transport.bytes_per_ms = 1;
+            }
+            Profile::Loss => {
+                config.transport.loss_basis_points = 10000;
+            }
+            Profile::Duplication => {
+                config.transport.duplicate_basis_points = 10000;
+                config.transport.reorder_ms = 100;
+            }
+            Profile::Expiry => {
+                config.transport.ttl_ms = 1;
+            }
+        }
+        config
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkCondition {
-    pub left: usize,
-    pub right: usize,
-    pub latency_ms: u64,
-    pub jitter_ms: u64,
-    pub loss_basis_points: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeliveryEvent {
-    pub message_id: u64,
-    pub from: usize,
-    pub to: usize,
-    pub hop: usize,
-    pub scheduled_at_ms: u64,
-    pub outcome: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ScenarioMetrics {
     pub nodes: usize,
     pub links: usize,
@@ -63,382 +79,319 @@ pub struct ScenarioMetrics {
     pub messages_delivered: usize,
     pub messages_dropped: usize,
     pub delivery_ratio: f64,
-    pub convergence_p50_ms: u64,
-    pub convergence_p95_ms: u64,
+    pub delivery_latency_p50_ms: u64,
+    pub delivery_latency_p95_ms: u64,
+    pub generation_one_convergence_ms: Option<u64>,
+    pub generation_two_convergence_ms: Option<u64>,
     pub partitioned_nodes: usize,
-    pub recovery_ms: u64,
-    pub recovered_connected: bool,
+    pub recovery_ms: Option<u64>,
+    pub latest_generation_converged: bool,
+    pub converged_nodes: usize,
+    pub peak_queue: usize,
+    pub queue_drops: usize,
+    pub ttl_expired: usize,
+    pub retry_exhausted: usize,
+    pub duplicate_rejected: usize,
+    pub stale_generation_rejected: usize,
+    pub commands_applied: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ScenarioValidation {
     pub name: String,
     pub config: ValidationConfig,
+    pub links: Vec<Link>,
+    pub messages: Vec<Message>,
+    pub faults: Vec<Fault>,
     pub metrics: ScenarioMetrics,
     pub passed: bool,
     pub event_digest_sha256: String,
-    pub events: Vec<DeliveryEvent>,
+    pub events: Vec<transport::Event>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ValidationReport {
     pub schema_version: String,
+    pub events_included: bool,
     pub model: String,
     pub limitations: Vec<String>,
     pub scenarios: Vec<ScenarioValidation>,
+    pub fault_scenarios: Vec<ScenarioValidation>,
     pub passed: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DeterministicRng(u64);
-
-impl DeterministicRng {
-    fn new(seed: u64) -> Self {
-        Self(seed.max(1))
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut value = self.0;
-        value ^= value << 13;
-        value ^= value >> 7;
-        value ^= value << 17;
-        self.0 = value;
-        value
-    }
-
-    fn bounded(&mut self, upper_exclusive: u64) -> u64 {
-        self.next() % upper_exclusive.max(1)
-    }
 }
 
 pub fn run_validation_matrix(seed: u64) -> ValidationReport {
     let scenarios: Vec<_> = [5, 25, 50, 100, 150, 200]
         .into_iter()
-        .map(|aircraft| run_validation_scenario(ValidationConfig::standard(aircraft, seed)))
+        .map(|size| run_validation_scenario(ValidationConfig::standard(size, seed)))
         .collect();
-    let passed = scenarios.iter().all(|scenario| scenario.passed);
-    ValidationReport {
-        schema_version: VALIDATION_SCHEMA_VERSION.to_owned(),
-        model: "seeded logical per-hop discrete-event mesh".to_owned(),
-        limitations: vec![
-            "Simulation only; no real radio or flight testing".to_owned(),
-            "Link conditions are synthetic and are not an RF propagation prediction".to_owned(),
-            "Validates logical delivery, partition, recovery, and topology invariants only"
-                .to_owned(),
-        ],
-        scenarios,
-        passed,
-    }
+    let fault_scenarios: Vec<_> = [5, 25, 50, 100, 150, 200]
+        .into_iter()
+        .flat_map(|size| {
+            [
+                Profile::Congestion,
+                Profile::Loss,
+                Profile::Duplication,
+                Profile::Expiry,
+            ]
+            .into_iter()
+            .map(move |profile| {
+                run_validation_scenario(ValidationConfig::fault(size, seed, profile))
+            })
+        })
+        .collect();
+    ValidationReport { schema_version: VALIDATION_SCHEMA_VERSION.into(), events_included: true,
+        model: "seeded shared-timeline logical mesh; synthetic bounded queues and state propagation".into(),
+        limitations: vec!["Simulation only; no real radio or flight testing".into(),
+            "Synthetic link rates and delays are not measured RF capacity or propagation predictions".into(),
+            "Command execution is a model counter; no hardware command is sent".into()],
+        passed: scenarios.iter().chain(&fault_scenarios).all(|s| s.passed), scenarios, fault_scenarios }
 }
 
 pub fn run_validation_scenario(config: ValidationConfig) -> ScenarioValidation {
+    assert!((5..=200).contains(&config.aircraft));
+    assert!(
+        (2..=8).contains(&config.direct_peer_limit) && config.direct_peer_limit.is_multiple_of(2)
+    );
+    assert!(config.failure_percent <= 50 && (1..=10).contains(&config.messages_per_node));
     let nodes = config.aircraft + 1;
-    let links = build_topology(nodes, config.direct_peer_limit, config.seed);
-    let mut adjacency = vec![Vec::new(); nodes];
-    for (index, link) in links.iter().enumerate() {
-        adjacency[link.left].push((link.right, index));
-        adjacency[link.right].push((link.left, index));
-    }
-    let max_degree = adjacency.iter().map(Vec::len).max().unwrap_or(0);
-    let self_links = links.iter().filter(|link| link.left == link.right).count();
-    let unique: BTreeSet<_> = links
-        .iter()
-        .map(|link| (link.left.min(link.right), link.left.max(link.right)))
-        .collect();
-    let duplicate_links = links.len() - unique.len();
-
-    let mut rng = DeterministicRng::new(config.seed ^ (nodes as u64).rotate_left(17));
-    let mut events = Vec::new();
-    let mut latencies = Vec::new();
-    let mut attempted = 0;
-    let mut delivered = 0;
-    let mut dropped = 0;
-    let online = vec![true; nodes];
-    let mut message_id = 0;
-    for target in 1..nodes {
-        for _ in 0..config.messages_per_node {
-            attempted += 1;
-            message_id += 1;
-            match deliver(
-                message_id,
-                0,
-                target,
-                &online,
-                &adjacency,
-                &links,
-                &mut rng,
-                &mut events,
-            ) {
-                Some(latency) => {
-                    delivered += 1;
-                    latencies.push(latency);
-                }
-                None => dropped += 1,
-            }
-        }
-    }
-
-    latencies.sort_unstable();
-    let p50 = percentile(&latencies, 50);
-    let p95 = percentile(&latencies, 95);
-
-    let partitioned_nodes = config
-        .aircraft
-        .saturating_mul(config.failure_percent)
-        .div_ceil(100);
-    let mut degraded_online = vec![true; nodes];
-    for index in 0..partitioned_nodes {
-        degraded_online[nodes - 1 - index] = false;
-    }
-    let surviving_connected =
-        connected_count(0, &degraded_online, &adjacency) == nodes - partitioned_nodes;
-    let recovered_connected = connected_count(0, &online, &adjacency) == nodes;
-    let recovery_ms = if recovered_connected {
-        links
-            .iter()
-            .map(|link| link.latency_ms + link.jitter_ms)
-            .max()
-            .unwrap_or(0)
-            * 2
-    } else {
-        0
-    };
-
-    let delivery_ratio = if attempted == 0 {
-        1.0
-    } else {
-        delivered as f64 / attempted as f64
-    };
-    let metrics = ScenarioMetrics {
-        nodes,
-        links: links.len(),
-        max_degree,
-        self_links,
-        duplicate_links,
-        messages_attempted: attempted,
-        messages_delivered: delivered,
-        messages_dropped: dropped,
-        delivery_ratio,
-        convergence_p50_ms: p50,
-        convergence_p95_ms: p95,
-        partitioned_nodes,
-        recovery_ms,
-        recovered_connected,
-    };
-    let passed = self_links == 0
-        && duplicate_links == 0
-        && max_degree <= config.direct_peer_limit
-        && surviving_connected
-        && recovered_connected
-        && delivery_ratio >= 0.95;
-    let event_digest_sha256 = digest_events(&events);
-    ScenarioValidation {
-        name: format!("{}-aircraft-plus-ground", config.aircraft),
-        config,
-        metrics,
-        passed,
-        event_digest_sha256,
-        events,
-    }
-}
-
-fn build_topology(nodes: usize, peer_limit: usize, seed: u64) -> Vec<LinkCondition> {
-    if nodes < 2 || peer_limit == 0 {
-        return Vec::new();
-    }
     let mut pairs = BTreeSet::new();
-    let radius = (peer_limit / 2).max(1);
     for left in 0..nodes {
-        for offset in 1..=radius {
+        for offset in 1..=config.direct_peer_limit / 2 {
             let right = (left + offset) % nodes;
             if left != right {
                 pairs.insert((left.min(right), left.max(right)));
             }
         }
     }
-    let mut rng = DeterministicRng::new(seed ^ 0xa5a5_5a5a_d3c1_b7e9);
-    pairs
+    let links: Vec<_> = pairs
         .into_iter()
-        .map(|(left, right)| LinkCondition {
+        .enumerate()
+        .map(|(i, (left, right))| Link {
             left,
             right,
-            latency_ms: 8 + rng.bounded(23),
-            jitter_ms: rng.bounded(8),
-            loss_basis_points: (rng.bounded(26)) as u16,
+            latency_ms: 8 + (config.seed.wrapping_add(i as u64 * 17) % 23),
+            jitter_ms: 7,
         })
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn deliver(
-    message_id: u64,
-    source: usize,
-    target: usize,
-    online: &[bool],
-    adjacency: &[Vec<(usize, usize)>],
-    links: &[LinkCondition],
-    rng: &mut DeterministicRng,
-    events: &mut Vec<DeliveryEvent>,
-) -> Option<u64> {
-    let path = shortest_path(source, target, online, adjacency)?;
-    let mut queue = BinaryHeap::from([Reverse((0_u64, 0_usize, source))]);
-    while let Some(Reverse((at_ms, hop, current))) = queue.pop() {
-        if current == target {
-            events.push(DeliveryEvent {
-                message_id,
-                from: current,
-                to: current,
-                hop,
-                scheduled_at_ms: at_ms,
-                outcome: "delivered".to_owned(),
+        .collect();
+    let mut degrees = vec![0; nodes];
+    for link in &links {
+        degrees[link.left] += 1;
+        degrees[link.right] += 1;
+    }
+    let partitioned_nodes = config
+        .aircraft
+        .saturating_mul(config.failure_percent)
+        .div_ceil(100);
+    let faults: Vec<_> = (nodes - partitioned_nodes..nodes)
+        .flat_map(|node| {
+            [
+                Fault {
+                    at_ms: 5000,
+                    node,
+                    link_peer: None,
+                    online: false,
+                },
+                Fault {
+                    at_ms: 10000,
+                    node,
+                    link_peer: None,
+                    online: true,
+                },
+            ]
+        })
+        .collect();
+    let mut messages = Vec::new();
+    for target in 1..nodes {
+        for index in 0..config.messages_per_node {
+            messages.push(Message {
+                id: messages.len() as u64 + 1,
+                source: 0,
+                target,
+                generation: 1,
+                created_ms: 0,
+                command: index == 0,
             });
-            return Some(at_ms);
         }
-        let next = path[hop + 1];
-        let link_index = adjacency[current].iter().find(|(node, _)| *node == next)?.1;
-        let link = &links[link_index];
-        let scheduled = at_ms + link.latency_ms + rng.bounded(link.jitter_ms + 1);
-        if rng.bounded(10_000) < u64::from(link.loss_basis_points) {
-            events.push(DeliveryEvent {
-                message_id,
-                from: current,
-                to: next,
-                hop,
-                scheduled_at_ms: scheduled,
-                outcome: "dropped".to_owned(),
+        // A state update during the partition, then explicit state repair on restoration.
+        for created_ms in [5000, 10000] {
+            messages.push(Message {
+                id: messages.len() as u64 + 1,
+                source: 0,
+                target,
+                generation: 2,
+                created_ms,
+                command: false,
             });
-            return None;
         }
-        events.push(DeliveryEvent {
-            message_id,
-            from: current,
-            to: next,
-            hop,
-            scheduled_at_ms: scheduled,
-            outcome: "forwarded".to_owned(),
-        });
-        queue.push(Reverse((scheduled, hop + 1, next)));
     }
-    None
-}
-
-fn shortest_path(
-    source: usize,
-    target: usize,
-    online: &[bool],
-    adjacency: &[Vec<(usize, usize)>],
-) -> Option<Vec<usize>> {
-    if !online.get(source).copied().unwrap_or(false)
-        || !online.get(target).copied().unwrap_or(false)
-    {
-        return None;
-    }
-    let mut previous = vec![None; adjacency.len()];
-    let mut seen = vec![false; adjacency.len()];
-    let mut queue = VecDeque::from([source]);
-    seen[source] = true;
-    while let Some(current) = queue.pop_front() {
-        if current == target {
-            break;
-        }
-        for &(next, _) in &adjacency[current] {
-            if online[next] && !seen[next] {
-                seen[next] = true;
-                previous[next] = Some(current);
-                queue.push_back(next);
+    let result = transport::run(
+        nodes,
+        &links,
+        &messages,
+        &faults,
+        &config.transport,
+        config.seed,
+    );
+    let count = |outcome: &str| {
+        result
+            .events
+            .iter()
+            .filter(|e| e.outcome == outcome)
+            .count()
+    };
+    let generation_one = result.converged_at.get(&1).copied();
+    let generation_two = result.converged_at.get(&2).copied();
+    let recovery_ms = generation_two.and_then(|at| at.checked_sub(10000));
+    let converged_nodes = result.generations.iter().filter(|g| **g == 2).count();
+    let metrics = ScenarioMetrics {
+        nodes,
+        links: links.len(),
+        max_degree: *degrees.iter().max().unwrap_or(&0),
+        self_links: links.iter().filter(|l| l.left == l.right).count(),
+        duplicate_links: links.len()
+            - links
+                .iter()
+                .map(|l| (l.left.min(l.right), l.left.max(l.right)))
+                .collect::<BTreeSet<_>>()
+                .len(),
+        messages_attempted: messages.len(),
+        messages_delivered: result.delivered,
+        messages_dropped: result.dropped,
+        delivery_ratio: result.delivered as f64 / messages.len() as f64,
+        delivery_latency_p50_ms: percentile(&result.latencies, 50),
+        delivery_latency_p95_ms: percentile(&result.latencies, 95),
+        generation_one_convergence_ms: generation_one,
+        generation_two_convergence_ms: generation_two.map(|at| at - 5000),
+        partitioned_nodes,
+        recovery_ms,
+        latest_generation_converged: converged_nodes == nodes,
+        converged_nodes,
+        peak_queue: result.peak_queue,
+        queue_drops: count("queue_full"),
+        ttl_expired: count("ttl_expired"),
+        retry_exhausted: count("retry_exhausted"),
+        duplicate_rejected: count("duplicate_rejected"),
+        stale_generation_rejected: count("stale_generation_rejected"),
+        commands_applied: result.commands_applied,
+    };
+    // Fixed fixture budgets, not thresholds derived from observed candidate results.
+    let invariant_pass = metrics.max_degree <= config.direct_peer_limit
+        && metrics.self_links == 0
+        && metrics.duplicate_links == 0
+        && metrics.messages_delivered + metrics.messages_dropped == messages.len()
+        && metrics.peak_queue <= config.transport.queue_capacity
+        && metrics.commands_applied <= config.aircraft;
+    let recovered = generation_one.is_some_and(|at| at < 5000)
+        && recovery_ms.is_some_and(|elapsed| elapsed < 5000)
+        && converged_nodes == nodes;
+    let passed = invariant_pass
+        && match config.profile {
+            Profile::Recovery => {
+                recovered
+                    && metrics.messages_dropped <= partitioned_nodes
+                    && metrics.ttl_expired == 0
             }
-        }
-    }
-    if !seen[target] {
-        return None;
-    }
-    let mut path = vec![target];
-    let mut current = target;
-    while current != source {
-        current = previous[current]?;
-        path.push(current);
-    }
-    path.reverse();
-    Some(path)
-}
-
-fn connected_count(source: usize, online: &[bool], adjacency: &[Vec<(usize, usize)>]) -> usize {
-    if !online[source] {
-        return 0;
-    }
-    let mut seen = vec![false; adjacency.len()];
-    let mut queue = VecDeque::from([source]);
-    seen[source] = true;
-    while let Some(current) = queue.pop_front() {
-        for &(next, _) in &adjacency[current] {
-            if online[next] && !seen[next] {
-                seen[next] = true;
-                queue.push_back(next);
+            Profile::Duplication => {
+                recovered
+                    && metrics.duplicate_rejected > 0
+                    && metrics.commands_applied == config.aircraft
             }
-        }
+            Profile::Congestion => {
+                metrics.queue_drops > 0 && metrics.messages_dropped > partitioned_nodes
+            }
+            Profile::Loss => {
+                metrics.messages_delivered == 0
+                    && metrics.retry_exhausted == messages.len()
+                    && metrics.commands_applied == 0
+            }
+            Profile::Expiry => {
+                metrics.messages_delivered == 0
+                    && metrics.ttl_expired == messages.len()
+                    && metrics.commands_applied == 0
+            }
+        };
+    let event_digest_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&result.events).expect("serialize events"))
+    );
+    ScenarioValidation {
+        name: format!(
+            "{:?}-{}-aircraft-plus-ground",
+            config.profile, config.aircraft
+        )
+        .to_lowercase(),
+        config,
+        links,
+        messages,
+        faults,
+        metrics,
+        passed,
+        event_digest_sha256,
+        events: result.events,
     }
-    seen.into_iter().filter(|value| *value).count()
 }
 
 fn percentile(values: &[u64], percentile: usize) -> u64 {
     if values.is_empty() {
-        return 0;
+        0
+    } else {
+        values[((values.len() - 1) * percentile).div_ceil(100)]
     }
-    let index = ((values.len() - 1) * percentile).div_ceil(100);
-    values[index.min(values.len() - 1)]
-}
-
-fn digest_events(events: &[DeliveryEvent]) -> String {
-    let bytes = serde_json::to_vec(events).expect("events serialize");
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn standard_matrix_passes_topology_and_delivery_gates() {
-        let report = run_validation_matrix(20_260_825);
-        assert!(report.passed, "{report:#?}");
-        assert_eq!(
-            report
-                .scenarios
-                .iter()
-                .map(|scenario| scenario.config.aircraft)
-                .collect::<Vec<_>>(),
-            [5, 25, 50, 100, 150, 200]
-        );
-        assert!(report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.metrics.max_degree <= 8));
-        assert!(report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.metrics.self_links == 0));
-        assert!(report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.metrics.duplicate_links == 0));
-        assert!(report
-            .scenarios
-            .iter()
-            .all(|scenario| scenario.metrics.partitioned_nodes >= 1));
+    fn all_scales_reproduce_state_recovery_and_graph_invariants() {
+        for seed in [20260825, 20260929, 43] {
+            let first = run_validation_matrix(seed);
+            let second = run_validation_matrix(seed);
+            assert!(
+                first.passed,
+                "{:#?}",
+                first
+                    .scenarios
+                    .iter()
+                    .map(|s| &s.metrics)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(first, second);
+            for scenario in first.scenarios {
+                assert_eq!(scenario.metrics.nodes, scenario.config.aircraft + 1);
+                assert!(scenario.metrics.max_degree <= 8);
+                assert_eq!(
+                    scenario
+                        .links
+                        .iter()
+                        .map(|l| (l.left, l.right))
+                        .collect::<BTreeSet<_>>()
+                        .len(),
+                    scenario.links.len()
+                );
+                assert!(scenario.links.iter().all(|l| l.left != l.right));
+                assert_eq!(
+                    scenario.metrics.messages_dropped,
+                    scenario.metrics.partitioned_nodes
+                );
+                assert!(scenario.metrics.recovery_ms.unwrap() > 0);
+            }
+        }
     }
-
     #[test]
-    fn same_seed_produces_identical_evidence_digest() {
-        let first = run_validation_scenario(ValidationConfig::standard(50, 99));
-        let second = run_validation_scenario(ValidationConfig::standard(50, 99));
-        assert_eq!(first.event_digest_sha256, second.event_digest_sha256);
-        assert_eq!(first.metrics, second.metrics);
-    }
-
-    #[test]
-    fn different_seed_changes_transport_evidence() {
+    fn changed_seed_changes_trace_and_capacity_failure_cannot_pass() {
         let first = run_validation_scenario(ValidationConfig::standard(25, 1));
         let second = run_validation_scenario(ValidationConfig::standard(25, 2));
         assert_ne!(first.event_digest_sha256, second.event_digest_sha256);
+        let mut constrained = ValidationConfig::standard(25, 1);
+        constrained.transport.queue_capacity = 1;
+        constrained.transport.bytes_per_ms = 1;
+        constrained.transport.ttl_ms = 100;
+        let report = run_validation_scenario(constrained);
+        assert!(!report.passed);
+        assert!(report.metrics.ttl_expired > 0);
+        assert!(report.metrics.queue_drops > 0);
+        assert_eq!(report.metrics.recovery_ms, None);
     }
 }
