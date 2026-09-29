@@ -1,0 +1,11 @@
+{
+  "name": "avian-simulator-contracts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:fast": "node --test chud-emulator/*.test.mjs schema.test.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0"
+  }
+}
