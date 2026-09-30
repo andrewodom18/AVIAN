@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { stateStore } from "./state-store.mjs";
 
 const DEFAULT_DEVICES = [
@@ -94,14 +95,49 @@ export class ChudEmulator {
     for (const [id, operation] of operations) {
       if (operation.operation_id !== id || !devices.has(operation.mac)
         || !Number.isSafeInteger(operation.deadline_ms) || !operation.prior || !operation.desired
-        || typeof operation.awaiting_confirmation !== "boolean") throw new Error("invalid persisted operation");
+        || typeof operation.awaiting_confirmation !== "boolean" || typeof operation.done !== "boolean"
+        || operation.deadline_ms < 0 || operation.simulated !== true || operation.hardware_write !== false
+        || operation.error !== null) throw new Error("invalid persisted operation");
     }
-    let prior = 0;
-    for (const event of state.ledger) {
-      if (!Number.isSafeInteger(event.sequence) || event.sequence <= prior || event.sequence > state.sequence
-        || !operations.has(event.operation_id) || !["apply", "confirm", "rollback"].includes(event.action)) throw new Error("invalid persisted ledger");
-      prior = event.sequence;
+    // A checksum proves byte integrity, not a complete or coherent transaction history.
+    if (state.sequence !== state.ledger.length) throw new Error("invalid persisted ledger sequence");
+    const histories = new Map();
+    const configs = new Map();
+    const active = new Map();
+    const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+    for (const [index, event] of state.ledger.entries()) {
+      const operation = operations.get(event?.operation_id);
+      if (!operation || event.sequence !== index + 1 || event.mac !== operation.mac) throw new Error("invalid persisted ledger identity");
+      const previous = histories.get(event.operation_id);
+      if (event.action === "apply") {
+        if (previous || active.has(event.mac) || event.operation_id !== `sim-op-${String(event.sequence).padStart(4, "0")}`
+          || !object(operation.prior) || !object(operation.desired) || !Object.keys(operation.desired).length
+          || !isDeepStrictEqual(event.desired, operation.desired)
+          || (configs.has(event.mac) && !isDeepStrictEqual(configs.get(event.mac), operation.prior))) throw new Error("invalid persisted apply history");
+        configs.set(event.mac, { ...operation.prior, ...operation.desired });
+        active.set(event.mac, event.operation_id);
+      } else {
+        if (previous !== "apply" || active.get(event.mac) !== event.operation_id
+          || !["confirm", "rollback"].includes(event.action)) throw new Error("invalid persisted terminal history");
+        if (event.action === "rollback") {
+          if (event.cause !== "confirmation_expired") throw new Error("invalid persisted rollback cause");
+          configs.set(event.mac, operation.prior);
+        }
+        active.delete(event.mac);
+      }
+      histories.set(event.operation_id, event.action);
     }
+    for (const [id, operation] of operations) {
+      const action = histories.get(id);
+      const pending = action === "apply";
+      const result = pending ? null : { rolled_back: action === "rollback", state: action === "rollback" ? "rolled_back" : "confirmed" };
+      if (!action || operation.awaiting_confirmation !== pending || operation.done === pending
+        || !isDeepStrictEqual(operation.result, result)) throw new Error("invalid persisted operation history");
+    }
+    for (const [mac, config] of configs) {
+      if (!isDeepStrictEqual(devices.get(mac).config, config)) throw new Error("invalid persisted configuration history");
+    }
+    if (new Map(state.deviceFaults).size !== state.deviceFaults.length) throw new Error("duplicate persisted fault");
     for (const [mac, fault] of state.deviceFaults) {
       if (!devices.has(mac) || !FAULTS.has(fault)) throw new Error("invalid persisted fault");
     }
