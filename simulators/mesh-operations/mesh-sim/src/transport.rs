@@ -431,10 +431,34 @@ mod tests {
         };
         let result = run(2, &link(), &messages(), &[], &policy, 7);
         assert_eq!(result.latencies, [15, 25]);
+        assert_eq!((result.delivered, result.dropped), (2, 0));
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| event.outcome == "delivered")
+                .count(),
+            result.delivered
+        );
         assert_eq!(result.peak_queue, 2);
         assert_eq!(result.commands_applied, 2);
         assert_eq!(result.converged_at[&2], 25);
     }
+    #[test]
+    fn delivery_at_ttl_boundary_expires() {
+        // One serialization millisecond plus the fixture's five-ms link latency.
+        let policy = Policy {
+            ttl_ms: 6,
+            ..Policy::default()
+        };
+        let result = run(2, &link(), &messages()[..1], &[], &policy, 7);
+        assert_eq!((result.delivered, result.dropped), (0, 1));
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.outcome == "ttl_expired" && event.at_ms == 6));
+    }
+
     #[test]
     fn overflow_ttl_and_retry_limits_are_real_terminal_outcomes() {
         let policy = Policy {
