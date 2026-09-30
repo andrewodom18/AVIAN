@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -222,3 +223,78 @@ test("barriers release explicitly and timeout without a pre-acceptance write", a
   await request(app.base, "/__sim/control", { release: id });
   assert.equal((await pending).status, 200);
 });
+
+
+test("valid checksums cannot conceal missing or contradictory persisted history", (t) => {
+  const stateFile = storage(t);
+  const emulator = new ChudEmulator({ now: () => 1000 });
+  emulator.apply(payload);
+  const original = emulator.exportState();
+  const mutations = [
+    (s) => { s.ledger = []; },
+    (s) => { s.ledger = []; s.sequence = 0; },
+    (s) => { s.ledger[0].mac = other; },
+    (s) => { s.ledger[0].action = "confirm"; },
+    (s) => { s.operations[0][1].done = true; },
+    (s) => { s.operations[0][1].simulated = false; },
+    (s) => { s.operations[0][1].hardware_write = true; },
+    (s) => { s.devices[0][1].config.network_id.value = "NOT-RECORDED"; },
+    (s) => { s.ledger.push({ ...s.ledger[0], sequence: 2 }); s.sequence = 2; },
+    (s) => { s.ledger[0].desired = {}; },
+    (s) => { s.operations = []; },
+  ];
+  for (const change of mutations) {
+    const state = structuredClone(original); change(state);
+    const bytes = JSON.stringify({ version: 1, digest: createHash("sha256").update(JSON.stringify(state)).digest("hex"), state });
+    writeFileSync(stateFile, bytes);
+    assert.throws(() => createChudServer({ stateFile, now: () => 1000 }), /invalid persisted/);
+    assert.equal(readFileSync(stateFile, "utf8"), bytes, "invalid evidence remains untouched");
+  }
+});
+
+test("expiry boundary and save failures preserve transaction atomicity", (t) => {
+  const stateFile = storage(t);
+  let now = 1000;
+  const emulator = new ChudEmulator({ stateFile, now: () => now });
+  const op = emulator.apply(payload);
+  const before = emulator.exportState();
+  const save = emulator.store.save;
+  emulator.store.save = () => { throw new Error("injected persistence failure"); };
+  assert.throws(() => emulator.confirm(op), /persistence failure/);
+  assert.deepEqual(emulator.exportState(), before);
+  now = before.operations[0][1].deadline_ms - 1;
+  assert.equal(emulator.listOperations().operations[0].awaiting_confirmation, true);
+  now++;
+  assert.throws(() => emulator.expire(), /persistence failure/);
+  assert.deepEqual(emulator.exportState(), before);
+  emulator.store.save = save;
+  emulator.expire();
+  assert.equal(emulator.getLedger().events.at(-1).action, "rollback");
+  now++;
+  const restarted = new ChudEmulator({ stateFile, now: () => now });
+  assert.equal(restarted.getLedger().events.length, 2);
+  assert.throws(() => restarted.confirm(op), /rolled back/);
+});
+
+for (const phase of ["request_accepted", "side_effect_recorded", "before_response"]) {
+  test(`confirmation SIGKILL at ${phase} is idempotent after restart`, { timeout: 15000 }, async (t) => {
+    const stateFile = storage(t);
+    const app = await child(t, stateFile);
+    const applied = await request(app.base, "/api/radio/apply", payload);
+    await request(app.base, "/__sim/control", { barrier: phase });
+    const pending = request(app.base, "/api/radio/confirm", applied.body).catch(() => null);
+    const deadline = Date.now() + 4000;
+    let reached = false;
+    while (Date.now() < deadline) {
+      const control = (await request(app.base, "/__sim/control")).body;
+      if (control.barriers.pending.some((b) => b.phase === phase)) { reached = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(reached);
+    app.process.kill("SIGKILL"); await app.stopped; await pending;
+    const restarted = await child(t, stateFile);
+    assert.equal((await request(restarted.base, "/api/radio/confirm", applied.body)).status, 200);
+    assert.equal((await request(restarted.base, "/api/radio/confirm", applied.body)).status, 200);
+    assert.deepEqual((await request(restarted.base, "/__sim/ledger")).body.events.map((e) => e.action), ["apply", "confirm"]);
+  });
+}
