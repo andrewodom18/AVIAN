@@ -37,6 +37,10 @@ sim-contract: sim-fast
 sim-model-isolated: sim-deps
     node scripts/Test-SimulatorModel.mjs
 
+# Selected mutations use an external scratch package; requires AVIAN_VALIDATION_OUTPUT.
+sim-mutations-isolated:
+    node scripts/Test-SimulatorMutations.mjs
+
 sim-validation:
     cargo run --locked --quiet -p mesh-sim -- --validate --summary --seed 20260825
 
