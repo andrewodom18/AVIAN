@@ -484,6 +484,118 @@ mod tests {
             .unwrap()
     }
 
+    fn assert_identity_rejected(identity: ClientIdentity<'_>) {
+        let error = HttpsTncAgentTransport::new_with_identity(
+            "http://127.0.0.1",
+            Some(identity),
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, TrellisWareError::InvalidClientIdentity));
+        // Both user-facing and diagnostic representations must omit the input.
+        assert_eq!(
+            error.to_string(),
+            "TW-950 client identity is invalid or its password was rejected"
+        );
+        assert_eq!(format!("{error:?}"), "InvalidClientIdentity");
+    }
+
+    #[test]
+    fn malformed_pkcs12_is_rejected_without_echoing_input() {
+        let der = generated_pkcs12(
+            "synthetic-password",
+            EncryptionAlgorithm::PbeWithHmacSha256AndAes256,
+        );
+        let mut invalid_tag = der.clone();
+        invalid_tag[0] = 0xff;
+        for invalid in [
+            &[][..],
+            &b"synthetic-private-key-input"[..],
+            &der[..der.len() / 2],
+            invalid_tag.as_slice(),
+        ] {
+            assert_identity_rejected(ClientIdentity::Pkcs12 {
+                der: invalid,
+                password: "synthetic-password",
+            });
+        }
+    }
+
+    #[test]
+    fn pkcs12_without_private_key_is_rejected() {
+        let CertifiedKey { cert, .. } =
+            generate_simple_self_signed(["localhost".to_owned()]).unwrap();
+        let certificate = P12Certificate::from_der(cert.der().as_ref()).unwrap();
+        let mut certificate_only = KeyStore::new();
+        certificate_only.add_entry("client", KeyStoreEntry::Certificate(certificate));
+        for store in [KeyStore::new(), certificate_only] {
+            let der = store.writer("synthetic-password").write().unwrap();
+            // Establish that this fixture is a readable store, not corrupt DER.
+            let parsed =
+                KeyStore::from_pkcs12(&der, "synthetic-password", Pkcs12ImportPolicy::Strict)
+                    .unwrap();
+            assert!(parsed.private_key_chain().is_none());
+            assert_identity_rejected(ClientIdentity::Pkcs12 {
+                der: &der,
+                password: "synthetic-password",
+            });
+        }
+    }
+
+    #[test]
+    fn pkcs12_without_certificate_is_rejected() {
+        let CertifiedKey { signing_key, .. } =
+            generate_simple_self_signed(["localhost".to_owned()]).unwrap();
+        let key = PrivateKey::from_der(&signing_key.serialize_der()).unwrap();
+        let chain = PrivateKeyChain::new("test-key", key, []);
+        let mut store = KeyStore::new();
+        store.add_entry("client", KeyStoreEntry::PrivateKeyChain(chain));
+        let der = store.writer("synthetic-password").write().unwrap();
+        let parsed =
+            KeyStore::from_pkcs12(&der, "synthetic-password", Pkcs12ImportPolicy::Strict).unwrap();
+        // The strict importer discards a key that has no certificate chain.
+        assert!(parsed.private_key_chain().is_none());
+        assert_identity_rejected(ClientIdentity::Pkcs12 {
+            der: &der,
+            password: "synthetic-password",
+        });
+    }
+
+    #[test]
+    fn malformed_or_incomplete_pem_is_rejected_without_echoing_input() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(["localhost".to_owned()]).unwrap();
+        let certificate = cert.pem();
+        let key = signing_key.serialize_pem();
+        let truncated = &key.as_bytes()[..key.len() / 2];
+        for invalid in [
+            &[][..],
+            &b"synthetic-private-key-input"[..],
+            &b"-----BEGIN PRIVATE KEY-----\n!synthetic-invalid-base64!\n-----END PRIVATE KEY-----"
+                [..],
+            certificate.as_bytes(),
+            key.as_bytes(),
+            truncated,
+        ] {
+            assert_identity_rejected(ClientIdentity::Pem(invalid));
+        }
+    }
+
+    #[test]
+    fn accepts_generated_pem_key_and_certificate() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(["localhost".to_owned()]).unwrap();
+        let pem = format!("{}{}", cert.pem(), signing_key.serialize_pem());
+        HttpsTncAgentTransport::new_with_identity(
+            "http://127.0.0.1",
+            Some(ClientIdentity::Pem(pem.as_bytes())),
+            None,
+            false,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn accepts_blank_password_modern_and_legacy_pkcs12_without_switching_tls_backend() {
         for algorithm in [
@@ -522,6 +634,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, TrellisWareError::InvalidClientIdentity));
         assert!(!error.to_string().contains("secret-wrong-password"));
+        assert_eq!(format!("{error:?}"), "InvalidClientIdentity");
     }
 
     #[tokio::test]
