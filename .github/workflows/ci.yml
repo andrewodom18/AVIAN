@@ -176,6 +176,7 @@ jobs:
     name: AVIAN CI required
     if: always()
     needs:
+      - simulator-fast
       - dependency-audit
       - rust-quality
       - feature-and-release
@@ -187,6 +188,7 @@ jobs:
     steps:
       - name: Require every pipeline lane
         env:
+          SIMULATOR_RESULT: ${{ needs.simulator-fast.result }}
           AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           RUST_RESULT: ${{ needs.rust-quality.result }}
           FEATURE_RESULT: ${{ needs.feature-and-release.result }}
@@ -195,6 +197,7 @@ jobs:
           CONTAINER_RESULT: ${{ needs.container-build.result }}
           POWERSHELL_RESULT: ${{ needs.powershell-quality.result }}
         run: |
+          test "$SIMULATOR_RESULT" = success
           test "$AUDIT_RESULT" = success
           test "$RUST_RESULT" = success
           test "$FEATURE_RESULT" = success
