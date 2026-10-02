@@ -65,8 +65,10 @@ coverage:
 
 # Vendor identifiers cross process and repository boundaries in topics and
 # records. Keep this critical, fully-tested mutation scope bounded for CI.
+# Require a passing baseline so dependency failures cannot appear as a green
+# run containing only unbuildable mutants.
 mutate-radio:
-    cargo mutants --package mesh-core --file crates/mesh-core/src/vendor_radio.rs --re 'RadioVendorId::as_str|validate_token' --baseline skip
+    cargo mutants --package mesh-core --file crates/mesh-core/src/vendor_radio.rs --re 'RadioVendorId::as_str|validate_token'
 
 powershell-quality:
     pwsh -NoLogo -NoProfile -File scripts/ci/Test-PowerShell.ps1
