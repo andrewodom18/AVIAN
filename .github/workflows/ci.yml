@@ -17,6 +17,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  simulator-fast:
+    name: Emulator lifecycle and schema contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned simulator test dependencies
+        run: npm ci --prefix simulators/mesh-operations --ignore-scripts --no-audit --no-fund
+      - name: Test emulator process recovery and strict schemas
+        run: npm run --prefix simulators/mesh-operations test:fast
+
   dependency-audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -164,6 +176,7 @@ jobs:
     name: AVIAN CI required
     if: always()
     needs:
+      - simulator-fast
       - dependency-audit
       - rust-quality
       - feature-and-release
@@ -175,6 +188,7 @@ jobs:
     steps:
       - name: Require every pipeline lane
         env:
+          SIMULATOR_RESULT: ${{ needs.simulator-fast.result }}
           AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           RUST_RESULT: ${{ needs.rust-quality.result }}
           FEATURE_RESULT: ${{ needs.feature-and-release.result }}
@@ -183,6 +197,7 @@ jobs:
           CONTAINER_RESULT: ${{ needs.container-build.result }}
           POWERSHELL_RESULT: ${{ needs.powershell-quality.result }}
         run: |
+          test "$SIMULATOR_RESULT" = success
           test "$AUDIT_RESULT" = success
           test "$RUST_RESULT" = success
           test "$FEATURE_RESULT" = success

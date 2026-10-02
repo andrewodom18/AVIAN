@@ -1,0 +1,434 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avian.local/schemas/validation-report-v2.schema.json",
+  "title": "AVIAN deterministic transport validation report v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model",
+    "limitations",
+    "scenarios",
+    "fault_scenarios",
+    "passed",
+    "events_included"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0.0"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "config",
+          "links",
+          "messages",
+          "faults",
+          "metrics",
+          "passed",
+          "event_digest_sha256",
+          "events"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile",
+              "aircraft",
+              "seed",
+              "direct_peer_limit",
+              "messages_per_node",
+              "failure_percent",
+              "transport"
+            ],
+            "properties": {
+              "profile": {
+                "enum": [
+                  "recovery",
+                  "congestion",
+                  "loss",
+                  "duplication",
+                  "expiry"
+                ]
+              },
+              "aircraft": {
+                "type": "integer",
+                "minimum": 5,
+                "maximum": 200
+              },
+              "seed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "direct_peer_limit": {
+                "enum": [
+                  2,
+                  4,
+                  6,
+                  8
+                ]
+              },
+              "messages_per_node": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "failure_percent": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50
+              },
+              "transport": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "bytes_per_ms",
+                  "queue_capacity",
+                  "packet_bytes",
+                  "ttl_ms",
+                  "retry_limit",
+                  "retry_ms",
+                  "loss_basis_points",
+                  "duplicate_basis_points",
+                  "reorder_ms"
+                ],
+                "properties": {
+                  "bytes_per_ms": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "queue_capacity": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "packet_bytes": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "ttl_ms": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "retry_limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "retry_ms": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "loss_basis_points": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "duplicate_basis_points": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10000
+                  },
+                  "reorder_ms": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "left",
+                "right",
+                "latency_ms",
+                "jitter_ms"
+              ],
+              "properties": {
+                "left": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "right": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "latency_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "jitter_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "source",
+                "target",
+                "generation",
+                "created_ms",
+                "command"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "source": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "target": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "created_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "command": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "faults": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "at_ms",
+                "node",
+                "online",
+                "link_peer"
+              ],
+              "properties": {
+                "at_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "node": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "online": {
+                  "type": "boolean"
+                },
+                "link_peer": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "nodes",
+              "links",
+              "max_degree",
+              "self_links",
+              "duplicate_links",
+              "messages_attempted",
+              "messages_delivered",
+              "messages_dropped",
+              "delivery_latency_p50_ms",
+              "delivery_latency_p95_ms",
+              "partitioned_nodes",
+              "converged_nodes",
+              "peak_queue",
+              "queue_drops",
+              "ttl_expired",
+              "retry_exhausted",
+              "duplicate_rejected",
+              "stale_generation_rejected",
+              "commands_applied",
+              "delivery_ratio",
+              "generation_one_convergence_ms",
+              "generation_two_convergence_ms",
+              "recovery_ms",
+              "latest_generation_converged"
+            ],
+            "properties": {
+              "nodes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "links": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_degree": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "self_links": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "duplicate_links": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "messages_attempted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "messages_delivered": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "messages_dropped": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "delivery_latency_p50_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "delivery_latency_p95_ms": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "partitioned_nodes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "converged_nodes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "peak_queue": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "queue_drops": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "ttl_expired": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "retry_exhausted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "duplicate_rejected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "stale_generation_rejected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "commands_applied": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "delivery_ratio": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "generation_one_convergence_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "generation_two_convergence_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "recovery_ms": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "latest_generation_converged": {
+                "type": "boolean"
+              }
+            }
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "event_digest_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "https://avian.local/schemas/transport-event-v1.schema.json"
+            }
+          }
+        }
+      },
+      "minItems": 6,
+      "maxItems": 6
+    },
+    "fault_scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "#/properties/scenarios/items"
+      },
+      "minItems": 24,
+      "maxItems": 24
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "events_included": {
+      "type": "boolean"
+    }
+  }
+}
