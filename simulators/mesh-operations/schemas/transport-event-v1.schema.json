@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avian.local/schemas/transport-event-v1.schema.json",
+  "title": "Synthetic AVIAN transport event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sequence",
+    "at_ms",
+    "message_id",
+    "from",
+    "to",
+    "generation",
+    "attempt",
+    "outcome"
+  ],
+  "properties": {
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "at_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "message_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "from": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "to": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "outcome": {
+      "enum": [
+        "node_restored",
+        "node_offline",
+        "ttl_expired",
+        "retry_exhausted",
+        "no_route",
+        "queue_full",
+        "queued",
+        "link_unavailable",
+        "link_loss",
+        "duplicate_rejected",
+        "stale_generation_rejected",
+        "delivered",
+        "forwarded",
+        "link_offline",
+        "link_restored"
+      ]
+    }
+  }
+}
