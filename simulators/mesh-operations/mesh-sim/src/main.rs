@@ -35,7 +35,12 @@ async fn main() {
             .unwrap_or(20_260_825);
         let mut report = run_validation_matrix(seed);
         if arguments.iter().any(|argument| argument == "--summary") {
-            for scenario in &mut report.scenarios {
+            report.events_included = false;
+            for scenario in report
+                .scenarios
+                .iter_mut()
+                .chain(&mut report.fault_scenarios)
+            {
                 scenario.events.clear();
             }
         }

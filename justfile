@@ -23,14 +23,29 @@ build-release:
 docker-build:
     docker build --file apps/arc-radio-plugin/Dockerfile --tag avian-arc-radio-plugin:ci .
 
-sim-contract:
-    node --test --test-concurrency=1 "simulators/mesh-operations/chud-emulator/emulator.test.mjs" "simulators/mesh-operations/validation-contract.test.mjs" "simulators/mesh-operations/visualizer/visualizer.test.mjs"
+sim-deps:
+    npm ci --prefix simulators/mesh-operations --ignore-scripts --no-audit --no-fund
+
+# Node-only emulator/schema gates; no PEAT acceptance claim.
+sim-fast: sim-deps
+    npm run --prefix simulators/mesh-operations test:fast
+
+sim-contract: sim-fast
+    node --test --test-concurrency=1 "simulators/mesh-operations/validation-contract.test.mjs" "simulators/mesh-operations/visualizer/visualizer.test.mjs"
+
+# Partial, external-package unit evidence while PEAT resolution is blocked.
+sim-model-isolated: sim-deps
+    node scripts/Test-SimulatorModel.mjs
+
+# Selected mutations use an external scratch package; requires AVIAN_VALIDATION_OUTPUT.
+sim-mutations-isolated:
+    node scripts/Test-SimulatorMutations.mjs
 
 sim-validation:
-    cargo run --quiet -p mesh-sim -- --validate --summary --seed 20260825
+    cargo run --locked --quiet -p mesh-sim -- --validate --summary --seed 20260825
 
 peat-validation:
-    cargo run --quiet -p mesh-sim -- --validate-peat
+    cargo run --locked --quiet -p mesh-sim -- --validate-peat
 
 docker-smoke: docker-build
     docker run --rm --entrypoint /bin/sh avian-arc-radio-plugin:ci -c 'id -un | grep -x avian'
@@ -50,8 +65,10 @@ coverage:
 
 # Vendor identifiers cross process and repository boundaries in topics and
 # records. Keep this critical, fully-tested mutation scope bounded for CI.
+# Require a passing baseline so dependency failures cannot appear as a green
+# run containing only unbuildable mutants.
 mutate-radio:
-    cargo mutants --package mesh-core --file crates/mesh-core/src/vendor_radio.rs --re 'RadioVendorId::as_str|validate_token' --baseline skip
+    cargo mutants --package mesh-core --file crates/mesh-core/src/vendor_radio.rs --re 'RadioVendorId::as_str|validate_token'
 
 powershell-quality:
     pwsh -NoLogo -NoProfile -File scripts/ci/Test-PowerShell.ps1

@@ -29,7 +29,7 @@ try {
     $peatEvidence = cargo run --quiet -p mesh-sim -- --validate-peat
     if ($LASTEXITCODE -ne 0) { throw "PEAT validation failed with exit code $LASTEXITCODE" }
     [System.IO.File]::WriteAllText($peatReport, ($peatEvidence -join [Environment]::NewLine) + [Environment]::NewLine)
-    node --test --test-concurrency=1 'simulators/mesh-operations/chud-emulator/emulator.test.mjs' 'simulators/mesh-operations/validation-contract.test.mjs'
+    just sim-contract
     if ($LASTEXITCODE -ne 0) { throw "contract validation failed with exit code $LASTEXITCODE" }
 }
 finally {
