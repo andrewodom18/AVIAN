@@ -4,8 +4,35 @@ This ledger distinguishes implemented/automated behavior from hardware proof.
 It is intentionally conservative: the milestone is not complete until every
 required field row contains dated, sanitized evidence.
 
-Last automated verification: 2026-08-19 on macOS and Debian Linux
-(`dev` at `240f0c2` or later).
+Last automated verification: 2026-10-16 on the macOS refactor working tree
+based on `main` at `b6ff866`, merged into `dev`.
+
+## Current transport and refactor verification
+
+- `just verify` passes: formatting, warning-free workspace Clippy, 224 Rust
+  tests, documentation tests, debug build, 11 simulator/visualizer contract
+  tests, deterministic 5-200-aircraft validation, and real 3/5/10-node
+  authenticated loopback convergence.
+- Workspace line coverage is 80.02 percent, above the unchanged 75-percent gate.
+- `just feature-check` passes all 224 tests with optional features enabled and
+  builds the entire workspace in release mode, including direct serial support.
+- The native transport's 15 tests cover partition recovery, address fallback,
+  paginated replication, priority delivery during blocked catch-up,
+  authentication, canceled operations, restart, and lossless persistence.
+- A real agent process test verifies responsive status during pairing,
+  SIGTERM shutdown, and immediate restart with the same persistent identity.
+- The Linux container builds and passes non-root/help smoke checks. PowerShell
+  parsing, analysis, and all three mocked bench tests pass in its CI container.
+- All eight scoped vendor-identifier mutants are caught.
+- The RF planner production build, 17 tests, lint, and TypeScript typecheck pass.
+  Rust and production npm audits report no vulnerabilities. The RF planner README
+  documents the remaining development-tool advisories.
+
+The [transport upgrade guide](transport-upgrade.md) describes changed endpoint
+identities, configuration, wire messages, database format, and capacity bounds.
+There is no automatic database conversion. All transport-dependent field
+acceptance below is historical evidence and must be repeated for this version;
+loopback and container tests do not establish RF or flight performance.
 
 ## Implemented and automated
 
@@ -14,7 +41,7 @@ Last automated verification: 2026-08-19 on macOS and Debian Linux
 | Baseline | macOS `just verify` passes formatting, warning-free workspace Clippy, workspace tests, doc tests, and locked debug build; Debian Linux locked workspace tests and release build also pass |
 | Configuration | Strict versioned/size-bounded TOML, consistent relative path resolution, scalar CLI precedence, peer-list replacement, identifier/count/timing bounds, distinct sockets, unknown-field rejection, production examples |
 | Deployment | Locked release build path, prebuilt path, service account/group, preserved live config, capability-free hardened independent systemd units |
-| Mesh/status | Stable derived identity across restart, startup node advertisement, ordered multi-address fallback with bounded background reconnects that do not block local status, actual PEAT-selected transport attribution, transition status, owner-only/time- and size-bounded control protocol and record inspection, plus atomic ground-side one-code aircraft pairing, safe corrected-code replacement, zero-to-eight-path replacement for loss/recovery simulation, and protected removal of code-added direct peers |
+| Mesh/status | Stable derived identity across restart, startup node advertisement, ordered multi-address fallback with bounded background reconnects that do not block local status, actual AVIAN-selected transport attribution, transition status, owner-only/time- and size-bounded control protocol and record inspection, plus atomic ground-side one-code aircraft pairing, safe corrected-code replacement, zero-to-eight-path replacement for loss/recovery simulation, and protected removal of code-added direct peers |
 | Payload | Schema-v2 image manifest/detection contracts, source assignment by local agent, metadata-only stardogOS image publication, malformed-event and socket-mode tests |
 | Commands | Ed25519 key generation, short record/config lifetime, target/issuer/action/fresh-system-lock checks, atomic nonce/replay state, dry-run path, restart replay suppression, ACK source correlation, five-second total ACK/retry budget, execute-on-SITL-only configuration gate |
 | Radio | Read-only StreamCaster client, sanitized API failures, bounded bidirectional probes (including passive Ethernet/ZeroTier operation with vendor APIs disabled), Unix observation socket plus legacy UDP ingress, fail-closed relay geometry/calibration |

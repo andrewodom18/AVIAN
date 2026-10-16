@@ -43,7 +43,7 @@ feature-check:
     cargo test --workspace --all-features --locked
     cargo build --workspace --all-features --release --locked
 
-# The current workspace baseline is 77.48% line coverage. Keep a small margin
+# The measured workspace baseline is above 79% line coverage. Keep a small margin
 # for platform-specific instrumentation while preventing material regression.
 coverage:
     cargo llvm-cov --workspace --locked --summary-only --fail-under-lines 75

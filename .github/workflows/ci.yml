@@ -2,7 +2,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -158,6 +159,36 @@ jobs:
           mcr.microsoft.com/powershell:7.5-ubuntu-24.04@sha256:042240d57ec9e47e511033b92625a8d95875ee5860af3015992c248b58a8be81
           pwsh -NoLogo -NoProfile -File scripts/ci/Test-PowerShell.ps1
 
+  rf-planning:
+    name: RF planning application
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: simulators/rf-planning-suite
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: simulators/rf-planning-suite/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check application and model contracts
+        run: npm test
+
+      - name: Check application style
+        run: npm run lint
+
+      - name: Check application types
+        run: npm run typecheck
+
   required:
     name: AVIAN CI required
     if: always()
@@ -169,6 +200,7 @@ jobs:
       - radio-mutations
       - container-build
       - powershell-quality
+      - rf-planning
     runs-on: ubuntu-latest
     steps:
       - name: Require every pipeline lane
@@ -180,6 +212,7 @@ jobs:
           MUTATION_RESULT: ${{ needs.radio-mutations.result }}
           CONTAINER_RESULT: ${{ needs.container-build.result }}
           POWERSHELL_RESULT: ${{ needs.powershell-quality.result }}
+          RF_RESULT: ${{ needs.rf-planning.result }}
         run: |
           test "$AUDIT_RESULT" = success
           test "$RUST_RESULT" = success
@@ -188,3 +221,4 @@ jobs:
           test "$MUTATION_RESULT" = success
           test "$CONTAINER_RESULT" = success
           test "$POWERSHELL_RESULT" = success
+          test "$RF_RESULT" = success

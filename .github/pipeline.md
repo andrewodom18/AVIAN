@@ -23,7 +23,9 @@ just mutate-radio
 just powershell-quality
 ```
 
-## Required pull-request lanes
+CI runs on pushes to `dev` and `main`, and can also be dispatched manually.
+
+## Required lanes
 
 - **Rust quality and tests** checks formatting, denies Clippy warnings, runs the
   workspace tests (including documentation tests), and builds with the locked
@@ -33,7 +35,7 @@ just powershell-quality
 - **Feature and release build** tests all workspace features and compiles the
   locked release configuration.
 - **Coverage floor** prevents line coverage from falling below 75 percent. The
-  floor is based on the measured 77.48-percent workspace baseline.
+  floor stays below the measured workspace baseline of more than 79 percent.
 - **Vendor identifier mutation test** requires the topic- and record-safe radio
   identifier contract to catch every viable generated mutant in that bounded
   scope.
@@ -42,12 +44,15 @@ just powershell-quality
 - **PowerShell bench quality** parses and statically analyzes every bench script,
   then runs mocked tests without changing workstation networking or touching
   hardware.
+- **RF planning application** installs locked Node dependencies, builds the
+  application, runs its rendered-page and calculation contracts, and checks
+  lint and TypeScript types.
 - **AVIAN CI required** provides one stable status for repository rules after
   all required lanes succeed. Repository rules should require only this status,
   named `ci / AVIAN CI required`, so future informational jobs do not become
   merge blockers accidentally.
 
-Superseded runs on the same pull request are cancelled. Third-party workflow
+Superseded runs on the same branch are cancelled. Third-party workflow
 actions and container bases are pinned to immutable commit SHAs or digests, and
 workflow permissions are read-only. Hardware testing, container-image scanner
 selection, container publication, releases, and deployment remain outside this
