@@ -65,7 +65,7 @@ pub async fn run(args: &TrellisWareDiscoveryArgs) -> anyhow::Result<()> {
         bail!("--interval-seconds must be positive");
     }
     let session = match args.zenoh_endpoint.as_deref() {
-        Some(endpoint) => Some(open_zenoh(endpoint).await?),
+        Some(endpoint) => Some(super::zenoh_client::open(endpoint).await?),
         None => None,
     };
 
@@ -370,25 +370,6 @@ fn atomic_write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("replacing {} atomically", path.display()))?;
     Ok(())
-}
-
-async fn open_zenoh(endpoint: &str) -> anyhow::Result<zenoh::Session> {
-    let mut config = zenoh::Config::default();
-    config
-        .insert_json5("mode", r#""client""#)
-        .map_err(|error| anyhow::anyhow!("zenoh mode: {error}"))?;
-    config
-        .insert_json5("connect/endpoints", &format!(r#"["{endpoint}"]"#))
-        .map_err(|error| anyhow::anyhow!("zenoh endpoint: {error}"))?;
-    config
-        .insert_json5("scouting/multicast/enabled", "false")
-        .map_err(|error| anyhow::anyhow!("zenoh multicast: {error}"))?;
-    config
-        .insert_json5("scouting/gossip/enabled", "false")
-        .map_err(|error| anyhow::anyhow!("zenoh gossip: {error}"))?;
-    zenoh::open(config)
-        .await
-        .map_err(|error| anyhow::anyhow!("opening Zenoh: {error}"))
 }
 
 fn now_unix_ms() -> u64 {

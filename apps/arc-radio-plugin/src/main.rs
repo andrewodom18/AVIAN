@@ -15,6 +15,7 @@ mod microhard_probe;
 mod service;
 mod trellisware_discovery;
 mod trellisware_probe;
+mod zenoh_client;
 
 #[derive(Debug, Subcommand)]
 enum Command {
