@@ -48,4 +48,4 @@ cargo build --release --workspace
 cargo run -p mesh-sim
 ```
 
-This exercises formation partitioning, a crashed node, recovery, PEAT state convergence, and the scoped Betaflight emergency action.
+This exercises formation partitioning, a crashed node, recovery, AVIAN state convergence, and the scoped Betaflight emergency action.

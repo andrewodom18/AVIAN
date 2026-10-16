@@ -20,7 +20,7 @@ radio_node_id = "1"
 radio_serial_number = "TW950-123"
 ```
 
-`mesh-agent` validates the MAC strictly and refuses attachment assertions on non-aircraft roles. At startup it publishes a durable `RadioAttachmentAssertion` record under `radio-attachment/<avian-node-id>` through the authenticated PEAT formation.
+`mesh-agent` validates the MAC strictly and refuses attachment assertions on non-aircraft roles. At startup it publishes a durable `RadioAttachmentAssertion` record under `radio-attachment/<avian-node-id>` through the authenticated AVIAN formation.
 
 The assertion is evidence of the locally configured tuple, not proof of RF topology, radio health, or command authorization. ARC must compare MAC, vendor node ID, and serial number when present with the operator assignment and a fresh CHUD-authoritative inventory record before marking an association verified. A shared, expired, diagnostic, simulated, or unauthenticated transport must not be treated as equivalent evidence.
 
@@ -28,5 +28,5 @@ The assertion is evidence of the locally configured tuple, not proof of RF topol
 
 - Contract and aircraft publisher: implemented and locally testable.
 - ARC operator assignment, Fleet projection, and exact-match/conflict reconciliation: implemented on the paired ARC feature branch.
-- Automatic ARC session transport consumer: pending; ARC remains fail-closed as `operator_assigned` until an authenticated Fleet/PEAT path invokes the reconciliation logic.
+- Automatic ARC session transport consumer: pending; ARC remains fail-closed as `operator_assigned` until an authenticated Fleet/AVIAN path invokes the reconciliation logic.
 - Physical attachment and RF topology validation: pending hardware testing through CHUD.

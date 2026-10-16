@@ -10,7 +10,7 @@ pub const STREAMCASTER_CONTROL_SCHEMA_VERSION: u16 = 1;
 
 /// The small, per-device portion of StreamCaster desired configuration.
 /// Fleet topology and shared RF intent intentionally live in
-/// `ArcRadioConfiguration`, which is authored once and distributed by PEAT.
+/// `ArcRadioConfiguration`, which is authored once and distributed by AVIAN.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamCasterDeviceAssignment {

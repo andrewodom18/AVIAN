@@ -8,7 +8,7 @@ use crate::{NodeId, RelayLinkObservation, Telemetry, TransportKind};
 const TELEMETRY_LATEST_TTL_MS: u64 = 2_000;
 
 /// Mission-configurable source and operator-feed traffic limits. The policy
-/// applies before a companion inserts a record into PEAT, so it constrains
+/// applies before a companion inserts a record into AVIAN, so it constrains
 /// traffic independently of whichever IP underlay is currently available.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SwarmTrafficPolicy {

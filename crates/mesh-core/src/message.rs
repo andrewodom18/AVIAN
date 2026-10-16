@@ -139,7 +139,7 @@ pub enum MeshPayload {
     /// Latest rolling radio observation used to build a shared in-flight relay
     /// snapshot. The record is telemetry-class data, not a mission command.
     RelayLinkObservation(RelayLinkObservation),
-    /// Latest read-only radio and PEAT connectivity observation for one ARC node.
+    /// Latest read-only radio and AVIAN connectivity observation for one ARC node.
     StreamCasterMeshObservation(StreamCasterMeshObservation),
     /// Vendor-neutral read-only radio observation. New adapters publish this
     /// alongside any legacy vendor-specific record during migration.
@@ -155,7 +155,7 @@ pub enum MeshPayload {
     RelayRuntimeConfiguration(RelayRuntimeConfiguration),
     RelayReconfiguration(InFlightRelayDecision),
     /// Arc-authored desired StreamCaster configuration. AVIAN validates and
-    /// distributes it through PEAT but never becomes the desired-config owner.
+    /// distributes it through AVIAN but never becomes the desired-config owner.
     RadioConfiguration(ArcRadioConfiguration),
     ImageManifest(ImageManifest),
     Detection(Detection),

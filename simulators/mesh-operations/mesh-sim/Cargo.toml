@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 ed25519-dalek.workspace = true
 mesh-core = { path = "../../../crates/mesh-core" }
-mesh-peat = { path = "../../../crates/mesh-peat" }
+mesh-transport = { path = "../../../crates/mesh-transport" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

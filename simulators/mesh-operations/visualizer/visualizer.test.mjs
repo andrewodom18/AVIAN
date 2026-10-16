@@ -21,7 +21,7 @@ test("visualizer shell exposes playback and topology surfaces", () => {
   }
   assert.match(html, /What the AVIAN simulator actually does/);
   assert.match(html, /Executed 200-aircraft scale run/);
-  assert.match(html, /AVIAN MESH · PEAT-ENABLED MANET/);
+  assert.match(html, /AVIAN MESH · DECENTRALIZED MANET/);
 });
 
 test("visualizer renders individual scale nodes and guided pacing", () => {

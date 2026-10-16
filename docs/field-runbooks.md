@@ -14,7 +14,7 @@ passwords, cookies, absolute imagery paths, or Starshield credentials.
 4. Start nodes once without peers, record their endpoint IDs, then configure
    ordered addresses: `silvus` first and the ZeroTier-over-Starshield address
    tagged `satellite` second.
-5. Permit AVIAN UDP ports `9000` (PEAT) and `9200` (bounded probe responder) on
+5. Permit AVIAN UDP ports `9000` (AVIAN) and `9200` (bounded probe responder) on
    both underlays. Do not route AVIAN through RFD900.
 
 ## Raspberry Pi to Mac
@@ -124,7 +124,7 @@ sudo avianctl status --json
 sudo journalctl -u avian-mesh-agent -u avian-link-monitor --since "5 minutes ago"
 ```
 
-PEAT should disconnect and reconnect using the peer's tagged `satellite`
+AVIAN should disconnect and reconnect using the peer's tagged `satellite`
 address over ZeroTier/Starshield. Record interruption and recovery timestamps.
 Restore Silvus and confirm it becomes the selected reachable preferred path.
 During both transitions, verify image capture, GPS Guard, RFD900, and the plain

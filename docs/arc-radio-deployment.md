@@ -1,7 +1,7 @@
 # ARC StreamCaster plugin deployment
 
-The ARC radio plugin is a local PEAT/planning sidecar. It connects to the ARC
-Zenoh Unix socket, reads non-secret planning evidence, and uses PEAT for the
+The ARC radio plugin is a local AVIAN/planning sidecar. It connects to the ARC
+Zenoh Unix socket, reads non-secret planning evidence, and uses AVIAN for the
 durable fleet-plan record. It does not receive a radio management URL or radio
 credentials and cannot configure a physical Silvus radio. ARC's guided
 swarm-builder may orchestrate normalized CHUD API transactions through
@@ -43,12 +43,12 @@ deployment. Enable `arc_streamcaster_plugin_enabled` only after provisioning:
 - `/etc/arc/radio-evidence/regulatory.json` for the exact frequency/width;
 - `/etc/arc/radio-evidence/installations/<profile>.json` for approved antenna
   installation/calibration evidence;
-- `/etc/arc/keys/peat-radio.key` as the out-of-band PEAT formation key;
-- a protected PEAT/ARC operational data interface.
+- `/etc/arc/keys/mesh-radio.key` as the out-of-band AVIAN formation key;
+- a protected AVIAN/ARC operational data interface.
 
-Start one sidecar per ARC/PEAT node. Set `--source` to its stable ARC device
-identity. Supply each intended PEAT relationship with one or more
-`--peat-peer NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a PEAT
+Start one sidecar per ARC/AVIAN node. Set `--source` to its stable ARC device
+identity. Supply each intended AVIAN relationship with one or more
+`--mesh-peer NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]` arguments. The UI marks a AVIAN
 link connected only when the transport reports that endpoint as connected.
 Configured but disconnected peers remain visible as disconnected; no link is
 fabricated for an unobserved relationship. Offline peers do not block sidecar
@@ -58,15 +58,15 @@ Use [the radio mesh bootstrap command](arc-radio-bootstrap.md) to derive every
 endpoint ID and generate bounded, per-host Ansible peer variables without
 starting the sidecars first.
 
-The peer address is the PEAT/ARC reachability address, not a StreamCaster
+The peer address is the AVIAN/ARC reachability address, not a StreamCaster
 management endpoint. Fresh fused ARC `local/telemetry` supplies node position
 when available. Physical RF telemetry comes from the external management API.
-Operators must not treat the logical PEAT topology as a radio propagation map.
+Operators must not treat the logical AVIAN topology as a radio propagation map.
 
 CHUD owns enrollment, credentials, live capability inspection, physical apply,
 verification, confirmation, persistence, audit, and compensating rollback.
 ARC owns only the operator workflow and its durable journal. Do not put radio
-credentials in AVIAN, ARC canonical configuration, PEAT, compose variables, or
+credentials in AVIAN, ARC canonical configuration, compose variables, or
 logs.
 
 See [ARC single-plug radio swarm onboarding](arc-radio-swarm-builder.md) for
@@ -80,7 +80,7 @@ planning and observation topics without changing ARC source. ARC main's fleet
 sessions, identification-image proxy, spatial HTTP APIs, and waypoint
 on-arrival actions do not change the AVIAN sidecar protocol. Identification
 JPEG bytes remain on ARC's addressed Zenoh/HTTP data path and must never be
-copied into AVIAN's replicated PEAT document.
+copied into AVIAN's replicated records.
 
 ARC main does not currently expose the CHUD-backed `/api/radio/*` routes or the
 guided radio-swarm UI described above. Those surfaces remain ticketed

@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, fs};
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
 use mesh_core::{FlightStack, NodeId, NodeRole, RadioAttachmentAssertion, DEFAULT_MAX_NEIGHBORS};
-use mesh_peat::PeerDescriptor;
+use mesh_transport::PeerDescriptor;
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_SCHEMA_VERSION: u16 = 1;
@@ -71,28 +71,24 @@ pub enum CommandEnvironment {
 }
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "mesh-agent",
-    about = "AVIAN onboard PEAT mesh service",
-    version
-)]
+#[command(name = "mesh-agent", about = "AVIAN onboard mesh service", version)]
 pub struct CliArgs {
     /// Strict, versioned production TOML. Relative paths resolve from this file.
     #[arg(long)]
     pub config: Option<PathBuf>,
-    /// Stable AVIAN node name used to derive the PEAT identity.
+    /// Stable AVIAN node name used to derive the mesh transport identity.
     #[arg(long)]
     pub name: Option<String>,
     /// Local IP and UDP port for the Iroh QUIC transport.
     #[arg(long)]
     pub bind: Option<SocketAddr>,
-    /// Directory for persistent Automerge state.
+    /// Directory for persistent mesh records.
     #[arg(long)]
     pub storage: Option<PathBuf>,
-    /// PEAT formation identifier shared by authorized AVIAN nodes.
+    /// mesh transport formation identifier shared by authorized AVIAN nodes.
     #[arg(long)]
     pub formation_id: Option<String>,
-    /// File containing the shared base64 PEAT formation secret.
+    /// File containing the shared base64 mesh transport formation secret.
     #[arg(long)]
     pub formation_key_file: Option<PathBuf>,
     /// Static peer as NAME=ENDPOINT_ID_HEX@IP:PORT[,IP:PORT...]. Repeat per peer.
@@ -101,7 +97,7 @@ pub struct CliArgs {
     /// Shared versioned aircraft membership manifest; replaces static peers.
     #[arg(long, conflicts_with = "peer")]
     pub membership_file: Option<PathBuf>,
-    /// Hard limit on direct PEAT neighbors.
+    /// Hard limit on direct mesh transport neighbors.
     #[arg(long)]
     pub max_mesh_peers: Option<usize>,
     /// Seconds between attempts to reconnect unavailable static peers.
@@ -278,7 +274,7 @@ pub struct CalibratedLinkConfig {
 struct FileConfig {
     schema_version: u16,
     node: FileNode,
-    peat: FilePeat,
+    mesh: FileMesh,
     #[serde(default)]
     peers: Vec<FilePeer>,
     mavlink: Option<FileMavlink>,
@@ -300,7 +296,7 @@ struct FileNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FilePeat {
+struct FileMesh {
     #[serde(default = "default_bind")]
     bind: SocketAddr,
     #[serde(default = "default_storage")]
@@ -448,38 +444,38 @@ impl ResolvedConfig {
         let role = file
             .as_ref()
             .map_or(ConfiguredNodeRole::Aircraft, |value| value.node.role);
-        let peat = file.as_ref().map(|value| &value.peat);
+        let mesh = file.as_ref().map(|value| &value.mesh);
         let bind = cli
             .bind
-            .or_else(|| peat.map(|value| value.bind))
+            .or_else(|| mesh.map(|value| value.bind))
             .unwrap_or_else(default_bind);
         let storage = resolve_path(
             base,
             cli.storage
-                .or_else(|| peat.map(|value| value.storage.clone()))
+                .or_else(|| mesh.map(|value| value.storage.clone()))
                 .unwrap_or_else(default_storage),
         );
         let formation_id = cli
             .formation_id
-            .or_else(|| peat.map(|value| value.formation_id.clone()))
+            .or_else(|| mesh.map(|value| value.formation_id.clone()))
             .unwrap_or_else(default_formation_id);
         let formation_key_file = resolve_path(
             base,
             cli.formation_key_file
-                .or_else(|| peat.map(|value| value.formation_key_file.clone()))
-                .context("--formation-key-file or [peat].formation_key_file is required")?,
+                .or_else(|| mesh.map(|value| value.formation_key_file.clone()))
+                .context("--formation-key-file or [mesh].formation_key_file is required")?,
         );
         let membership_file = cli
             .membership_file
-            .or_else(|| peat.and_then(|value| value.membership_file.clone()))
+            .or_else(|| mesh.and_then(|value| value.membership_file.clone()))
             .map(|path| resolve_path(base, path));
         let max_mesh_peers = cli
             .max_mesh_peers
-            .or_else(|| peat.map(|value| value.max_mesh_peers))
+            .or_else(|| mesh.map(|value| value.max_mesh_peers))
             .unwrap_or_else(default_max_mesh_peers);
         let peer_retry_seconds = cli
             .peer_retry_seconds
-            .or_else(|| peat.map(|value| value.peer_retry_seconds))
+            .or_else(|| mesh.map(|value| value.peer_retry_seconds))
             .unwrap_or_else(default_peer_retry_seconds);
 
         let tagged_peers = if cli.peer.is_empty() && membership_file.is_none() {
@@ -947,7 +943,7 @@ schema_version = 1
 [node]
 name = "air-1"
 role = "aircraft"
-[peat]
+[mesh]
 formation_key_file = "formation.key"
 storage = "state"
 [[peers]]
@@ -1004,7 +1000,7 @@ schema_version = 1
 [node]
 name = "air-1"
 role = "aircraft"
-[peat]
+[mesh]
 formation_key_file = "formation.key"
 [[peers]]
 name = "configured"
@@ -1038,7 +1034,7 @@ schema_version = 1
 [node]
 name = "configured"
 role = "aircraft"
-[peat]
+[mesh]
 bind = "127.0.0.1:9000"
 storage = "configured-state"
 formation_id = "configured-formation"
@@ -1107,7 +1103,7 @@ schema_version = 1
 [node]
 name = "air-1"
 role = "aircraft"
-[peat]
+[mesh]
 formation_key_file = "formation.key"
 [commands]
 mode = "execute"
@@ -1150,7 +1146,7 @@ schema_version = 1
 [node]
 name = "air-1"
 role = "aircraft"
-[peat]
+[mesh]
 formation_key_file = "formation.key"
 [sockets]
 control = "same.sock"
@@ -1178,7 +1174,7 @@ schema_version = 1
 [node]
 name = "air-1"
 role = "aircraft"
-[peat]
+[mesh]
 formation_key_file = "formation.key"
 [commands]
 ack_timeout_ms = 2000
@@ -1202,7 +1198,7 @@ surprise = true
 [node]
 name = "air-1"
 role = "aircraft"
-[peat]
+[mesh]
 formation_key_file = "formation.key"
 "#,
         )

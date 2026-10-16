@@ -91,7 +91,7 @@ pub struct RoutePlan {
     pub ranked_scores: Vec<(LinkId, f32)>,
 }
 
-/// Application-level selector layered above PEAT's transport manager. It adds
+/// Application-level selector layered above AVIAN's transport manager. It adds
 /// RF geometry and hysteresis that are specific to moving aircraft.
 #[derive(Debug, Clone, Copy)]
 pub struct LinkOrchestrator {

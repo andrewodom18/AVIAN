@@ -28,7 +28,7 @@ fields; none may be inferred from a transient IP address.
 ARC serves a selected drone's JPEG crop through
 `GET /api/drones/{drone_id}/vision/crop/{observation_id}` and resolves the bytes
 over that drone's admitted Zenoh session. AVIAN provides the available network
-path but does not proxy, replicate, cache, or embed the JPEG in PEAT.
+path but does not proxy, replicate, cache, or embed the JPEG in AVIAN.
 
 The existing AVIAN radio traffic profile can model the largest operator-
 requested crop or crop burst with `priority_transfer_bytes` and the number of

@@ -329,7 +329,7 @@ try {
     $meshEvidence = Get-ArcMesh
     Save-Json $meshEvidence (Join-Path $runRoot 'two-radio-mesh.json')
     Ask-UiCheck mesh 'No invented RF edge' 'If CHUD supplies no RF-peer evidence, does ARC avoid drawing a measured solid RF link?'
-    Ask-UiCheck mesh 'Logical overlay separation' 'Are any PEAT/logical paths visibly distinct from measured RF links?'
+    Ask-UiCheck mesh 'Logical overlay separation' 'Are any AVIAN/logical paths visibly distinct from measured RF links?'
 
     Write-Host 'Power off and disconnect both radios.' -ForegroundColor Yellow
     Confirm-Exact 'Confirm both radios are powered off and disconnected.' 'DISCONNECTED'

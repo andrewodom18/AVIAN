@@ -5,7 +5,7 @@ members = [
     "apps/mesh-agent",
     "apps/mission-planner",
     "crates/mesh-core",
-    "crates/mesh-peat",
+    "crates/mesh-transport",
     "simulators/mesh-operations/mesh-sim",
     "crates/microhard-control",
     "crates/streamcaster-control",
@@ -26,9 +26,11 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+redb = "2.6.3"
 iroh = "1.0.3"
 mavlink = { version = "=0.18.0", default-features = false, features = ["std", "dialect-common", "transport-tcp", "transport-udp"] }
-peat-mesh = { version = "=0.9.0-rc.60", default-features = false, features = ["automerge-backend"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -489,7 +489,7 @@ try {
     }
 
     Add-Checkpoint -Phase 'scope' -Check 'Physical configuration writes' -Result 'blocked' -Detail 'Deliberately not run: live CHUD apply/readback/rollback requires the configuration-path contract and recovery procedure to be reconciled first.'
-    Add-Checkpoint -Phase 'scope' -Check 'Authenticated ARC session attestation' -Result 'blocked' -Detail 'ARC main does not yet expose the authenticated Fleet/PEAT assertion consumer; operator assignment must remain unverified.'
+    Add-Checkpoint -Phase 'scope' -Check 'Authenticated ARC session attestation' -Result 'blocked' -Detail 'ARC main does not yet expose the authenticated Fleet/AVIAN assertion consumer; operator assignment must remain unverified.'
     Add-Checkpoint -Phase 'scope' -Check 'Two-hundred-node claim' -Result 'info' -Detail 'Two physical radios were exercised; the 200-drone result remains simulation evidence only.'
     Write-FinalSummary
 } catch {

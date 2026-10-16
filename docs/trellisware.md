@@ -79,7 +79,7 @@ radio_cert_TW_2_password: <retrieve-from-approved-secret-store>
 Certificate indexes must be dense starting at zero. CHUD loads up to ten
 certificates per radio type and cycles through them, which permits two radios
 with different issued identities. Mount the certificate directory read-only
-into CHUD and keep passwords outside ARC configuration, AVIAN, PEAT, source
+into CHUD and keep passwords outside ARC configuration, AVIAN, source
 control, and logs. The filenames and passwords above are placeholders; the
 repository does not contain an authorized TrellisWare client identity.
 
@@ -162,7 +162,7 @@ cargo run -p arc-radio-plugin -- trellisware-probe `
 ```
 
 Run one probe per physical radio with a unique `--source`. ARC displays each
-fresh observation as a TrellisWare node. PEAT/IP connections appear as dashed
+fresh observation as a TrellisWare node. AVIAN/IP connections appear as dashed
 overlay links. The UI will not invent a solid RF edge without a measured
 TrellisWare neighbor record.
 

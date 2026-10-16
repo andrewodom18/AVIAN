@@ -214,9 +214,9 @@ of one aircraft to two groups in the same mission generation.
 
 The accepted pre-mission result is a versioned `MissionAllocation` with a
 mission UUID and positive generation. A runtime chain decision is a
-`RelayReconfiguration` mission payload. Both are serializable through PEAT;
+`RelayReconfiguration` mission payload. Both are serializable through AVIAN;
 new complete relay chains increment the mission generation instead of silently
-rewriting an active allocation. The ARC-to-PEAT submission endpoint is not
+rewriting an active allocation. The ARC-to-AVIAN submission endpoint is not
 implemented yet; the current milestone supplies the validated planning
 contract and JSON planning engine.
 

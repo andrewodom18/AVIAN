@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use mesh_core::{NodeId, TopologyPlanner};
-use mesh_peat::PeerDescriptor;
+use mesh_transport::PeerDescriptor;
 use serde::Deserialize;
 
 const MEMBERSHIP_SCHEMA_VERSION: u16 = 1;
@@ -116,7 +116,7 @@ fn select_membership(
     for member in manifest.members {
         anyhow::ensure!(
             endpoint_ids.insert(member.endpoint_id_hex.clone()),
-            "membership contains a duplicate PEAT endpoint ID"
+            "membership contains a duplicate mesh transport endpoint ID"
         );
         let node_id = NodeId::from(member.name.clone());
         let descriptor =
@@ -137,7 +137,7 @@ fn select_membership(
         .with_context(|| format!("local node {local_name:?} is absent from membership"))?;
     anyhow::ensure!(
         local_descriptor.endpoint_id_hex == local_endpoint_id_hex,
-        "local PEAT endpoint ID does not match membership entry for {local_name:?}"
+        "local mesh transport endpoint ID does not match membership entry for {local_name:?}"
     );
     let planned_neighbors = topology
         .neighbors(&local_node_id)
@@ -170,12 +170,18 @@ fn is_safe_identifier(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn endpoint(index: usize) -> String {
+        use base64::Engine;
+        let secret = base64::engine::general_purpose::STANDARD.encode([9_u8; 32]);
+        mesh_transport::derive_endpoint_id(&secret, &format!("aircraft-{index:03}")).unwrap()
+    }
+
     fn manifest(count: usize, formation_id: &str) -> String {
         let members = (0..count)
             .map(|index| {
                 serde_json::json!({
                     "name": format!("aircraft-{index:03}"),
-                    "endpoint_id_hex": format!("{:064x}", index + 1),
+                    "endpoint_id_hex": endpoint(index),
                     "addresses": [format!("10.40.0.{}:9000", index + 1)]
                 })
             })
@@ -199,7 +205,7 @@ mod tests {
                 &encoded,
                 "avian-test",
                 &local_name,
-                &format!("{:064x}", local_index + 1),
+                &endpoint(local_index),
                 8,
             )
             .unwrap();
@@ -215,18 +221,10 @@ mod tests {
     #[test]
     fn rejects_wrong_formation_and_local_identity() {
         let encoded = manifest(5, "avian-test");
+        assert!(select_membership(&encoded, "other", "aircraft-000", &endpoint(0), 4).is_err());
         assert!(
-            select_membership(&encoded, "other", "aircraft-000", &format!("{:064x}", 1), 4)
-                .is_err()
+            select_membership(&encoded, "avian-test", "aircraft-000", &endpoint(99), 4).is_err()
         );
-        assert!(select_membership(
-            &encoded,
-            "avian-test",
-            "aircraft-000",
-            &format!("{:064x}", 99),
-            4
-        )
-        .is_err());
     }
 
     #[test]
@@ -235,13 +233,8 @@ mod tests {
             serde_json::from_str(&manifest(5, "avian-test")).unwrap();
         value["members"][2]["name"] = serde_json::json!("aircraft-002\nforged");
         let encoded = value.to_string();
-        assert!(select_membership(
-            &encoded,
-            "avian-test",
-            "aircraft-000",
-            &format!("{:064x}", 1),
-            4
-        )
-        .is_err());
+        assert!(
+            select_membership(&encoded, "avian-test", "aircraft-000", &endpoint(0), 4).is_err()
+        );
     }
 }

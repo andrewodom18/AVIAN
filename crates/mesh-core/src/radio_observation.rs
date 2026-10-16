@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ChannelBandwidthMhz, NodeId, StreamCasterModel};
 
-pub const STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION: u16 = 1;
+pub const STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION: u16 = 2;
 pub const STREAMCASTER_CAPACITY_REQUIREMENT_NODES: u16 = 150;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +40,8 @@ pub struct StreamCasterObservedNode {
     pub management_ip: Option<String>,
     pub status: StreamCasterObservedStatus,
     pub last_seen_ms: u64,
-    pub peat_endpoint_id: Option<String>,
-    pub peat_connected_peers: usize,
+    pub mesh_endpoint_id: Option<String>,
+    pub mesh_connected_peers: usize,
     #[serde(default)]
     pub position: Option<StreamCasterObservedPosition>,
     pub radio: StreamCasterObservedRadio,

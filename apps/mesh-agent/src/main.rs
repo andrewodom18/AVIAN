@@ -11,7 +11,7 @@ use mesh_core::{
     RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot, SwarmStatusSummary,
     SwarmTrafficPolicy, Telemetry, TelemetryPublication, TelemetryTrafficGovernor, TransportKind,
 };
-use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
+use mesh_transport::{AvianRecord, MeshNode, MeshNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration, MissedTickBehavior};
@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
             args.formation_key_file.display()
         )
     })?;
-    let node = PeatNode::start(PeatNodeConfig {
+    let node = MeshNode::start(MeshNodeConfig {
         name: args.name.clone(),
         formation_id: args.formation_id.clone(),
         base64_shared_key: formation_key,
@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         storage_path: args.storage.clone(),
     })
     .await
-    .context("starting AVIAN PEAT node")?;
+    .context("starting AVIAN AVIAN node")?;
     let relay_observation_socket = if let Some(address) = args.relay_observation_listen {
         Some(
             UdpSocket::bind(address)
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let local_peer = node
         .peer_descriptor()
-        .context("reading local PEAT address")?;
+        .context("reading local AVIAN address")?;
     let (mut peers, swarm_members, membership_generation) =
         if let Some(path) = &args.membership_file {
             let selection = load_membership(
@@ -159,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
                 args.max_mesh_peers,
             )?;
             println!(
-                "Membership generation {} selected {} direct PEAT neighbors",
+                "Membership generation {} selected {} direct AVIAN neighbors",
                 selection.generation,
                 selection.peers.len()
             );
@@ -442,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
                                 status.telemetry.last_published_at_ms = Some(unix_time_ms());
                                 status.telemetry.last_error = None;
                             } else {
-                                status.telemetry.last_error = Some("PEAT publication failed".into());
+                                status.telemetry.last_error = Some("AVIAN publication failed".into());
                             }
                         }
                         Err(error) => eprintln!("Telemetry traffic policy rejected publication: {error}"),
@@ -567,7 +567,7 @@ fn start_mavlink(
 }
 
 async fn publish_telemetry(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     sequence: u64,
     telemetry: Telemetry,
@@ -622,7 +622,7 @@ fn node_profile(config: &ResolvedConfig, node_id: &NodeId) -> anyhow::Result<Nod
 }
 
 async fn publish_node_advertisement(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     profile: NodeProfile,
 ) -> anyhow::Result<()> {
@@ -639,7 +639,7 @@ async fn publish_node_advertisement(
 }
 
 async fn publish_radio_attachment(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     configured: &mesh_agent::config::RadioAttachmentConfig,
 ) -> anyhow::Result<()> {
@@ -727,7 +727,7 @@ fn peer_statuses(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_control_request(
-    node: &PeatNode,
+    node: &MeshNode,
     status: &mut AgentStatus,
     commands: &mut CommandRuntime,
     config: &ResolvedConfig,
@@ -975,7 +975,7 @@ async fn handle_control_request(
 
 #[allow(clippy::too_many_arguments)]
 async fn configure_peer(
-    node: &PeatNode,
+    node: &MeshNode,
     status: &mut AgentStatus,
     config: &ResolvedConfig,
     paired_peer_path: &std::path::Path,
@@ -1070,7 +1070,7 @@ async fn configure_peer(
 
 #[allow(clippy::too_many_arguments)]
 async fn set_paired_peer_paths(
-    node: &PeatNode,
+    node: &MeshNode,
     status: &mut AgentStatus,
     config: &ResolvedConfig,
     paired_peer_path: &std::path::Path,
@@ -1149,7 +1149,7 @@ async fn set_paired_peer_paths(
 
 #[allow(clippy::too_many_arguments)]
 fn remove_paired_peer(
-    node: &PeatNode,
+    node: &MeshNode,
     status: &mut AgentStatus,
     config: &ResolvedConfig,
     paired_peer_path: &std::path::Path,
@@ -1188,7 +1188,7 @@ fn remove_paired_peer(
 }
 
 fn refresh_peer_statuses(
-    node: &PeatNode,
+    node: &MeshNode,
     status: &mut AgentStatus,
     tagged_peers: &[TaggedPeer],
     peers: &[PeerDescriptor],
@@ -1581,7 +1581,7 @@ fn underlay_priority(value: Underlay) -> u8 {
 }
 
 async fn ingest_payload_event(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     sequence: u64,
     encoded: &[u8],
@@ -1606,7 +1606,7 @@ async fn ingest_payload_event(
 }
 
 async fn ingest_link_monitor_observation(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     sequence: &mut u64,
     observation: LinkMonitorObservation,
@@ -1713,7 +1713,7 @@ fn underlay_name(underlay: Underlay) -> &'static str {
 }
 
 async fn process_emergency_commands(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     commands: &mut CommandRuntime,
     status: &mut AgentStatus,
@@ -1856,7 +1856,7 @@ async fn process_emergency_commands(
 }
 
 async fn publish_command_ack(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     sequence: u64,
     ack: &mesh_core::EmergencyAck,
@@ -1885,7 +1885,7 @@ async fn publish_command_ack(
 }
 
 async fn publish_operator_summary(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     sequence: u64,
     swarm_members: &[NodeId],
@@ -1970,7 +1970,7 @@ async fn publish_operator_summary(
 }
 
 async fn ingest_relay_observation(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     sequence: u64,
     encoded: &[u8],
@@ -2026,7 +2026,7 @@ fn decode_relay_observation(encoded: &[u8]) -> Result<RelayLinkObservation, Stri
 }
 
 async fn evaluate_relay_runtime(
-    node: &PeatNode,
+    node: &MeshNode,
     node_id: &NodeId,
     runtime: &mut RelayRuntimeState,
 ) {
@@ -2144,7 +2144,7 @@ fn unix_time_ms() -> u64 {
 }
 
 fn schedule_unavailable_peer_connections(
-    node: &PeatNode,
+    node: &MeshNode,
     peers: &[PeerDescriptor],
     status: &mut AgentStatus,
 ) {
@@ -2160,7 +2160,7 @@ fn schedule_unavailable_peer_connections(
     }
 }
 
-fn update_peer_connection_states(node: &PeatNode, status: &mut AgentStatus) {
+fn update_peer_connection_states(node: &MeshNode, status: &mut AgentStatus) {
     for peer_status in &mut status.peers {
         let was_connected = peer_status.connected;
         let previous_underlay = peer_status.selected_underlay;
@@ -2198,7 +2198,7 @@ fn update_peer_connection_states(node: &PeatNode, status: &mut AgentStatus) {
     }
 }
 
-fn enforce_ground_peer_path_policy(node: &PeatNode, status: &mut AgentStatus) {
+fn enforce_ground_peer_path_policy(node: &MeshNode, status: &mut AgentStatus) {
     for peer_status in &mut status.peers {
         if !node.is_endpoint_connected(&peer_status.endpoint_id) {
             continue;

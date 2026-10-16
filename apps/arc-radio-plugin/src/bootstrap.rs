@@ -8,21 +8,21 @@ use mesh_core::{
     NodeId, TopologyPlanner, DEFAULT_MAX_NEIGHBORS, MAX_SUPPORTED_SWARM_SIZE,
     MIN_SUPPORTED_SWARM_SIZE,
 };
-use mesh_peat::{derive_peat_endpoint_id, PeerDescriptor};
+use mesh_transport::{derive_endpoint_id, PeerDescriptor};
 use serde::{Deserialize, Serialize};
 
 const BOOTSTRAP_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug, Args)]
 pub struct BootstrapArgs {
-    /// JSON inventory containing stable node names, radio URLs, and dialable PEAT addresses.
+    /// JSON inventory containing stable node names, radio URLs, and dialable AVIAN addresses.
     #[arg(long)]
     inventory: PathBuf,
 
-    /// Shared PEAT formation identifier used by every generated node.
+    /// Shared AVIAN formation identifier used by every generated node.
     #[arg(long, default_value = "arc-radio")]
     formation_id: String,
 
-    /// File containing the shared base64 PEAT formation secret. The secret is never emitted.
+    /// File containing the shared base64 AVIAN formation secret. The secret is never emitted.
     #[arg(long)]
     formation_key_file: PathBuf,
 
@@ -30,7 +30,7 @@ pub struct BootstrapArgs {
     #[arg(long)]
     output_dir: PathBuf,
 
-    /// Maximum direct PEAT neighbors for formations of five or more nodes.
+    /// Maximum direct AVIAN neighbors for formations of five or more nodes.
     #[arg(long, default_value_t = DEFAULT_MAX_NEIGHBORS)]
     max_neighbors: usize,
 }
@@ -40,7 +40,7 @@ pub struct BootstrapArgs {
 struct BootstrapInventory {
     schema_version: u16,
     generation: u64,
-    peat_bind: SocketAddr,
+    mesh_bind: SocketAddr,
     nodes: Vec<BootstrapNodeInput>,
 }
 
@@ -104,9 +104,9 @@ struct MembershipMember {
 struct StreamCasterHostVars {
     arc_streamcaster_plugin_enabled: bool,
     arc_streamcaster_radio_url: String,
-    arc_streamcaster_peat_formation_id: String,
-    arc_streamcaster_peat_bind: String,
-    arc_streamcaster_peat_peers: Vec<String>,
+    arc_streamcaster_mesh_formation_id: String,
+    arc_streamcaster_mesh_bind: String,
+    arc_streamcaster_mesh_peers: Vec<String>,
 }
 
 struct GeneratedBootstrap {
@@ -122,7 +122,7 @@ pub fn run(args: &BootstrapArgs) -> anyhow::Result<()> {
         .with_context(|| format!("decoding bootstrap inventory {}", args.inventory.display()))?;
     let formation_key = std::fs::read_to_string(&args.formation_key_file).with_context(|| {
         format!(
-            "reading PEAT formation key {}",
+            "reading AVIAN formation key {}",
             args.formation_key_file.display()
         )
     })?;
@@ -135,7 +135,7 @@ pub fn run(args: &BootstrapArgs) -> anyhow::Result<()> {
     write_bundle(&args.output_dir, &generated)?;
 
     println!(
-        "Generated {} PEAT identities and {} bounded peer links in {}",
+        "Generated {} AVIAN identities and {} bounded peer links in {}",
         generated.summary.node_count,
         generated.summary.edge_count,
         args.output_dir.display()
@@ -166,8 +166,8 @@ fn generate(
         "formation ID cannot be empty"
     );
     ensure!(
-        inventory.peat_bind.port() > 0,
-        "PEAT bind port must be nonzero"
+        inventory.mesh_bind.port() > 0,
+        "AVIAN bind port must be nonzero"
     );
     ensure!(
         max_neighbors >= 2 && max_neighbors.is_multiple_of(2),
@@ -192,7 +192,7 @@ fn generate(
         validate_radio_url(&node.radio_url, &node.name)?;
         ensure!(
             !node.addresses.is_empty() && node.addresses.len() <= 8,
-            "node {:?} must advertise 1-8 PEAT addresses",
+            "node {:?} must advertise 1-8 AVIAN addresses",
             node.name
         );
         for address in &node.addresses {
@@ -208,14 +208,14 @@ fn generate(
             );
             ensure!(
                 advertised_addresses.insert(*address),
-                "PEAT address {address} is advertised by more than one node"
+                "AVIAN address {address} is advertised by more than one node"
             );
         }
-        let endpoint_id_hex = derive_peat_endpoint_id(formation_key, &node.name)
-            .with_context(|| format!("deriving PEAT identity for {:?}", node.name))?;
+        let endpoint_id_hex = derive_endpoint_id(formation_key, &node.name)
+            .with_context(|| format!("deriving AVIAN identity for {:?}", node.name))?;
         ensure!(
             endpoint_ids.insert(endpoint_id_hex.clone()),
-            "derived duplicate PEAT endpoint ID"
+            "derived duplicate AVIAN endpoint ID"
         );
         resolved.push(ResolvedNode {
             node_id: NodeId::from(node.name.clone()),
@@ -272,9 +272,9 @@ fn generate(
             StreamCasterHostVars {
                 arc_streamcaster_plugin_enabled: true,
                 arc_streamcaster_radio_url: node.radio_url.clone(),
-                arc_streamcaster_peat_formation_id: formation_id.to_owned(),
-                arc_streamcaster_peat_bind: inventory.peat_bind.to_string(),
-                arc_streamcaster_peat_peers: peers,
+                arc_streamcaster_mesh_formation_id: formation_id.to_owned(),
+                arc_streamcaster_mesh_bind: inventory.mesh_bind.to_string(),
+                arc_streamcaster_mesh_peers: peers,
             },
         );
     }
@@ -318,7 +318,7 @@ fn plan_neighbors(
     if node_ids.len() >= MIN_SUPPORTED_SWARM_SIZE {
         let plan = TopologyPlanner { max_neighbors }
             .plan(node_ids)
-            .context("planning bounded PEAT topology")?;
+            .context("planning bounded AVIAN topology")?;
         let neighbors = node_ids
             .iter()
             .cloned()
@@ -430,7 +430,7 @@ mod tests {
         BootstrapInventory {
             schema_version: BOOTSTRAP_SCHEMA_VERSION,
             generation: 1,
-            peat_bind: "0.0.0.0:4747".parse().unwrap(),
+            mesh_bind: "0.0.0.0:4747".parse().unwrap(),
             nodes: (0..count)
                 .map(|index| BootstrapNodeInput {
                     name: format!("drone-{index:03}"),

@@ -14,8 +14,8 @@ with different radios and multiple simultaneous links.
 
 1. StreamCaster supplies an IP underlay; it does not own AVIAN membership,
    mission state, command authority, or vehicle behavior.
-2. Silvus is a first-class `TransportKind` and a preferred PEAT/PACE path.
-3. Each PEAT peer may publish multiple ordered IP addresses for Silvus and
+2. Silvus is a first-class `TransportKind` and a preferred AVIAN/PACE path.
+3. Each AVIAN peer may publish multiple ordered IP addresses for Silvus and
    alternate underlays while retaining one stable endpoint identity.
 4. AVIAN keeps at most eight direct application peers instead of building a
    full mesh on top of the Silvus MANET.
@@ -25,7 +25,7 @@ with different radios and multiple simultaneous links.
 
 ## Consequences
 
-- Existing PEAT synchronization can traverse StreamCaster through standard IP.
+- Existing AVIAN synchronization can traverse StreamCaster through standard IP.
 - Reconnection can try Silvus and alternate peer addresses without replacing
   AVIAN identities.
 - Aircraft without Silvus remain compatible.

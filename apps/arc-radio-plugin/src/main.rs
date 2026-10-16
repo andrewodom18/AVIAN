@@ -7,7 +7,7 @@ use mesh_core::{
     ArcRadioConfiguration, DeliveryClass, MeshPayload, NodeId, RadioPlanAssessment,
     SilvusGroupApplyTemplate,
 };
-use mesh_peat::AvianRecord;
+use mesh_transport::AvianRecord;
 use serde::{Deserialize, Serialize};
 
 mod bootstrap;
@@ -18,7 +18,7 @@ mod trellisware_probe;
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Generate deterministic PEAT identities and per-node Ansible peer variables.
+    /// Generate deterministic AVIAN identities and per-node Ansible peer variables.
     Bootstrap(bootstrap::BootstrapArgs),
     /// Normalize captured Microhard read-only AT responses without hardware.
     MicrohardProbe(microhard_probe::MicrohardProbeArgs),
@@ -31,7 +31,7 @@ enum Command {
 #[derive(Debug, Parser)]
 #[command(
     name = "arc-radio-plugin",
-    about = "Validate Arc-owned StreamCaster plans and encode them for AVIAN PEAT",
+    about = "Validate radio plans and encode them as AVIAN mesh records",
     version
 )]
 struct Args {
@@ -46,7 +46,7 @@ struct Args {
     #[arg(long)]
     output: Option<PathBuf>,
 
-    /// Run as the ARC Zenoh/PEAT edge sidecar instead of one-shot JSON mode.
+    /// Run as the ARC Zenoh/AVIAN edge sidecar instead of one-shot JSON mode.
     #[arg(long)]
     serve: bool,
 
@@ -54,7 +54,7 @@ struct Args {
     #[arg(long, default_value = "unixsock-stream//run/arc/zenoh.sock")]
     zenoh_endpoint: String,
 
-    /// Stable AVIAN source/node name for PEAT records.
+    /// Stable AVIAN source/node name for AVIAN records.
     #[arg(long, default_value = "arc-radio-plugin/local")]
     source: String,
 
@@ -71,25 +71,25 @@ struct Args {
     #[arg(long)]
     regulatory_evidence_file: Option<PathBuf>,
 
-    /// Optional PEAT formation ID. All PEAT options are required together.
+    /// Optional AVIAN formation ID. All mesh transport options are required together.
     #[arg(long)]
-    peat_formation_id: Option<String>,
+    mesh_formation_id: Option<String>,
 
-    /// File containing the base64 PEAT formation key.
+    /// File containing the base64 AVIAN formation key.
     #[arg(long)]
-    peat_formation_key_file: Option<PathBuf>,
+    mesh_formation_key_file: Option<PathBuf>,
 
-    /// PEAT bind address (for example 0.0.0.0:9000).
+    /// AVIAN bind address (for example 0.0.0.0:9000).
     #[arg(long)]
-    peat_bind: Option<std::net::SocketAddr>,
+    mesh_bind: Option<std::net::SocketAddr>,
 
-    /// Persistent PEAT data directory.
+    /// Persistent AVIAN data directory.
     #[arg(long)]
-    peat_storage: Option<PathBuf>,
+    mesh_storage: Option<PathBuf>,
 
-    /// PEAT peer descriptor NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]. NAME= is optional.
+    /// AVIAN peer descriptor NAME=ENDPOINT_ID@IP:PORT[,IP:PORT...]. NAME= is optional.
     #[arg(long)]
-    peat_peer: Vec<String>,
+    mesh_peer: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -105,7 +105,7 @@ pub(crate) struct ArcRadioPluginRequest {
 pub(crate) struct ArcRadioPluginResponse {
     assessment: RadioPlanAssessment,
     silvus_apply_templates: Vec<SilvusGroupApplyTemplate>,
-    peat_record: AvianRecord,
+    mesh_record: AvianRecord,
 }
 
 #[tokio::main]
@@ -155,14 +155,14 @@ fn read_request(path: Option<&PathBuf>) -> anyhow::Result<String> {
 
 pub(crate) fn process(request: ArcRadioPluginRequest) -> anyhow::Result<ArcRadioPluginResponse> {
     if request.source.as_str().trim().is_empty() {
-        bail!("PEAT record source cannot be empty");
+        bail!("AVIAN record source cannot be empty");
     }
     if request.sequence == 0 {
-        bail!("PEAT record sequence must be positive");
+        bail!("AVIAN record sequence must be positive");
     }
     let assessment = request.configuration.assess()?;
     let silvus_apply_templates = request.configuration.silvus_apply_templates()?;
-    let peat_record = AvianRecord::new(
+    let mesh_record = AvianRecord::new(
         request.source,
         request.sequence,
         DeliveryClass::Mission,
@@ -172,7 +172,7 @@ pub(crate) fn process(request: ArcRadioPluginRequest) -> anyhow::Result<ArcRadio
     Ok(ArcRadioPluginResponse {
         assessment,
         silvus_apply_templates,
-        peat_record,
+        mesh_record,
     })
 }
 
@@ -245,13 +245,13 @@ mod tests {
     }
 
     #[test]
-    fn emits_arc_configuration_as_durable_peat_mission_record() {
+    fn emits_arc_configuration_as_durable_mesh_mission_record() {
         let response = process(request()).unwrap();
 
         assert_eq!(response.assessment.node_count, 150);
-        assert_eq!(response.peat_record.class, DeliveryClass::Mission);
+        assert_eq!(response.mesh_record.class, DeliveryClass::Mission);
         assert!(matches!(
-            response.peat_record.payload,
+            response.mesh_record.payload,
             MeshPayload::RadioConfiguration(_)
         ));
         assert!(response

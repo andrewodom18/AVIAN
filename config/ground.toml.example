@@ -6,7 +6,7 @@ schema_version = 1
 name = "ground-001"
 role = "ground"
 
-[peat]
+[mesh]
 bind = "0.0.0.0:9000"
 storage = "/var/lib/avian"
 formation_id = "mission-alpha"

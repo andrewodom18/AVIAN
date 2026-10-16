@@ -179,7 +179,7 @@ impl<T: TrellisWareReadTransport> TrellisWareReader<T> {
                 ..RadioEffectiveState::default()
             },
             // HTTPS does not expose trustworthy RF-neighbor telemetry on the
-            // lab contract. PEAT/IP reachability remains a separate overlay.
+            // lab contract. AVIAN/IP reachability remains a separate overlay.
             neighbors: Vec::new(),
             error: None,
             source_authority: Some(if simulated {

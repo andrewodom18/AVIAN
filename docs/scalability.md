@@ -3,7 +3,7 @@
 ## Supported formation size
 
 AVIAN's current design target is 5-200 aircraft. Ground and cloud endpoints
-may join the same PEAT formation, but they cannot be required for aircraft to
+may join the same AVIAN formation, but they cannot be required for aircraft to
 keep exchanging state.
 
 The overlay is not an application-level full mesh. Given the same membership
@@ -35,7 +35,7 @@ checks that:
 - duplicate node identities are rejected.
 
 These are topology guarantees, not a claim that 200 physical radios have been
-field-tested. Hardware validation still needs a staged PEAT soak test at 5,
+field-tested. Hardware validation still needs a staged AVIAN soak test at 5,
 25, 100, and 200 processes, followed by radio-in-the-loop tests measuring
 convergence time, airtime, packet loss, memory, CPU, and recovery under motion.
 
@@ -49,9 +49,9 @@ their field-measured airtime remains part of the radio-in-the-loop validation.
 
 No member has permanent leadership or unique state. A versioned, locally
 provisioned membership manifest supplies stable node identities and reachable
-addresses. Every aircraft validates that its locally derived PEAT identity
+addresses. Every aircraft validates that its locally derived AVIAN identity
 matches its entry, then computes its neighbors independently. When membership
-changes, each node can recompute the overlay locally. PEAT carries durable
+changes, each node can recompute the overlay locally. AVIAN carries durable
 state across the surviving graph and reconciles it after partitions.
 
 The present `mesh-agent` can load the manifest at startup or accept static

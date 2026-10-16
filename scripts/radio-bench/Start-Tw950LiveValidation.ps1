@@ -313,7 +313,7 @@ try {
     if ($meshReady) {
         Confirm 'Power both radios with approved antennas/loads. Connect Ethernet ONLY to Radio 1; Radio 2 has power only, no USB/Ethernet data cable.' 'MESH READY'
         $meshOn = Capture 'mesh-peer-on' $ObserveSeconds
-        [void](Ask 'mesh-peer-identity' 'Does ARC identify Radio 2 by its real identity as an over-air peer, with explicit CHUD/vendor RF topology evidence, not just a remembered inventory row or logical PEAT path?')
+        [void](Ask 'mesh-peer-identity' 'Does ARC identify Radio 2 by its real identity as an over-air peer, with explicit CHUD/vendor RF topology evidence, not just a remembered inventory row or logical AVIAN path?')
         Confirm 'Keep Radio 1 connected and powered. Power OFF Radio 2 only.' 'PEER OFF'
         $meshOff = Capture 'mesh-peer-off' $ObserveSeconds
         [void](Ask 'mesh-peer-loss' 'Does Radio 2 become stale/offline and its measured RF edge disappear while Radio 1 remains available?')

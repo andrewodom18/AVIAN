@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use mesh_sim::{
-    peat_validation::run_bounded_peat_validation, run_reference_scenario, run_visual_scenario,
+    mesh_validation::run_bounded_mesh_validation, run_reference_scenario, run_visual_scenario,
     validation::run_validation_matrix,
 };
 
@@ -10,20 +10,21 @@ async fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments
         .iter()
-        .any(|argument| argument == "--validate-peat")
+        .any(|argument| argument == "--validate-mesh")
     {
-        match run_bounded_peat_validation().await {
+        match run_bounded_mesh_validation().await {
             Ok(evidence) => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&evidence).expect("serialize PEAT evidence")
+                    serde_json::to_string_pretty(&evidence)
+                        .expect("serialize mesh transport evidence")
                 );
                 if evidence.iter().any(|item| !item.passed) {
                     std::process::exit(1);
                 }
             }
             Err(error) => {
-                eprintln!("PEAT validation failed: {error}");
+                eprintln!("mesh transport validation failed: {error}");
                 std::process::exit(1);
             }
         }

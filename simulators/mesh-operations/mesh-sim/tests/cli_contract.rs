@@ -40,7 +40,7 @@ fn reference_trace_and_real_loopback_modes_are_executable() {
     assert!(run(&["--trace"])["steps"]
         .as_array()
         .is_some_and(|steps| !steps.is_empty()));
-    let report = run(&["--validate-peat"]);
+    let report = run(&["--validate-mesh"]);
     let rows = report.as_array().unwrap();
     assert_eq!(rows.len(), 3);
     for row in rows {

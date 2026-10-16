@@ -1,7 +1,7 @@
 # Microhard radio integration
 
-Microhard radios are an AVIAN network underlay. ARC remains the desired-state
-authority, AVIAN/PEAT carries application state over reachable IP paths, and a
+Microhard radios are an AVIAN network underlay. CHUD remains the physical configuration
+authority, AVIAN carries application state over reachable IP paths, and a
 Microhard adapter translates device observations into the vendor-neutral radio
 contract in `mesh-core`.
 
@@ -11,7 +11,7 @@ AVIAN node has reachability through each network.
 
 ## Implemented foundation
 
-- `mesh-core::RadioDeviceObservation` provides a vendor-neutral PEAT payload.
+- `mesh-core::RadioDeviceObservation` provides a vendor-neutral AVIAN payload.
 - `mesh-core::RadioCapabilities` represents vendor-specific frequency ranges,
   channel widths, management surfaces, modes, power, and antenna counts without
   forcing StreamCaster enums onto other radios.
@@ -22,7 +22,7 @@ AVIAN node has reachability through each network.
 - A deterministic simulator exercises the same read boundary without a radio.
 - `arc-radio-plugin microhard-probe` normalizes captured responses into the
   generic observation contract, providing the integration seam for bench data.
-- PEAT's default transport policy recognizes `quic-microhard` as a primary IP
+- AVIAN's default transport policy recognizes `quic-microhard` as a primary IP
   underlay alongside `quic-silvus`.
 
 No production management transport or hardware-write implementation is enabled.
@@ -83,7 +83,7 @@ Obtain and archive evidence for the exact model and firmware:
 9. Antenna part numbers, cable loss, conducted power, installed EIRP, power,
    thermal, vibration, and aircraft integration evidence.
 10. Encryption provisioning and rotation behavior without exporting key
-    material into ARC, AVIAN, logs, or PEAT records.
+    material into ARC, AVIAN, logs, or AVIAN records.
 
 ## Safe implementation sequence
 

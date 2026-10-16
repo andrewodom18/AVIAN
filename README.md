@@ -2,8 +2,8 @@
 
 **Autonomous Vehicle Interoperability and Networking**
 
-An experimental, leaderless UAV coordination framework built around
-[PEAT](https://github.com/defenseunicorns/peat). Every aircraft runs the same
+An experimental, leaderless UAV coordination framework built in Rust with
+authenticated Iroh QUIC networking and persistent AVIAN records. Every aircraft runs the same
 Linux companion service. Ground and cloud services join as ordinary peers and
 are not required for continued operation.
 
@@ -14,7 +14,7 @@ are not required for continued operation.
 - Leaderless, bounded-degree topology planning for 5-200 aircraft with no
   all-to-all peer requirement.
 - Versioned membership manifests from which every aircraft independently
-  selects its bounded PEAT neighbors.
+  selects its bounded AVIAN neighbors.
 - Automatic multi-link selection with redundant emergency delivery.
 - Source-rate-limited telemetry and radio observations, plus rotating compact
   swarm summaries so the normal operator feed is not every drone's detailed
@@ -29,19 +29,18 @@ are not required for continued operation.
   construction, and mission-state convergence across all 201 logical nodes.
 
 The implementation now includes both the deterministic simulator and a real
-PEAT Automerge/Iroh peer with formation authentication, stable identity,
+AVIAN Iroh peer with formation authentication, stable identity,
 persistent state, and static peer bootstrap. `mesh-agent` can ingest live
 ArduPilot/PX4 MAVLink telemetry over UDP or TCP; direct serial is an optional
 build feature. Silvus StreamCaster is modeled as an IP MANET underlay, and each
-PEAT peer can have multiple underlay addresses for reconnection across Silvus,
+AVIAN peer can have multiple underlay addresses for reconnection across Silvus,
 Wi-Fi, cellular, or other paths. MAVLink emergency-command transmission is not
 available on hardware: real Cube deployments are verification-only dry runs.
 The agent can transmit signed RTL to ArduPilot SITL when configuration
 explicitly selects the SITL environment; hardware execute mode is rejected.
 The isolated link monitor collects read-only StreamCaster observations and
-bounded underlay probes. Hardware radio configuration apply remains disabled
-by default until its evidence, maintenance-window, and confirmation gates are
-satisfied.
+bounded underlay probes. CHUD owns all physical radio configuration; AVIAN
+validates planning intent and publishes observations.
 
 When supplied a shared relay-runtime configuration, `mesh-agent` also combines
 mesh telemetry and relay-link observations into leaderless in-flight chain
@@ -53,7 +52,7 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | Package | Responsibility |
 | --- | --- |
 | `mesh-core` | Shared messages, identity, command security, altitude rules, link scoring, and leaderless relay decisions |
-| `mesh-peat` | PEAT Automerge/Iroh node, AVIAN record store, delivery policy, and PACE configuration |
+| `mesh-transport` | Authenticated Iroh node, transactional record storage, deterministic reconciliation, delivery policy, and PACE configuration |
 | `vehicle-adapters` | Hardware-neutral ArduPilot, PX4, and Betaflight adapter contract |
 | `simulators/mesh-operations/mesh-sim` | Deterministic failure, rerouting, and recovery simulation |
 | `simulators/mesh-operations/visualizer` | Local stakeholder console driven by a verified `mesh-sim` topology trace |
@@ -61,13 +60,13 @@ and [runtime configuration sample](examples/relay-runtime-config.sample.json).
 | `simulators/rf-planning-suite` | Local RF link-budget, capacity, topology, and multi-node planning simulator |
 | `mesh-agent` | Onboard companion-service entry point |
 | `mission-planner` | ARC UI JSON engine for pre-mission corridors and in-flight relay decisions |
-| `arc-radio-plugin` | Vendor-neutral radio planning, traffic assessment, PEAT encoding, observations, and guarded StreamCaster sidecar integration |
-| `streamcaster-control` | Allowlisted StreamCaster JSON-RPC client with guarded read, validate, apply, confirm, and rollback flows |
+| `arc-radio-plugin` | Vendor-neutral radio planning, traffic assessment, AVIAN encoding, observations, and guarded StreamCaster sidecar integration |
+| `streamcaster-control` | Read-only StreamCaster JSON-RPC client and isolated planning simulator |
 | `microhard-control` | Read-only-first Microhard management queries and normalized observations |
 | `trellisware-control` | Read-only TW-950 management queries and normalized observations |
 
 Radio integrations use an additive vendor-neutral observation contract. Silvus
-StreamCaster remains the first live control implementation; a read-only-first
+StreamCaster provides live read-only observations; a read-only-first
 Microhard foundation is documented in the [Microhard integration guide](docs/microhard.md).
 
 TrellisWare TW-950 bench integration is documented in the [TrellisWare integration guide](docs/trellisware.md).
@@ -78,7 +77,7 @@ CHUD is the authority for desired and effective physical radio configuration.
 Its API is the only physical radio configuration path. ARC may render CHUD's
 normalized settings and guide an operator through CHUD-backed transactions,
 but it never contacts a radio or implements a vendor write directly. The AVIAN
-`arc-radio-plugin` validates planning intent and synchronizes PEAT mesh state.
+`arc-radio-plugin` validates planning intent and synchronizes AVIAN mesh state.
 It does not call CHUD or StreamCaster configuration methods and does not
 communicate with a flight controller.
 
@@ -87,7 +86,7 @@ The current integration provides:
 - StreamCaster 4200, 4400, and SL5200-family profiles, including capability-
   checked 5, 10, and 20 MHz operation;
 - live radio identity supplied to ARC by CHUD's read-only device inventory;
-- real node enrollment and connected PEAT-peer inventory without generated
+- real node enrollment and connected AVIAN-peer inventory without generated
   nodes, estimated spacing, or fabricated links;
 - a network capacity qualification target of at least 150 nodes, which is not
   treated as a minimum active node count; and
@@ -141,6 +140,9 @@ cargo run -p mesh-agent -- --help
 cargo run -p arc-radio-plugin -- --help
 ```
 
+For an existing installation, follow the [transport upgrade guide](docs/transport-upgrade.md)
+before replacing binaries or reusing stored state.
+
 For a Linux companion installation:
 
 ```sh
@@ -165,7 +167,7 @@ statically configured and managed-membership peers remain protected.
 The panel also lists the code-added aircraft's communication paths. Operators
 can add or remove individual AVIAN routes to test link loss and recovery; AVIAN
 persists the complete path set, reconnects automatically, and reports the path
-selected by the live PEAT transport. These controls never disable operating-
+selected by the live AVIAN transport. These controls never disable operating-
 system interfaces or change radio configuration.
 
 With Docker:
@@ -179,7 +181,7 @@ See [the architecture](docs/architecture.md) and
 [message contract](docs/message-contract.md) for the current design boundary.
 The [scalability contract](docs/scalability.md) describes the 5-200 aircraft
 overlay and what remains to validate on real radios.
-The [local PEAT demonstration](docs/peat-local-demo.md) starts two real peers.
+The [local AVIAN demonstration](docs/mesh-local-demo.md) starts two real peers.
 The [visual mesh simulation](docs/visual-simulation.md) replays verified node,
 link, partition, failover, and recovery state in a local browser console.
 The [simulator validation guide](docs/simulator-validation.md) defines the
@@ -198,7 +200,7 @@ boundary and multi-underlay peer format.
 The [ARC radio-plugin guide](docs/arc-radio-plugin.md) defines the local
 ARC-to-AVIAN ownership boundary and the 4200/4400/5200 configuration contract.
 The [radio mesh bootstrap guide](docs/arc-radio-bootstrap.md) generates
-deterministic PEAT identities and ARC-ready bounded peer maps before surrogate
+deterministic AVIAN identities and ARC-ready bounded peer maps before surrogate
 deployment.
 The [radio integration evidence checklist](docs/radio-integration-evidence.md)
 lists the radio, antenna, airframe, and traffic facts required before live

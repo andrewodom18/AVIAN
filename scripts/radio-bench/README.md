@@ -91,7 +91,7 @@ If CHUD reports the radio as `auth-failed`, discovery succeeded but the supplied
 management authentication was rejected. Inspect CHUD's detailed TLS/API evidence
 before deciding whether a client certificate, different credential, or firmware
 configuration is required. Do not copy credentials into this repository, ARC
-configuration, AVIAN arguments, PEAT, or test logs.
+configuration, AVIAN arguments, AVIAN, or test logs.
 
 The monitor writes a timestamped CSV timeline, before/after Windows network snapshots, and a summary under `Desktop\Radio Test Results`. All checks use local Windows and localhost endpoints, so collection continues if Wi-Fi or the internet connection drops.
 

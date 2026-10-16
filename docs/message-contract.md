@@ -1,6 +1,6 @@
 # AVIAN message contract
 
-This document defines the application-level contract carried by PEAT. The Rust
+This document defines the application-level contract carried by AVIAN. The Rust
 types in `mesh-core` are authoritative for v0.1.
 
 Writers emit AVIAN envelope schema v2. Readers accept envelope schemas v1 and
@@ -61,7 +61,7 @@ It never contains JPEG bytes or an absolute path.
 
 A detection is durable mission data. It contains a UUID, observation time,
 optional image UUID, bounded label, optional confidence, and optional
-geolocation. The local mesh agent assigns the PEAT source identity for both
+geolocation. The local mesh agent assigns the AVIAN source identity for both
 records; a Unix payload producer cannot supply or override it.
 
 ## Link-monitor observation
@@ -151,7 +151,7 @@ observations.
 
 ## Arc radio configuration
 
-The radio configuration is durable PEAT mission state whose desired-value
+The radio configuration is durable AVIAN mission state whose desired-value
 authority is always Arc. It carries a positive generation, shared network
 settings, percentage-based 4200/4400/5200 node groups, the 30,000 ft planning
 ceiling, antenna/power intent, routine traffic assumptions, and a single-source

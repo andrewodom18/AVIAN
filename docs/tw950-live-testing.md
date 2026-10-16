@@ -74,7 +74,7 @@ certificates. Do not send certificate passwords or API keys in test notes.
    If uncertain, answer U and skip the both-powered phase.
 7. Radio 1 remains Ethernet-connected. Radio 2 has power only. Capture peer-on,
    peer-off and peer-return timelines. Check real identity, measured RF-source
-   evidence, loss/return, and no duplicates. A remembered node or PEAT path is
+   evidence, loss/return, and no duplicates. A remembered node or AVIAN path is
    not proof of a live measured RF peer. These visual claims remain operator
    observations until API provenance/freshness evidence is reviewed.
 8. Power off/disconnect both radios and check final offline truthfulness.

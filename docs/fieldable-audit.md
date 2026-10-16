@@ -1,5 +1,10 @@
 # Fieldable implementation audit
 
+This is historical acceptance evidence. Module names and command examples
+use current terminology, but the dated results below do not validate the
+current transport implementation. Follow the [transport upgrade guide](transport-upgrade.md)
+and repeat transport-dependent hardware acceptance before deploying it.
+
 Audit date: 2026-08-19
 
 Audited code: AVIAN `dev` at `406e2b3` or later; stardogOS `odom-dev` at
@@ -15,7 +20,7 @@ claim is marked complete without dated device evidence.
 The software implementation covers the plan's defined interfaces and safety
 boundaries. The audit corrected the following issues before this report:
 
-- expired PEAT command records and stale MAVLink locks could reach command
+- expired AVIAN command records and stale MAVLink locks could reach command
   evaluation;
 - `COMMAND_ACK` correlation did not verify the MAVLink source system;
 - ACK timeout multiplied by retries was not capped as one total budget;
@@ -42,12 +47,12 @@ Cube, Silvus radios, ZeroTier/Starshield route, or ArduPilot SITL environment.
 | Baseline | `just verify` runs format, warning-free Clippy, workspace tests, doc tests, and locked build | Pass on macOS; locked workspace test/release build pass in Debian Linux | Native Pi run required |
 | Strict production config | `config.rs`, three production examples, precedence/relative-path/unknown-field/bounds tests | Pass | Provisioned-file review required |
 | Installer and services | `deploy/install.sh`, independent capability-free systemd units, preserved config | Shell syntax/build covered; locked release build passes | Pi install/restart required |
-| Stable PEAT mesh | derived endpoint identity, startup advertisement, bounded membership topology, tagged ordered addresses | Identity, convergence, v1/v2, and unavailable-first-address fallback pass | Pi partition/reconnect required |
+| Stable AVIAN mesh | derived endpoint identity, startup advertisement, bounded membership topology, tagged ordered addresses | Identity, convergence, v1/v2, and unavailable-first-address fallback pass | Pi partition/reconnect required |
 | Status/control | strict versioned JSON, `avianctl`, readiness, record listing, owner-only bounded socket | Protocol, permissions, response-bound tests pass | Operator workflow required |
 | stardogOS payload | dedicated MAVProxy output, group-only datagram ingress, schema-v2 manifest/detection, local source assignment | AVIAN tests plus 35 stardogOS tests pass | Real Cube/camera or fixture convergence required |
 | Signed RTL | Ed25519 issuer allowlist, atomic replay state, expiry/fresh-lock checks, dry run, SITL-only execute gate | Replay/restart, lifetime, lock, wrong-system ACK, timeout/retry tests pass | Cube no-packet dry run and ArduPilot SITL mode/ACK required |
 | Radio monitor | separate read-only service, private credentials, normalized API/probe observations, fail-closed relay geometry | API failure, read-only client, bounded probe, geometry tests pass | SL5200/4200 APIs required |
-| Silvus fallback | PEAT receives ordered Silvus then satellite addresses; monitor records reachability transitions | unavailable-first-address fallback and state logic pass | Actual route loss/restoration required |
+| Silvus fallback | AVIAN receives ordered Silvus then satellite addresses; monitor records reachability transitions | unavailable-first-address fallback and state logic pass | Actual route loss/restoration required |
 | Independence/privacy | no JPEG bytes, safe relative references, no Starshield mutation, independent RFD900/video/GPS paths | contract and regression suites pass | Cross-service field observation required |
 
 ## Verification run
@@ -56,7 +61,7 @@ On 2026-08-19, the audited macOS checkout passed:
 
 ```text
 just verify
-cargo test -p mesh-agent -p mesh-peat -p vehicle-adapters --locked
+cargo test -p mesh-agent -p mesh-transport -p vehicle-adapters --locked
 cargo build --workspace --release --locked
 docker run ... rust:1.91-bookworm cargo test --workspace --locked
 docker run ... rust:1.91-bookworm cargo build --workspace --release --locked

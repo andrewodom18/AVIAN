@@ -1,6 +1,6 @@
-# Local PEAT demonstration
+# Local AVIAN demonstration
 
-This starts two real AVIAN mesh agents using PEAT's Automerge persistence and
+This starts two real AVIAN mesh agents using AVIAN's transactional persistence and
 Iroh QUIC transport. It does not use the in-memory simulation.
 
 ## Create a development formation key
@@ -41,12 +41,12 @@ cargo run -p mesh-agent -- \
   --peer ENDPOINT_ID_FROM_NODE_A@127.0.0.1:9001
 ```
 
-Each node's PEAT endpoint identity is deterministically derived from its stable
+Each node's AVIAN endpoint identity is deterministically derived from its stable
 node name and formation secret, so it remains the same after a restart. Do not
 reuse a node name for two active machines.
 
 The automated convergence test goes further: it forms an authenticated
 connection, writes an AVIAN mission record on one node, and verifies the other
-node receives the identical record through PEAT's real persistent sync path.
+node receives the identical record through AVIAN's real persistent sync path.
 If a configured peer is offline, `mesh-agent` continues operating and retries
 the connection periodically; peer availability is never a startup dependency.

@@ -61,7 +61,7 @@ flight controller.
    sim_vehicle.py -v ArduCopter -f quad --out=127.0.0.1:14553
    ```
 
-2. Run a local aircraft agent on a unique PEAT port with
+2. Run a local aircraft agent on a unique AVIAN port with
    `mavlink.address = "udpin:127.0.0.1:14553"`, the ground public key, and:
 
    ```toml

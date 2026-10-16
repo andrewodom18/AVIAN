@@ -1,6 +1,6 @@
 # ARC radio mesh bootstrap
 
-The `arc-radio-plugin bootstrap` command derives the exact stable PEAT endpoint
+The `arc-radio-plugin bootstrap` command derives the exact stable AVIAN endpoint
 ID for every declared ARC surrogate and generates a bounded peer map before any
 sidecar starts. This removes the staged "start, read endpoint IDs, edit peer
 lists, restart" process.
@@ -19,12 +19,12 @@ and replace every sample value:
   the sidecar's `--source` argument;
 - `radio_url` is the credential-free management base URL for that node's local
   StreamCaster; and
-- `addresses` contains one to eight concrete, dialable PEAT addresses for the
+- `addresses` contains one to eight concrete, dialable AVIAN addresses for the
   surrogate. Use the operational IP carried by Silvus, not `0.0.0.0` and not
   the radio-management address unless that address is actually routed between
   companions.
 
-The port in each advertised address normally matches `peat_bind`, currently
+The port in each advertised address normally matches `mesh_bind`, currently
 UDP 4747. Multiple addresses may be supplied when a node has controlled
 alternate underlays.
 
@@ -32,8 +32,8 @@ Create one 32-byte shared formation key and provision the same protected file
 to every node. Do not commit the key or copy it into the inventory:
 
 ```sh
-openssl rand -base64 32 > /secure/operator/peat-radio.key
-chmod 600 /secure/operator/peat-radio.key
+openssl rand -base64 32 > /secure/operator/mesh-radio.key
+chmod 600 /secure/operator/mesh-radio.key
 ```
 
 ## Generate the bundle
@@ -44,7 +44,7 @@ From the AVIAN repository root:
 cargo run -p arc-radio-plugin -- bootstrap \
   --inventory /secure/operator/arc-radio-nodes.json \
   --formation-id arc-radio \
-  --formation-key-file /secure/operator/peat-radio.key \
+  --formation-key-file /secure/operator/mesh-radio.key \
   --output-dir /secure/operator/arc-radio-bootstrap
 ```
 
@@ -57,7 +57,7 @@ an existing bundle. It creates:
   membership schema (the mesh agent accepts operational formations of five to
   200 nodes; smaller benches use the generated sidecar host variables); and
 - `host_vars/<node>.json`: ARC Ansible variables that enable the sidecar and
-  set the radio URL, PEAT formation, bind address, and named peer descriptors.
+  set the radio URL, AVIAN formation, bind address, and named peer descriptors.
 
 The formation key is never written to any generated file. Endpoint IDs are
 public transport identities, not secrets.
@@ -80,7 +80,7 @@ the repository.
 Before deploying, separately provision on every surrogate:
 
 - `/etc/arc/streamcaster-credentials/radio.json` with mode 0600;
-- `/etc/arc/keys/peat-radio.key` containing the same formation key;
+- `/etc/arc/keys/mesh-radio.key` containing the same formation key;
 - `/etc/arc/radio-evidence/regulatory.json`; and
 - the `avian-arc-radio-plugin:latest` image for the surrogate architecture.
 
@@ -93,10 +93,10 @@ role will stop if its protected prerequisite files are absent.
 One to four nodes use a deterministic bench ring. A two-node bench has one
 edge; three nodes form a triangle; four nodes form a four-edge ring. Formations
 of five to 200 nodes use AVIAN's deterministic ring-and-chord planner with no
-more than eight direct PEAT neighbors per node by default.
+more than eight direct AVIAN neighbors per node by default.
 
-The generated graph is an AVIAN/PEAT application overlay. Silvus still owns RF
-neighbor selection and multi-hop IP routing. A PEAT edge may traverse multiple
+The generated graph is an AVIAN application overlay. Silvus still owns RF
+neighbor selection and multi-hop IP routing. A AVIAN edge may traverse multiple
 StreamCaster RF hops, so the ARC topology must not be interpreted as a vendor
 RF-neighbor map.
 

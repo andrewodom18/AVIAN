@@ -3,7 +3,7 @@
 ## Integration decision
 
 Silvus is an AVIAN network underlay, not the owner of swarm state or vehicle
-authority. StreamCaster forms and heals the RF MANET; PEAT carries AVIAN state
+authority. StreamCaster forms and heals the RF MANET; AVIAN carries AVIAN state
 over the IP connectivity that the radio exposes.
 
 This matches the published StreamCaster interface: Silvus describes the
@@ -18,7 +18,7 @@ positioned for UAV integration and publishes Ethernet as an I/O interface.
 ## Companion connection
 
 The Linux companion computer connects to the radio through Ethernet or a
-USB-presented network interface. PEAT/Iroh uses QUIC over UDP. The default
+USB-presented network interface. AVIAN/Iroh uses QUIC over UDP. The default
 AVIAN listener is UDP port 9000.
 
 For a companion listening on all local IPv4 paths:
@@ -33,7 +33,7 @@ cargo run -p mesh-agent -- \
 
 In that peer entry, `10.40.0.18` may be the other aircraft's Silvus-side IP
 and `172.22.0.18` an alternate underlay. A peer accepts one to eight ordered,
-unique addresses. On connection and every reconnect, AVIAN gives PEAT the
+unique addresses. On connection and every reconnect, AVIAN gives the transport the
 whole set. The peer keeps the same cryptographic identity across paths.
 
 Deployments must ensure that UDP port 9000 is reachable on each advertised
@@ -46,11 +46,11 @@ Silvus and AVIAN solve different problems:
 | Layer | Responsibility |
 | --- | --- |
 | Silvus MANET | RF links, radio neighbors, waveform adaptation, IP packet routing |
-| AVIAN bounded overlay | At most eight direct PEAT peers per node for 5-200 aircraft |
-| PEAT state | Durable mission, detection, telemetry, and command synchronization |
+| AVIAN bounded overlay | At most eight direct AVIAN peers per node for 5-200 aircraft |
+| AVIAN state | Durable mission, detection, telemetry, and command synchronization |
 | AVIAN link policy | Path health, altitude/RF geometry, failover, delivery redundancy |
 
-AVIAN must not open a direct PEAT session to every other aircraft. The Silvus
+AVIAN must not open a direct AVIAN session to every other aircraft. The Silvus
 radio already routes multi-hop packets, while AVIAN's bounded overlay limits
 application session and synchronization overhead.
 
@@ -92,7 +92,7 @@ claiming that a data-sheet range proves a new chain will work.
 
 ## Vendor telemetry boundary
 
-AVIAN recognizes `silvus` as a transport type and can give PEAT multiple IP
+AVIAN recognizes `silvus` as a transport type and can give its transport multiple IP
 addresses. The supplied StreamCaster 4000-series user and API manuals now
 ground the radio configuration contract, dry-run JSON-RPC sequence, and the
 available neighbor, signal, throughput, route, queue, airtime, and spectrum
@@ -125,7 +125,7 @@ operator-authorization dependent.
 client. It reads capabilities/model/firmware, effective settings, network
 neighbors, RSSI, SNR, and transmit/receive MCS. Credentials stay in a local
 mode-`0600` JSON file and are reduced to sanitized availability errors before
-status or PEAT publication. The monitor has no radio mutation call path.
+status or AVIAN publication. The monitor has no radio mutation call path.
 
 It also runs bounded UDP echo probes for each configured peer/underlay and
 normalizes latency, loss, achieved probe goodput, and rolling stability. The
@@ -156,17 +156,17 @@ line of sight, Fresnel clearance, RF node IDs, SNR bounds, receiver sensitivity,
 energy calibration, latency, loss, goodput, or rolling stability produces an
 explicit degradation reason.
 
-Desired radio settings come only from Arc. `arc-radio-plugin` validates the
+Physical radio settings are changed only through CHUD. `arc-radio-plugin` validates the
 grouped 4200/4400/5200 fleet, expands it to deterministic node assignments,
 computes routine load and the single-source priority-transfer assessment,
-produces a PEAT mission-class record, and emits a dry-run StreamCaster API
-sequence. It never includes passwords or encryption keys in the PEAT payload. See
+produces an AVIAN mission-class record, and emits a dry-run StreamCaster API
+sequence. It never includes passwords or encryption keys in the AVIAN payload. See
 [the Arc radio-plugin guide](arc-radio-plugin.md).
 
 ## Silvus loss and satellite fallback
 
 Production peer TOML tags the Silvus IP first and the peer's ZeroTier IP over
-Starshield second as `satellite`. PEAT receives the complete ordered set at
+Starshield second as `satellite`. AVIAN receives the complete ordered set at
 every connection attempt. When the operator/network layer removes the Silvus
 route, the existing session may drop and reconnect through the reachable
 ZeroTier address. Status and transition logs report the interruption, selected

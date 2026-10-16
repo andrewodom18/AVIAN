@@ -13,7 +13,7 @@ for the particular CHUD image or host used with this repository.
 - **ARC** owns operator intent, the guided workflow, transaction journal, and
   presentation of normalized CHUD state.
 - **AVIAN** owns radio-planning constraints, drone-to-radio attachment
-  assertions, PEAT/logical topology, and consumption of normalized measured
+  assertions, AVIAN/logical topology, and consumption of normalized measured
   links. AVIAN never stores CHUD credentials or writes a physical radio.
 
 ## Required normalized contract

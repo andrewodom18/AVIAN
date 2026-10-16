@@ -1,8 +1,13 @@
 # Production deployment
 
+For an existing formation, complete the [transport upgrade](transport-upgrade.md)
+before replacing binaries. Endpoint identities, configuration names, and the
+database format changed; reuse of an unknown populated state directory is
+rejected.
+
 AVIAN installs three binaries on Linux:
 
-- `mesh-agent`, the PEAT node and local control/payload service;
+- `mesh-agent`, the AVIAN node and local control/payload service;
 - `avianctl`, the local operator CLI; and
 - `avian-link-monitor`, an isolated read-only radio/probe process.
 
@@ -46,7 +51,7 @@ restarting an upgraded node.
    ```
 
    Transfer that same secret out of band to authorized peers. Do not put it in
-   Git, PEAT records, logs, or acceptance evidence.
+   Git, AVIAN records, logs, or acceptance evidence.
 3. Keep private command keys and radio credential files owned by `avian` with
    mode `0600`. Public verification keys may be `0644`.
 4. Keep `/etc/avian/avian.toml` owned by `root:avian` with mode `0640`.
@@ -143,7 +148,7 @@ storage and socket paths to locations writable by the operator. Relative paths
 resolve from the TOML directory; for example:
 
 ```toml
-[peat]
+[mesh]
 storage = "state"
 formation_key_file = "formation.key"
 
@@ -173,7 +178,7 @@ The Mac peer should list every usable aircraft address, and the aircraft should
 list the corresponding Mac addresses. AVIAN normalizes them to Silvus,
 Ethernet, Wi-Fi, satellite, then other, so local links are attempted before the
 higher-latency ZeroTier-over-Starshield fallback. This symmetric configuration
-avoids relying on which endpoint wins PEAT's deterministic connection
+avoids relying on which endpoint wins AVIAN's deterministic connection
 initiation. A cable removal can then interrupt the direct session and trigger a
 retry through Wi-Fi or the satellite-tagged address without taking down the
 local UI.
@@ -181,7 +186,7 @@ local UI.
 ## Failure recovery
 
 - A missing peer, Cube/MAVLink feed, payload producer, or radio API degrades
-  status but does not stop PEAT or the other local services.
+  status but does not stop AVIAN or the other local services.
 - Identity remains stable when node name, formation secret, and persistent
   storage are retained.
 - If configuration is rejected, fix the named strict-TOML field; do not remove

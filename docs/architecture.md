@@ -10,7 +10,7 @@ owns unique operational state and no permanent leader is assumed.
 flowchart LR
     FC["Flight controller\nArduPilot / PX4 / Betaflight"] <--> VA["Vehicle adapter"]
     VA <--> MA["Rust mesh agent"]
-    MA <--> PEAT["PEAT synchronized state"]
+    MA <--> AVIAN["AVIAN synchronized state"]
     MA <--> LO["Link orchestrator"]
     LO <--> R1["Silvus StreamCaster MANET"]
     LO <--> R2["Wi-Fi / Cellular"]
@@ -41,11 +41,11 @@ Roles describe capabilities, not authority:
 | Data | Behavior |
 | --- | --- |
 | Emergency command and acknowledgement | Signed, short-lived, replay-protected, sent redundantly |
-| Mission intent and detections | Durable PEAT state; reconciled after partitions |
+| Mission intent and detections | Durable AVIAN state; reconciled after partitions |
 | Position and health telemetry | Latest-value, short-lived, source-rate-limited; relay-critical and attention changes bypass routine limits |
 | Operator swarm state | Compact rotating summaries; no permanent reporting drone and no full position feed by default |
 | Images and logs | Durable, resumable, opportunistic |
-| Video | Separate streaming path; never placed in the CRDT state document |
+| Video | Separate streaming path; never placed in the replicated record store |
 
 ## Altitude model
 
@@ -63,22 +63,29 @@ Link scoring combines measured latency, loss, goodput, signal quality,
 stability, energy cost, estimated line of sight, and Fresnel clearance. A high
 altitude never makes a link healthy by itself.
 
-## PEAT boundary
+## Transport boundary
 
-`mesh-peat` maps delivery classes into PEAT `MessageRequirements`, builds the
-PACE transport policy, persists versioned AVIAN records in Automerge, and
-synchronizes them through Iroh QUIC. Telemetry uses PEAT's `telemetry`
-collection and therefore inherits its LatestOnly synchronization mode;
-commands retain full history. Peers authenticate with a shared formation key,
-and each endpoint identity is stable across restarts because it is derived
-from the formation secret and unique node name. Public Iroh relays are
-disabled; initial peers are currently supplied as endpoint/address lists.
-One PEAT identity can have several ordered IP addresses, allowing reconnects
-over different radio underlays without changing AVIAN identity.
+`mesh-transport` owns the AVIAN replication protocol over Iroh QUIC and stores
+versioned records transactionally in redb. Peers compare record inventories and
+request bounded batches, including records received through other neighbors.
+Reconnection therefore reconciles partitions without a ground coordinator.
+Conflicts on one record ID use a deterministic whole-record ordering; this is
+record reconciliation, not field-level document merging. Routine telemetry
+reuses stable record IDs so new samples replace previous values. Commands use
+distinct record IDs and retain their signed, expiring application envelopes.
+
+Peers prove possession of a shared formation key with nonce-bound authentication
+before exchanging records. Each endpoint identity is stable across restarts
+because it is derived from the formation secret and unique node name. Public
+Iroh relays are disabled; initial peers are supplied as endpoint/address lists.
+One AVIAN identity can have several ordered IP addresses, allowing reconnects
+over different radio underlays without changing AVIAN identity. See the
+[transport upgrade guide](transport-upgrade.md) before upgrading a provisioned
+formation.
 
 The UAV link orchestrator remains responsible for altitude-aware scoring,
 hysteresis, path changes, and per-message redundancy because those are
-application-specific decisions. PEAT synchronization is independent of any
+application-specific decisions. AVIAN synchronization is independent of any
 ground or cloud peer.
 
 ## Traffic control
@@ -93,17 +100,17 @@ management](traffic-management.md).
 ## Silvus boundary
 
 AVIAN treats a Silvus StreamCaster network as an IP MANET underlay. Silvus
-handles RF neighbor formation and packet routing; AVIAN/PEAT handles vehicle
+handles RF neighbor formation and packet routing; AVIAN handles vehicle
 identity, application state, delivery semantics, and the bounded logical
 overlay. This avoids stacking a 200-node AVIAN full mesh on top of a radio
 mesh that already routes packets.
 
 Silvus is a preferred path, not a required dependency. A peer descriptor may
 carry a Silvus address followed by Wi-Fi, cellular, or other reachable
-addresses. PEAT receives the complete list whenever the agent connects or
-reconnects. Arc remains the desired radio-configuration authority; the
-PEAT-backed radio plugin validates and distributes that state without writing
-Arc's canonical configuration. Live score-driven make-before-break handoff
+addresses. AVIAN receives the complete list whenever the agent connects or
+reconnects. CHUD owns physical radio configuration; the AVIAN radio plugin
+validates and distributes planning intent and observations. ARC presents the
+operator workflow. Live score-driven make-before-break handoff
 remains future work. See [the Arc radio-plugin guide](arc-radio-plugin.md).
 
 ## Swarm topology
@@ -115,7 +122,7 @@ grow linearly with formation size instead of creating an all-to-all graph.
 Every node given the same versioned membership view computes the same symmetric
 overlay; no node is assigned authority by the planner.
 
-The agent can load a shared membership manifest, validate its local PEAT
+The agent can load a shared membership manifest, validate its local AVIAN
 identity, and select only its planned neighbors. Live distribution and
 reconciliation of membership generations is a later milestone. See
 [the scalability contract](scalability.md).
@@ -147,7 +154,7 @@ keeps both aircraft ready to receive while the active radio alone broadcasts;
 the local heartbeat handover changes that role on an active-peer failure.
 
 The onboard `mesh-agent` can evaluate a shared runtime configuration at a
-bounded cadence. It reads latest telemetry and link observations from PEAT,
+bounded cadence. It reads latest telemetry and link observations from AVIAN,
 rebuilds the dynamic candidate inventory, and publishes state-changing relay
 decisions under its own record ID. The configuration does not create a leader;
 other companions evaluate the same policy and records independently.

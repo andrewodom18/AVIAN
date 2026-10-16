@@ -2,7 +2,7 @@
 
 ## Ownership
 
-ARC owns the guided operator workflow and its durable journal. CHUD remains the only service that discovers, identifies, snapshots, writes, confirms, and reads physical radios. AVIAN supplies planning validation and PEAT-backed logical mesh observations; it does not call CHUD or implement vendor writes.
+ARC owns the guided operator workflow and its durable journal. CHUD remains the only service that discovers, identifies, snapshots, writes, confirms, and reads physical radios. AVIAN supplies planning validation and replicated logical mesh observations; it does not call CHUD or implement vendor writes.
 
 Saved ARC device/drone connections and MAC-keyed radio-swarm records appear together under **Saved Devices / Drones**, but remain separate data types. ARC does not infer that a physical radio belongs to a saved drone without an explicit association.
 

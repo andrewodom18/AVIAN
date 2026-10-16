@@ -1,5 +1,5 @@
 [Unit]
-Description=AVIAN PEAT mesh companion service
+Description=AVIAN AVIAN mesh companion service
 Documentation=https://github.com/andrewodom18/AVIAN
 Wants=network-online.target
 After=network-online.target

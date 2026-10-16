@@ -20,15 +20,15 @@ if ($resolvedOutput.StartsWith($resolvedWorkspace, [System.StringComparison]::Or
 New-Item -ItemType Directory -Force -Path $resolvedOutput | Out-Null
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $report = Join-Path $resolvedOutput "mesh-validation-$timestamp.json"
-$peatReport = Join-Path $resolvedOutput "peat-validation-$timestamp.json"
+$meshReport = Join-Path $resolvedOutput "transport-validation-$timestamp.json"
 
 Push-Location $workspace
 try {
     cargo run --quiet -p mesh-sim -- --validate --seed $Seed --output $report
     if ($LASTEXITCODE -ne 0) { throw "mesh validation failed with exit code $LASTEXITCODE" }
-    $peatEvidence = cargo run --quiet -p mesh-sim -- --validate-peat
-    if ($LASTEXITCODE -ne 0) { throw "PEAT validation failed with exit code $LASTEXITCODE" }
-    [System.IO.File]::WriteAllText($peatReport, ($peatEvidence -join [Environment]::NewLine) + [Environment]::NewLine)
+    $meshEvidence = cargo run --quiet -p mesh-sim -- --validate-mesh
+    if ($LASTEXITCODE -ne 0) { throw "AVIAN validation failed with exit code $LASTEXITCODE" }
+    [System.IO.File]::WriteAllText($meshReport, ($meshEvidence -join [Environment]::NewLine) + [Environment]::NewLine)
     node --test --test-concurrency=1 'simulators/mesh-operations/chud-emulator/emulator.test.mjs' 'simulators/mesh-operations/validation-contract.test.mjs'
     if ($LASTEXITCODE -ne 0) { throw "contract validation failed with exit code $LASTEXITCODE" }
 }
@@ -36,4 +36,4 @@ finally {
     Pop-Location
 }
 
-Write-Host "AVIAN validation passed. Reports: $report and $peatReport"
+Write-Host "AVIAN validation passed. Reports: $report and $meshReport"

@@ -1,7 +1,7 @@
 # MAVLink telemetry
 
 `mesh-agent` can ingest the MAVLink common dialect from ArduPilot or PX4,
-normalize it, and publish one latest-value PEAT record for the aircraft.
+normalize it, and publish one latest-value AVIAN record for the aircraft.
 
 ## UDP or TCP
 
@@ -16,7 +16,7 @@ Add these options to the normal `mesh-agent` command:
 For PX4, use `--flight-stack px4`. The address also accepts `udpout`, `tcpin`,
 and `tcpout` forms supported by
 [rust-mavlink](https://github.com/mavlink/rust-mavlink). The receiver reconnects
-after transport loss without stopping PEAT.
+after transport loss without stopping AVIAN.
 
 ## Direct serial
 

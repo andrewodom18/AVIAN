@@ -29,8 +29,8 @@ sim-contract:
 sim-validation:
     cargo run --quiet -p mesh-sim -- --validate --summary --seed 20260825
 
-peat-validation:
-    cargo run --quiet -p mesh-sim -- --validate-peat
+mesh-validation:
+    cargo run --quiet -p mesh-sim -- --validate-mesh
 
 docker-smoke: docker-build
     docker run --rm --entrypoint /bin/sh avian-arc-radio-plugin:ci -c 'id -un | grep -x avian'
@@ -57,4 +57,4 @@ powershell-quality:
     pwsh -NoLogo -NoProfile -File scripts/ci/Test-PowerShell.ps1
 
 # `cargo test --workspace` already runs the workspace documentation tests.
-verify: fmt-check clippy test build sim-contract sim-validation peat-validation
+verify: fmt-check clippy test build sim-contract sim-validation mesh-validation

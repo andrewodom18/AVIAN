@@ -14,7 +14,7 @@ use mesh_core::{
     STREAMCASTER_CAPACITY_REQUIREMENT_NODES, STREAMCASTER_CONTROL_SCHEMA_VERSION,
     STREAMCASTER_MESH_OBSERVATION_SCHEMA_VERSION,
 };
-use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
+use mesh_transport::{AvianRecord, MeshNode, MeshNodeConfig, PeerDescriptor};
 use serde::Deserialize;
 use serde_json::json;
 use streamcaster_control::{
@@ -29,12 +29,12 @@ const TOPIC_FLEET_PLAN: &str = "local/link/radio/streamcaster/fleet-plan/v1";
 const TOPIC_DESIRED: &str = "local/link/radio/streamcaster/desired/v1";
 const TOPIC_STATUS: &str = "local/link/radio/streamcaster/status/v1";
 const TOPIC_EFFECTIVE_OBSERVATIONS: &str = "local/link/radio/streamcaster/observations/v1";
-const TOPIC_MESH_OBSERVATIONS: &str = "local/link/radio/streamcaster/mesh-observations/v1";
+const TOPIC_MESH_OBSERVATIONS: &str = "local/link/radio/streamcaster/mesh-observations/v2";
 const TOPIC_HEALTH: &str = "local/link/radio/streamcaster/plugin-health";
 const TOPIC_TELEMETRY: &str = "local/telemetry";
 const POSITION_MAX_CLOCK_SKEW_MS: u64 = 5_000;
 const POSITION_FRESH_MS: u64 = 30_000;
-const PEAT_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const MESH_RECONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,8 +75,8 @@ struct ServiceState {
     latest_status: Option<StreamCasterOperationStatus>,
     latest_plan_generation: Option<u64>,
     latest_mesh_observation: Option<serde_json::Value>,
-    peat: Option<Arc<PeatNode>>,
-    peat_peers: Vec<PeerDescriptor>,
+    mesh: Option<Arc<MeshNode>>,
+    mesh_peers: Vec<PeerDescriptor>,
     management_address: Option<String>,
     simulate_radio: bool,
     latest_position: Option<StreamCasterObservedPosition>,
@@ -88,7 +88,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         .try_init()
         .ok();
     let backend = Backend::ContractOnly;
-    let (peat, peat_peers) = start_peat(&args).await?;
+    let (mesh, mesh_peers) = start_mesh(&args).await?;
 
     let mut zenoh_config = zenoh::Config::default();
     zenoh_config
@@ -131,8 +131,8 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         latest_status: None,
         latest_plan_generation: None,
         latest_mesh_observation: None,
-        peat: peat.clone(),
-        peat_peers,
+        mesh: mesh.clone(),
+        mesh_peers,
         management_address: None,
         simulate_radio: args.simulate_radio,
         latest_position: None,
@@ -144,12 +144,12 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         );
     } else {
         tracing::info!(
-            "AVIAN PEAT/planning sidecar started; Silvus hardware configuration is owned by the external radio-management API"
+            "AVIAN AVIAN/planning sidecar started; Silvus hardware configuration is owned by the external radio-management API"
         );
     }
 
-    let mut peat_poll = tokio::time::interval(Duration::from_secs(2));
-    let mut mesh_poll = tokio::time::interval(Duration::from_secs(5));
+    let mut replication_poll = tokio::time::interval(Duration::from_secs(2));
+    let mut observation_poll = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
             sample = telemetry_subscriber.recv_async() => {
@@ -196,7 +196,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                         "backend": backend,
                         "live_write_adapter_available": false,
                         "hardware_configuration_authority": "external_radio_management_api",
-                        "peat_enabled": state.peat.is_some(),
+                        "mesh_enabled": state.mesh.is_some(),
                         "fleet_generation": state.latest_plan_generation,
                         "latest_status": state.latest_status,
                         "latest_mesh_observation": state.latest_mesh_observation,
@@ -206,10 +206,10 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                     .reply(query.key_expr(), serde_json::to_vec(&health)?)
                     .await;
             }
-            _ = peat_poll.tick(), if peat.is_some() => {
-                let peat_node = Arc::clone(peat.as_ref().expect("guarded PEAT node"));
-                reconnect_peat_peers(Arc::clone(&peat_node), &state).await;
-                if let Some(plan) = newest_peat_plan(peat_node.as_ref()).await? {
+            _ = replication_poll.tick(), if mesh.is_some() => {
+                let mesh_node = Arc::clone(mesh.as_ref().expect("guarded AVIAN node"));
+                reconnect_mesh_peers(Arc::clone(&mesh_node), &state).await;
+                if let Some(plan) = newest_mesh_plan(mesh_node.as_ref()).await? {
                     let generation = plan.generation;
                     let should_publish = state.read().await.latest_plan_generation
                         .is_none_or(|current| generation > current);
@@ -220,7 +220,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                             .await;
                     }
                 }
-                for observation in peat_mesh_observations(peat_node.as_ref()).await? {
+                for observation in mesh_mesh_observations(mesh_node.as_ref()).await? {
                     let _ = session
                         .put(
                             TOPIC_MESH_OBSERVATIONS,
@@ -229,7 +229,7 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
                         .await;
                 }
             }
-            _ = mesh_poll.tick() => {
+            _ = observation_poll.tick() => {
                 if let Some(observation) = observe_local_mesh(&state, now_unix_ms()).await {
                     state.write().await.latest_mesh_observation = serde_json::to_value(&observation).ok();
                     let _ = session
@@ -253,8 +253,8 @@ pub async fn serve(args: Args) -> anyhow::Result<()> {
         }
     }
 
-    if let Some(peat) = peat {
-        peat.shutdown().await?;
+    if let Some(mesh) = mesh {
+        mesh.shutdown().await?;
     }
     Ok(())
 }
@@ -700,15 +700,15 @@ async fn persist_plan(
     plan: &ArcRadioConfiguration,
     now_ms: u64,
 ) {
-    let (peat, source, sequence) = {
+    let (mesh, source, sequence) = {
         let state = state.read().await;
         (
-            state.peat.clone(),
+            state.mesh.clone(),
             state.source.clone(),
             state.sequence.fetch_add(1, Ordering::Relaxed),
         )
     };
-    let Some(peat) = peat else {
+    let Some(mesh) = mesh else {
         return;
     };
     match AvianRecord::new(
@@ -719,18 +719,18 @@ async fn persist_plan(
         MeshPayload::RadioConfiguration(plan.clone()),
     ) {
         Ok(record) => {
-            if let Err(error) = peat.put("streamcaster-plan-current", &record).await {
-                tracing::warn!(%error, "failed to persist StreamCaster plan through PEAT");
-            } else if let Err(error) = peat.sync_now().await {
-                tracing::warn!(%error, "failed to request PEAT plan sync");
+            if let Err(error) = mesh.put("streamcaster-plan-current", &record).await {
+                tracing::warn!(%error, "failed to persist StreamCaster plan through AVIAN");
+            } else if let Err(error) = mesh.sync_now().await {
+                tracing::warn!(%error, "failed to request AVIAN plan sync");
             }
         }
-        Err(error) => tracing::warn!(%error, "failed to create PEAT StreamCaster record"),
+        Err(error) => tracing::warn!(%error, "failed to create AVIAN StreamCaster record"),
     }
 }
 
-async fn newest_peat_plan(peat: &PeatNode) -> anyhow::Result<Option<ArcRadioConfiguration>> {
-    let mut plans = peat
+async fn newest_mesh_plan(mesh: &MeshNode) -> anyhow::Result<Option<ArcRadioConfiguration>> {
+    let mut plans = mesh
         .scan(DeliveryClass::Mission)
         .await?
         .into_iter()
@@ -747,14 +747,14 @@ async fn persist_mesh_observation(
     state: &Arc<RwLock<ServiceState>>,
     observation: &StreamCasterMeshObservation,
 ) {
-    let (peat, sequence) = {
+    let (mesh, sequence) = {
         let state = state.read().await;
         (
-            state.peat.clone(),
+            state.mesh.clone(),
             state.sequence.fetch_add(1, Ordering::Relaxed),
         )
     };
-    let Some(peat) = peat else {
+    let Some(mesh) = mesh else {
         return;
     };
     let record = AvianRecord::new(
@@ -767,18 +767,20 @@ async fn persist_mesh_observation(
     let record_id = format!("streamcaster-mesh/{}", observation.source);
     match record {
         Ok(record) => {
-            if let Err(error) = peat.put(&record_id, &record).await {
-                tracing::warn!(%error, "failed to persist StreamCaster mesh observation through PEAT");
+            if let Err(error) = mesh.put(&record_id, &record).await {
+                tracing::warn!(%error, "failed to persist StreamCaster mesh observation through AVIAN");
             }
         }
-        Err(error) => tracing::warn!(%error, "failed to create PEAT StreamCaster mesh observation"),
+        Err(error) => {
+            tracing::warn!(%error, "failed to create AVIAN StreamCaster mesh observation")
+        }
     }
 }
 
-async fn peat_mesh_observations(
-    peat: &PeatNode,
+async fn mesh_mesh_observations(
+    mesh: &MeshNode,
 ) -> anyhow::Result<Vec<StreamCasterMeshObservation>> {
-    Ok(peat
+    Ok(mesh
         .scan(DeliveryClass::Telemetry)
         .await?
         .into_iter()
@@ -889,51 +891,51 @@ fn validate_secret_permissions(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn start_peat(args: &Args) -> anyhow::Result<(Option<Arc<PeatNode>>, Vec<PeerDescriptor>)> {
+async fn start_mesh(args: &Args) -> anyhow::Result<(Option<Arc<MeshNode>>, Vec<PeerDescriptor>)> {
     let options_present = [
-        args.peat_formation_id.is_some(),
-        args.peat_formation_key_file.is_some(),
-        args.peat_bind.is_some(),
-        args.peat_storage.is_some(),
+        args.mesh_formation_id.is_some(),
+        args.mesh_formation_key_file.is_some(),
+        args.mesh_bind.is_some(),
+        args.mesh_storage.is_some(),
     ];
     if !options_present.iter().any(|present| *present) {
         return Ok((None, Vec::new()));
     }
     if !options_present.iter().all(|present| *present) {
-        bail!("PEAT formation ID, key file, bind address, and storage are required together");
+        bail!("AVIAN formation ID, key file, bind address, and storage are required together");
     }
-    let key_path = args.peat_formation_key_file.as_ref().expect("checked");
+    let key_path = args.mesh_formation_key_file.as_ref().expect("checked");
     let key = std::fs::read_to_string(key_path)
-        .with_context(|| format!("read PEAT formation key {}", key_path.display()))?;
-    let peat = Arc::new(
-        PeatNode::start(PeatNodeConfig {
+        .with_context(|| format!("read AVIAN formation key {}", key_path.display()))?;
+    let mesh = Arc::new(
+        MeshNode::start(MeshNodeConfig {
             name: args.source.clone(),
-            formation_id: args.peat_formation_id.clone().expect("checked"),
+            formation_id: args.mesh_formation_id.clone().expect("checked"),
             base64_shared_key: key.trim().to_owned(),
-            bind_address: args.peat_bind.expect("checked"),
-            storage_path: args.peat_storage.clone().expect("checked"),
+            bind_address: args.mesh_bind.expect("checked"),
+            storage_path: args.mesh_storage.clone().expect("checked"),
         })
         .await?,
     );
-    let mut peers = Vec::with_capacity(args.peat_peer.len());
-    for peer in &args.peat_peer {
+    let mut peers = Vec::with_capacity(args.mesh_peer.len());
+    for peer in &args.mesh_peer {
         let peer: PeerDescriptor = peer.parse()?;
         peers.push(peer);
     }
-    Ok((Some(peat), peers))
+    Ok((Some(mesh), peers))
 }
 
-async fn reconnect_peat_peers(peat: Arc<PeatNode>, state: &Arc<RwLock<ServiceState>>) {
-    let peers = state.read().await.peat_peers.clone();
+async fn reconnect_mesh_peers(mesh: Arc<MeshNode>, state: &Arc<RwLock<ServiceState>>) {
+    let peers = state.read().await.mesh_peers.clone();
     let mut attempts = tokio::task::JoinSet::new();
     for peer in peers {
-        if peat.is_peer_connected(&peer) {
+        if mesh.is_peer_connected(&peer) {
             continue;
         }
-        let peat = Arc::clone(&peat);
+        let mesh = Arc::clone(&mesh);
         attempts.spawn(async move {
             let name = peer.name.clone();
-            let result = tokio::time::timeout(PEAT_RECONNECT_TIMEOUT, peat.connect(&peer)).await;
+            let result = tokio::time::timeout(MESH_RECONNECT_TIMEOUT, mesh.connect(&peer)).await;
             (name, result)
         });
     }
@@ -941,13 +943,13 @@ async fn reconnect_peat_peers(peat: Arc<PeatNode>, state: &Arc<RwLock<ServiceSta
         match attempt {
             Ok((_, Ok(Ok(_)))) => {}
             Ok((peer, Ok(Err(error)))) => {
-                tracing::debug!(%peer, %error, "PEAT peer remains unavailable");
+                tracing::debug!(%peer, %error, "AVIAN peer remains unavailable");
             }
             Ok((peer, Err(_))) => {
-                tracing::debug!(%peer, "PEAT peer connection attempt timed out");
+                tracing::debug!(%peer, "AVIAN peer connection attempt timed out");
             }
             Err(error) => {
-                tracing::warn!(%error, "PEAT peer reconnect task failed");
+                tracing::warn!(%error, "AVIAN peer reconnect task failed");
             }
         }
     }
@@ -975,14 +977,14 @@ async fn observe_local_mesh(
     state: &Arc<RwLock<ServiceState>>,
     observed_at_ms: u64,
 ) -> Option<StreamCasterMeshObservation> {
-    let (source, backend, management_address, peat, peers, latest_position) = {
+    let (source, backend, management_address, mesh, peers, latest_position) = {
         let state = state.read().await;
         (
             state.source.clone(),
             state.backend.clone(),
             state.management_address.clone(),
-            state.peat.clone(),
-            state.peat_peers.clone(),
+            state.mesh.clone(),
+            state.mesh_peers.clone(),
             state.latest_position,
         )
     };
@@ -996,11 +998,11 @@ async fn observe_local_mesh(
         }
     };
 
-    let endpoint_id = peat.as_ref().map(|node| node.endpoint_id_hex());
+    let endpoint_id = mesh.as_ref().map(|node| node.endpoint_id_hex());
     let links = peers
         .iter()
         .map(|peer| {
-            let connected = peat
+            let connected = mesh
                 .as_ref()
                 .is_some_and(|node| node.is_peer_connected(peer));
             StreamCasterPeerLink {
@@ -1009,7 +1011,7 @@ async fn observe_local_mesh(
                 target: peer.name.clone(),
                 target_endpoint_id: peer.endpoint_id_hex.clone(),
                 target_addresses: peer.addresses().iter().map(ToString::to_string).collect(),
-                transport: "peat_over_streamcaster".into(),
+                transport: "mesh_over_streamcaster".into(),
                 state: if connected {
                     "connected"
                 } else {
@@ -1037,8 +1039,8 @@ async fn observe_local_mesh(
             management_ip: management_address,
             status,
             last_seen_ms: observed_at_ms,
-            peat_endpoint_id: endpoint_id,
-            peat_connected_peers: peat.as_ref().map_or(0, |node| node.peer_count()),
+            mesh_endpoint_id: endpoint_id,
+            mesh_connected_peers: mesh.as_ref().map_or(0, |node| node.peer_count()),
             position: latest_position.filter(|position| {
                 position.observed_at_ms <= observed_at_ms.saturating_add(POSITION_MAX_CLOCK_SKEW_MS)
                     && observed_at_ms.saturating_sub(position.observed_at_ms) <= POSITION_FRESH_MS
@@ -1298,7 +1300,7 @@ mod tests {
         let key_path = storage.path().join("formation.key");
         let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         std::fs::write(&key_path, key).unwrap();
-        let peer_endpoint = mesh_peat::derive_peat_endpoint_id(key, "peer-node").unwrap();
+        let peer_endpoint = mesh_transport::derive_endpoint_id(key, "peer-node").unwrap();
         let args = Args {
             command: None,
             input: None,
@@ -1309,18 +1311,18 @@ mod tests {
             simulate_radio: false,
             installation_evidence_dir: None,
             regulatory_evidence_file: None,
-            peat_formation_id: Some("arc-radio".into()),
-            peat_formation_key_file: Some(key_path),
-            peat_bind: Some("127.0.0.1:0".parse().unwrap()),
-            peat_storage: Some(storage.path().join("peat")),
-            peat_peer: vec![format!("peer-node={peer_endpoint}@127.0.0.1:9")],
+            mesh_formation_id: Some("arc-radio".into()),
+            mesh_formation_key_file: Some(key_path),
+            mesh_bind: Some("127.0.0.1:0".parse().unwrap()),
+            mesh_storage: Some(storage.path().join("mesh")),
+            mesh_peer: vec![format!("peer-node={peer_endpoint}@127.0.0.1:9")],
         };
 
-        let (peat, peers) = start_peat(&args).await.unwrap();
+        let (mesh, peers) = start_mesh(&args).await.unwrap();
 
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].name, "peer-node");
-        peat.unwrap().shutdown().await.unwrap();
+        mesh.unwrap().shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1355,8 +1357,8 @@ mod tests {
             latest_status: None,
             latest_plan_generation: None,
             latest_mesh_observation: None,
-            peat: None,
-            peat_peers: Vec::new(),
+            mesh: None,
+            mesh_peers: Vec::new(),
             management_address: Some("10.0.0.52".into()),
             simulate_radio: true,
             latest_position: Some(StreamCasterObservedPosition {

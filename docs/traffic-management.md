@@ -1,7 +1,7 @@
 # Swarm traffic management
 
 AVIAN treats airtime as a shared mission resource. Routine data is limited at
-the source before it enters PEAT, so the limit applies equally over Silvus,
+the source before it enters AVIAN, so the limit applies equally over Silvus,
 Wi-Fi, cellular, satellite, or any future underlay. Emergency and mission
 records are never held behind routine telemetry.
 
@@ -32,7 +32,7 @@ rather than rendering every aircraft's detailed stream continuously. The
 summary does not contain a full position feed.
 
 Individual records remain latest-value, short-lived mesh control-plane data
-for relaying, collision/mission logic, and fault response. Current PEAT
+for relaying, collision/mission logic, and fault response. Current AVIAN
 replication is formation-wide, so AVIAN’s implemented enforcement point is
 source publication rate and compact operator presentation; per-peer
 subscription filtering and operator-requested detail streams are future work.

@@ -53,14 +53,14 @@ outside the website.
 ## Manage communication paths
 
 The connection code automatically adds every advertised aircraft address and
-orders the routes as Silvus, Ethernet, Wi-Fi, satellite, then other. PEAT is
+orders the routes as Silvus, Ethernet, Wi-Fi, satellite, then other. AVIAN is
 given the complete address set, monitors the live connection, retries an
 unavailable aircraft in the background, and can move traffic to another
 reachable path without changing the aircraft identity. The Ground peer table
-attributes the active underlay from PEAT's currently selected transport path,
+attributes the active underlay from AVIAN's currently selected transport path,
 not from a reachability guess.
 
-On each device, PEAT's wildcard AVIAN listener tracks available local IP
+On each device, AVIAN's wildcard listener tracks available local IP
 interfaces and exposes their live network candidates automatically; an
 Ethernet, Wi-Fi, ZeroTier, or other interface can disappear and return without
 an AVIAN restart. The remote aircraft addresses are populated from the

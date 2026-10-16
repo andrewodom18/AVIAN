@@ -1,6 +1,6 @@
-//! Bounded real-PEAT loopback validation.
+//! Bounded real mesh transport loopback validation.
 //!
-//! Nodes use PEAT's Automerge/Iroh implementation and persistent stores. They
+//! Nodes use the mesh transport implementation and persistent stores. They
 //! run as independent node instances in one test process; this is stronger
 //! evidence than the deterministic model but remains below OS-process and
 //! hardware validation tiers.
@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use mesh_core::{DeliveryClass, MeshPayload, MissionState, MissionStatus, NodeId};
-use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig};
+use mesh_transport::{AvianRecord, MeshNode, MeshNodeConfig};
 use serde::Serialize;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -16,7 +16,7 @@ use uuid::Uuid;
 const LOOPBACK_FORMATION_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PeatClusterEvidence {
+pub struct MeshClusterEvidence {
     pub nodes: usize,
     pub authenticated_connections: usize,
     pub converged_nodes: usize,
@@ -26,7 +26,7 @@ pub struct PeatClusterEvidence {
     pub hardware_validated: bool,
 }
 
-pub async fn run_bounded_peat_validation() -> Result<Vec<PeatClusterEvidence>, String> {
+pub async fn run_bounded_mesh_validation() -> Result<Vec<MeshClusterEvidence>, String> {
     let mut evidence = Vec::new();
     for size in [3, 5, 10] {
         evidence.push(run_cluster(size).await?);
@@ -34,13 +34,13 @@ pub async fn run_bounded_peat_validation() -> Result<Vec<PeatClusterEvidence>, S
     Ok(evidence)
 }
 
-async fn run_cluster(size: usize) -> Result<PeatClusterEvidence, String> {
+async fn run_cluster(size: usize) -> Result<MeshClusterEvidence, String> {
     let stores: Vec<TempDir> = (0..size)
         .map(|_| TempDir::new().map_err(|error| error.to_string()))
         .collect::<Result<_, _>>()?;
     let mut nodes = Vec::new();
     for (index, store) in stores.iter().enumerate() {
-        let node = PeatNode::start(PeatNodeConfig {
+        let node = MeshNode::start(MeshNodeConfig {
             name: format!("avian-validation/node-{index:02}"),
             formation_id: "avian-simulator-validation".to_owned(),
             base64_shared_key: LOOPBACK_FORMATION_KEY.to_owned(),
@@ -48,30 +48,30 @@ async fn run_cluster(size: usize) -> Result<PeatClusterEvidence, String> {
             storage_path: store.path().to_path_buf(),
         })
         .await
-        .map_err(|error| format!("starting PEAT node {index}: {error}"))?;
+        .map_err(|error| format!("starting mesh transport node {index}: {error}"))?;
         nodes.push(node);
     }
 
     for index in 1..nodes.len() {
         let peer = nodes[index]
             .peer_descriptor()
-            .map_err(|error| format!("reading PEAT peer {index}: {error}"))?;
+            .map_err(|error| format!("reading mesh transport peer {index}: {error}"))?;
         nodes[index - 1]
             .connect(&peer)
             .await
-            .map_err(|error| format!("connecting PEAT peer {index}: {error}"))?;
+            .map_err(|error| format!("connecting mesh transport peer {index}: {error}"))?;
     }
 
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if nodes.iter().map(PeatNode::peer_count).sum::<usize>() >= (size - 1) * 2 {
+            if nodes.iter().map(MeshNode::peer_count).sum::<usize>() >= (size - 1) * 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .map_err(|_| format!("{size}-node PEAT cluster did not connect"))?;
+    .map_err(|_| format!("{size}-node mesh transport cluster did not connect"))?;
 
     let record = AvianRecord::new(
         NodeId::from("avian-validation/node-00"),
@@ -80,7 +80,7 @@ async fn run_cluster(size: usize) -> Result<PeatClusterEvidence, String> {
         1,
         MeshPayload::Mission(MissionState {
             mission_id: Uuid::from_u128(size as u128),
-            objective: format!("validate {size}-node PEAT convergence"),
+            objective: format!("validate {size}-node mesh transport convergence"),
             generation: 1,
             status: MissionStatus::Active,
         }),
@@ -116,20 +116,20 @@ async fn run_cluster(size: usize) -> Result<PeatClusterEvidence, String> {
         }
     })
     .await
-    .map_err(|_| format!("{size}-node PEAT cluster did not converge"))??;
+    .map_err(|_| format!("{size}-node mesh transport cluster did not converge"))??;
     let convergence_ms = started.elapsed().as_millis() as u64;
-    let authenticated_connections = nodes.iter().map(PeatNode::peer_count).sum::<usize>() / 2;
+    let authenticated_connections = nodes.iter().map(MeshNode::peer_count).sum::<usize>() / 2;
     for node in &nodes {
         node.shutdown().await.map_err(|error| error.to_string())?;
     }
 
-    Ok(PeatClusterEvidence {
+    Ok(MeshClusterEvidence {
         nodes: size,
         authenticated_connections,
         converged_nodes,
         convergence_ms,
         passed: converged_nodes == size && authenticated_connections >= size - 1,
-        process_model: "real PEAT nodes in one OS process over loopback".to_owned(),
+        process_model: "real mesh transport nodes in one OS process over loopback".to_owned(),
         hardware_validated: false,
     })
 }
@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn three_real_peat_nodes_converge() {
+    async fn three_real_mesh_nodes_converge() {
         let evidence = run_cluster(3).await.unwrap();
         assert!(evidence.passed, "{evidence:#?}");
     }

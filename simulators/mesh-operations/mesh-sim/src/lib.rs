@@ -1,4 +1,4 @@
-//! Deterministic in-memory model used before real PEAT transports and flight
+//! Deterministic in-memory model used before real AVIAN transports and flight
 //! controller simulators are connected.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -15,7 +15,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use vehicle_adapters::{SimulatedVehicleAdapter, VehicleAdapter};
 
-pub mod peat_validation;
+pub mod mesh_validation;
 pub mod validation;
 
 const DEMONSTRATED_AIRCRAFT_COUNT: usize = 200;
@@ -139,7 +139,7 @@ impl SimNetwork {
     }
 
     /// Converges every currently connected component. Version ordering is a
-    /// deterministic stand-in for PEAT/Automerge during the v0.1 harness.
+    /// deterministic stand-in for AVIAN/Automerge during the v0.1 harness.
     pub fn synchronize(&mut self) {
         let components = self.connected_components();
         for component in components {
@@ -497,7 +497,7 @@ pub async fn run_visual_scenario() -> Result<VisualScenario, SimulationError> {
         &network,
         "mission-synchronized",
         "Mission state synchronized",
-        "PEAT-style durable mission state converges across every connected peer.",
+        "AVIAN-style durable mission state converges across every connected peer.",
         10_500,
         "MISSION SYNCHRONIZATION",
         None,

@@ -3,7 +3,7 @@
 ## Ownership
 
 CHUD owns desired and effective physical radio configuration. AVIAN supplies a
-PEAT-backed planning and observation layer that is independent of that
+AVIAN planning and observation layer that is independent of that
 authority:
 
 ```mermaid
@@ -13,13 +13,13 @@ flowchart LR
     CHUD -- "read-only device inventory" --> BRIDGE["ARC dev-bridge"]
     BRIDGE --> UI
     PLAN["ARC planning + identity refs"] --> LM["ARC link-manager"]
-    LM --> PLUGIN["AVIAN radio plugin\nplanning validation + PEAT"]
-    PLUGIN --> PEAT["PEAT planning records\nand latest observations"]
+    LM --> PLUGIN["AVIAN radio plugin\nplanning validation + replication"]
+    PLUGIN --> AVIAN["AVIAN planning records\nand latest observations"]
     PLUGIN --> LM
 ```
 
 The plugin never writes CHUD or ARC configuration, never configures a physical
-radio, and never talks to a flight controller. PEAT distributes planning and
+radio, and never talks to a flight controller. AVIAN distributes planning and
 observed logical mesh state; it does not become a competing hardware
 configuration authority.
 
@@ -30,10 +30,11 @@ an ARC sidecar. The compatibility tool still validates legacy grouped planning
 documents, but groups, percentages, average spacing, and generated topology are
 not operational inventory.
 
-In `--serve` mode the sidecar publishes a versioned PEAT observation containing:
+In `--serve` mode the sidecar publishes a schema-version-2 observation on
+`local/link/radio/streamcaster/mesh-observations/v2`, containing:
 
-- the local PEAT endpoint and actual connected-peer count;
-- configured PEAT peer addresses with a live connected/disconnected state; and
+- the local AVIAN endpoint and actual connected-peer count;
+- configured AVIAN peer addresses with a live connected/disconnected state; and
 - the current fused ARC `local/telemetry` position when it is no more than 30
   seconds old. Raw GPS is not substituted for missing fused position data.
 
@@ -43,8 +44,8 @@ state and persist an operator workflow journal, but CHUD remains the only
 physical write path. AVIAN has no CHUD URL, radio URL, credential
 mount, or vendor mutation interface.
 
-Each sidecar stores one stable, latest-value PEAT telemetry record for its own
-observation. PEAT synchronizes those records across the formation, and the
+Each sidecar stores one stable, latest-value AVIAN telemetry record for its own
+observation. AVIAN synchronizes those records across the formation, and the
 sidecar republishes synchronized records onto its local Zenoh session. The
 ground-side view can therefore aggregate actual reports without inventing node
 counts, positions, spacing, or radio links.
@@ -61,7 +62,7 @@ valid. The response carries `capacity_requirement_nodes: 150` and
 currently observed node count proves the capacity requirement.
 
 The offline [radio mesh bootstrap command](arc-radio-bootstrap.md) derives
-stable PEAT endpoint IDs from the protected formation key and inventory node
+stable AVIAN endpoint IDs from the protected formation key and inventory node
 names, then emits a reviewed, bounded peer map plus ARC Ansible host variables.
 It never scans the network, deploys a surrogate, or writes a radio.
 
@@ -73,7 +74,7 @@ The compatibility tool:
    priority transfer to a 4000-series control station;
 4. enforces an 80% maximum airtime planning ceiling and reports the
    even-share gateway ingress floor;
-5. wraps the accepted configuration as a durable PEAT mission record; and
+5. wraps the accepted configuration as a durable AVIAN mission record; and
 6. emits a dry-run StreamCaster JSON-RPC apply template.
 
 ```sh
@@ -141,7 +142,7 @@ instantaneous EIRP.
 
 ## Security and hardware gate
 
-PEAT records intentionally omit credentials and cryptographic keys. AVIAN has
+AVIAN records intentionally omit credentials and cryptographic keys. AVIAN has
 no physical-radio credential input and its StreamCaster client API is read-only.
 All authorized mutation is performed by the external CHUD-backed management
 service, which owns login, allowlisted calls, live snapshot verification,
