@@ -1,9 +1,9 @@
 name: ci
 
 on:
+  # Keep dev pushes local-only to conserve GitHub Actions minutes.
   push:
-    branches: [main, dev]
-  workflow_dispatch:
+    branches: [main]
 
 permissions:
   contents: read

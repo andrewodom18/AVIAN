@@ -23,7 +23,8 @@ just mutate-radio
 just powershell-quality
 ```
 
-CI runs on pushes to `dev` and `main`, and can also be dispatched manually.
+CI runs only on pushes to `main`. Pushes to `dev` deliberately do not trigger
+GitHub Actions, to conserve Actions minutes; run verification locally on `dev`.
 
 ## Required lanes
 
