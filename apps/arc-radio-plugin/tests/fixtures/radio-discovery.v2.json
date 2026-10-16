@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "observed_at_ms": 10000,
+  "source": "chud/radio/001e3f209a10",
+  "vendor": "trellisware",
+  "model_hint": "tw-950",
+  "mac_address": "00:1e:3f:20:9a:10",
+  "serial_number": "TW950-123",
+  "vendor_node_id": "17",
+  "reachability": "reachable",
+  "management_authentication": "authenticated",
+  "management_endpoints": [
+    {
+      "address": "10.1.0.2",
+      "port": 443,
+      "interface": "Ethernet 2",
+      "interface_index": 6
+    }
+  ],
+  "discovery_methods": [
+    "neighbor_table",
+    "oui",
+    "tcp_reachability"
+  ],
+  "source_authority": "chud_authoritative",
+  "management_lifecycle": "managed",
+  "management_driver_available": true,
+  "observation_revision": 7,
+  "expires_at_ms": 20000
+}

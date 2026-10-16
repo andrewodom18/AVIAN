@@ -28,6 +28,7 @@ const RECORD_FIELD: &str = "record";
 const MAX_PEER_ADDRESSES: usize = 8;
 const PEER_ADDRESS_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const PEER_ADDRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const STORAGE_RESTART_GRACE: Duration = Duration::from_secs(5);
 
 /// Versioned application record stored in PEAT. The envelope keeps transport
 /// and persistence metadata outside the payload's domain schema.
@@ -249,7 +250,20 @@ impl PeatNode {
         peat_config.iroh_bind_addr = Some(config.bind_address);
         peat_config.iroh_secret_key = Some(identity_secret);
 
-        let backend = AutomergeBackend::with_iroh(peat_config).await?;
+        let deadline = tokio::time::Instant::now() + STORAGE_RESTART_GRACE;
+        let backend = loop {
+            match AutomergeBackend::with_iroh(peat_config.clone()).await {
+                Ok(backend) => break backend,
+                Err(error)
+                    if is_storage_lock_error(&error) && tokio::time::Instant::now() < deadline =>
+                {
+                    // PEAT's background store tasks can briefly outlive router
+                    // teardown. Never remove a lock or retry unrelated errors.
+                    tokio::time::sleep(PEER_ADDRESS_POLL_INTERVAL).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         backend
             .initialize(BackendConfig {
                 app_id: "avian".to_owned(),
@@ -423,9 +437,18 @@ impl PeatNode {
     }
 
     pub async fn shutdown(&self) -> Result<(), PeatNodeError> {
-        self.backend.shutdown().await?;
+        // Stop sync and join the router tasks holding the persistent store.
+        // DataSyncBackend::shutdown alone deliberately leaves the router alive.
+        self.backend.shutdown_and_release().await?;
         Ok(())
     }
+}
+
+fn is_storage_lock_error(error: &anyhow::Error) -> bool {
+    // Exact redb error in the pinned PEAT dependency; fail closed on all others.
+    error
+        .chain()
+        .any(|cause| cause.to_string() == "Database already open. Cannot acquire lock.")
 }
 
 fn collection_for(class: DeliveryClass) -> &'static str {
@@ -713,13 +736,44 @@ mod tests {
             .unwrap();
         assert_eq!(first.endpoint_id_hex(), expected);
         first.shutdown().await.unwrap();
+        first.shutdown().await.unwrap();
         drop(first);
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let second = PeatNode::start(node_config("avian-test/stable", &storage, &shared_key))
             .await
             .unwrap();
         assert_eq!(second.endpoint_id_hex(), expected);
         second.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn restart_grace_is_only_for_the_exact_storage_lock_error() {
+        assert!(is_storage_lock_error(
+            &anyhow::anyhow!("Database already open. Cannot acquire lock.")
+                .context("open AutomergeStore")
+        ));
+        assert!(!is_storage_lock_error(&anyhow::anyhow!(
+            "Permission denied"
+        )));
+        assert!(!is_storage_lock_error(&anyhow::anyhow!(
+            "Invalid formation key"
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_grace_never_steals_a_running_nodes_storage() {
+        let storage = TempDir::new().unwrap();
+        let shared_key = FormationKey::generate_secret();
+        let first = PeatNode::start(node_config("avian-test/exclusive", &storage, &shared_key))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            PeatNode::start(node_config("avian-test/exclusive", &storage, &shared_key)),
+        )
+        .await
+        .expect("storage lock wait must remain bounded");
+        assert!(matches!(result, Err(PeatNodeError::Peat(error)) if is_storage_lock_error(&error)));
+        first.shutdown().await.unwrap();
     }
 }

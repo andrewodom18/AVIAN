@@ -6,10 +6,10 @@ use clap::Parser;
 use mesh_agent::control::{spawn_control_server, ControlEnvelope};
 use mesh_core::{
     Capability, DeliveryClass, InFlightRelayDecision, InFlightRelayPlanner, LinkMonitorObservation,
-    MeshPayload, NodeId, NodeProfile, NodeRole, RelayBroadcastPair, RelayLinkObservation,
-    RelayObservationPublication, RelayObservationTrafficGovernor, RelayRuntimeAction,
-    RelayRuntimeConfiguration, RelayRuntimeSnapshot, SwarmStatusSummary, SwarmTrafficPolicy,
-    Telemetry, TelemetryPublication, TelemetryTrafficGovernor, TransportKind,
+    MeshPayload, NodeId, NodeProfile, NodeRole, RadioAttachmentAssertion, RelayBroadcastPair,
+    RelayLinkObservation, RelayObservationPublication, RelayObservationTrafficGovernor,
+    RelayRuntimeAction, RelayRuntimeConfiguration, RelayRuntimeSnapshot, SwarmStatusSummary,
+    SwarmTrafficPolicy, Telemetry, TelemetryPublication, TelemetryTrafficGovernor, TransportKind,
 };
 use mesh_peat::{AvianRecord, PeatNode, PeatNodeConfig, PeerDescriptor};
 use tokio::net::UdpSocket;
@@ -209,6 +209,9 @@ async fn main() -> anyhow::Result<()> {
     status.node.endpoint_id = Some(node.endpoint_id_hex());
     status.peers = peer_statuses(&tagged_peers, &peers, started_at_ms);
     publish_node_advertisement(&node, &node_id, node_profile(&args, &node_id)?).await?;
+    if let Some(attachment) = &args.radio.attachment {
+        publish_radio_attachment(&node, &node_id, attachment).await?;
+    }
     let (control_sender, mut control_receiver) = mpsc::channel(32);
     let control_task = spawn_control_server(
         args.sockets.control.clone(),
@@ -632,6 +635,34 @@ async fn publish_node_advertisement(
     )?;
     node.put(&format!("node-advertisement/{node_id}"), &record)
         .await?;
+    Ok(())
+}
+
+async fn publish_radio_attachment(
+    node: &PeatNode,
+    node_id: &NodeId,
+    configured: &mesh_agent::config::RadioAttachmentConfig,
+) -> anyhow::Result<()> {
+    let mut assertion = RadioAttachmentAssertion::new(
+        unix_time_ms(),
+        node_id.clone(),
+        configured.drone_id.clone(),
+        configured.mac_address.clone(),
+        configured.radio_node_id.clone(),
+    )?;
+    if let Some(serial_number) = configured.radio_serial_number.as_deref() {
+        assertion = assertion.with_serial_number(serial_number);
+    }
+    let record = AvianRecord::new(
+        node_id.clone(),
+        1,
+        DeliveryClass::Mission,
+        unix_time_ms(),
+        MeshPayload::RadioAttachmentAssertion(assertion),
+    )?;
+    node.put(&format!("radio-attachment/{node_id}"), &record)
+        .await
+        .context("publishing local radio attachment assertion")?;
     Ok(())
 }
 
@@ -2219,6 +2250,62 @@ fn mavlink_system_lock_is_fresh(status: &AgentStatus, now_ms: u64) -> bool {
 mod tests {
     use super::*;
     use mesh_agent::config::ConfiguredNodeRole;
+
+    #[test]
+    fn discovered_and_saved_peer_statuses_keep_underlays_without_inventing_connections() {
+        let endpoint = "11".repeat(32);
+        let tagged = vec![
+            TaggedPeer {
+                name: "z-live".into(),
+                endpoint_id: endpoint.clone(),
+                addresses: vec![TaggedAddress {
+                    underlay: Underlay::Ethernet,
+                    address: "192.0.2.4:9000".parse().unwrap(),
+                }],
+            },
+            TaggedPeer {
+                name: "a-saved".into(),
+                endpoint_id: "22".repeat(32),
+                addresses: vec![TaggedAddress {
+                    underlay: Underlay::Wifi,
+                    address: "192.0.2.5:9000".parse().unwrap(),
+                }],
+            },
+        ];
+        let peers = vec![PeerDescriptor::with_addresses(
+            "z-live",
+            endpoint,
+            vec![
+                "192.0.2.4:9000".parse().unwrap(),
+                "192.0.2.9:9000".parse().unwrap(),
+            ],
+        )
+        .unwrap()];
+        let states = peer_statuses(&tagged, &peers, 300);
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].name, "a-saved");
+        assert_eq!(states[0].addresses[0].underlay, Some(Underlay::Wifi));
+        assert_eq!(states[1].addresses[0].underlay, Some(Underlay::Ethernet));
+        assert_eq!(states[1].addresses[1].underlay, None);
+        assert!(states
+            .iter()
+            .all(|peer| !peer.connected && peer.last_transition_at_ms == 300));
+        assert!(peer_statuses(&[], &[], 300).is_empty());
+    }
+
+    #[test]
+    fn transport_mapping_retains_the_supported_underlay_vocabulary() {
+        for (transport, underlay, name) in [
+            (TransportKind::Silvus, Underlay::Silvus, "silvus"),
+            (TransportKind::Satellite, Underlay::Satellite, "satellite"),
+            (TransportKind::Ethernet, Underlay::Ethernet, "ethernet"),
+            (TransportKind::Wifi, Underlay::Wifi, "wifi"),
+            (TransportKind::Other, Underlay::Other, "other"),
+        ] {
+            assert_eq!(underlay_for_transport(transport), Some(underlay));
+            assert_eq!(underlay_name(underlay), name);
+        }
+    }
 
     #[test]
     fn relay_runtime_configuration_sample_decodes_for_the_onboard_agent() {

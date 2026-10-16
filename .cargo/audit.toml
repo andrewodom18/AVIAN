@@ -1,0 +1,11 @@
+[advisories]
+ignore = [
+    # zenoh-transport 1.9 requires lz4_flex 0.10, but AVIAN disables the
+    # transport_compression feature and never invokes its decompressor.
+    "RUSTSEC-2026-0041",
+
+    # quick-xml 0.39 is used only by mavlink-bindgen at build time to parse the
+    # crate's fixed dialect definitions; AVIAN does not pass runtime XML to it.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

@@ -5,3 +5,8 @@
 *.local.toml
 /AGENTS.md
 /sources/
+/mutants.out/
+/mutants.out.old/
+/coverage/
+*.profraw
+*.profdata

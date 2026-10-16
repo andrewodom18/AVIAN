@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "observation_id": "obs-001e3f209a10-r7",
+  "source_instance_id": "avian-windows-bench-01",
+  "submitted_at_ms": 11000,
+  "nonce": "nonce-00000007",
+  "idempotency_key": "001e3f209a10-r7",
+  "observation": {
+    "schema_version": 2,
+    "observed_at_ms": 10000,
+    "source": "avian/diagnostic/001e3f209a10",
+    "vendor": "trellisware",
+    "model_hint": "tw-950",
+    "mac_address": "00:1e:3f:20:9a:10",
+    "reachability": "reachable",
+    "management_authentication": "client_certificate_required",
+    "management_endpoints": [
+      {
+        "address": "10.1.0.2",
+        "port": 443,
+        "interface": "Ethernet 2",
+        "interface_index": 6
+      }
+    ],
+    "discovery_methods": [
+      "neighbor_table",
+      "oui",
+      "tcp_reachability"
+    ],
+    "error_code": "client_certificate_required",
+    "source_authority": "avian_diagnostic",
+    "management_lifecycle": "reachable",
+    "management_driver_available": false,
+    "observation_revision": 7,
+    "expires_at_ms": 20000
+  }
+}

@@ -74,7 +74,7 @@ try {
     } elseif ($firstDirect) {
         'PARTIAL: Radio 2 was locally reachable, but Radio 1 was not reachable over the RF path.'
     } else {
-        'FAIL: The directly attached Radio 2 IPv6 management address was not reachable.'
+        'BLOCKED: The candidate Radio 2 IPv6 management address was not reachable, so the RF path could not be evaluated. This is not proof that the RF mesh failed.'
     }
     @(
         "Two-radio mesh test: $runId",

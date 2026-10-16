@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$ArcRoot = (Join-Path $env:USERPROFILE 'Desktop\Work Docs\arc-edge\arc-uas-avian-radio'),
-    [string]$ArcUrl = 'https://localhost:3000/home/devices'
+    [string]$ArcRoot = (Join-Path $env:USERPROFILE 'Desktop\arc-uas-main-20260827'),
+    [string]$AvianRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..')),
+    [string]$ArcUrl = 'https://localhost:3000/home/devices',
+    [switch]$SkipStartupPrompt,
+    [switch]$SkipBrowser,
+    [switch]$SkipConnectionMonitor
 )
 
 Set-StrictMode -Version Latest
@@ -18,20 +22,63 @@ Write-Host 'It restarts ARC comms, the ARC bridge, recorder/advisor services, CH
 Write-Host 'It starts AVIAN real-radio discovery and the real ARC Link Manager.'
 Write-Host 'It does not start a simulated radio, simulated node, or MAVLink simulator.'
 Write-Host 'After startup, the monitor will explain and record each connection milestone.'
-Read-Host 'Leave the radio Ethernet cable unplugged and press Enter to restart the application' | Out-Null
+if (-not $SkipStartupPrompt) {
+    Read-Host 'Leave the radio Ethernet cable unplugged and press Enter to restart the application' | Out-Null
+}
 
 if (-not (Test-Path -LiteralPath $ArcRoot)) {
     throw "ARC repository was not found at '$ArcRoot'."
 }
+if (-not (Test-Path -LiteralPath $AvianRoot)) { throw "AVIAN repository was not found at '$AvianRoot'." }
 
 $composeFile = Join-Path $ArcRoot 'infra\dev\docker-compose.yml'
+$realHardwareComposeFile = Join-Path $PSScriptRoot 'docker-compose.real-hardware.yml'
 $uiRoot = Join-Path $ArcRoot 'services\arc-ui'
 if (-not (Test-Path -LiteralPath $composeFile)) { throw "Compose file was not found at '$composeFile'." }
+if (-not (Test-Path -LiteralPath $realHardwareComposeFile)) { throw "Real-hardware Compose override was not found at '$realHardwareComposeFile'." }
 if (-not (Test-Path -LiteralPath $uiRoot)) { throw "ARC UI was not found at '$uiRoot'." }
 
+$bridgeSource = Join-Path $ArcRoot 'services\dev-bridge\src\api.rs'
+$legacySwarmBuilder = Join-Path $uiRoot 'src\components\Devices\RadioSwarmBuilder.tsx'
+$fleetNetworkBuilder = Join-Path $uiRoot 'src\components\Devices\FleetNetworkBuilder.tsx'
+if (-not (Test-Path -LiteralPath $bridgeSource) -or
+    (-not (Test-Path -LiteralPath $legacySwarmBuilder) -and -not (Test-Path -LiteralPath $fleetNetworkBuilder))) {
+    throw @"
+This ARC checkout does not contain the ticket #42 CHUD-backed radio routes and
+RadioSwarmBuilder UI. Unmodified ARC main can run beside AVIAN, but it cannot
+exercise the guided radio workflow without ARC changes. Use the reviewed ARC
+integration worktree for radio testing; see docs/arc-main-compatibility.md.
+"@
+}
+
 Write-Section 'Check Docker and simulator state'
-& docker info *> $null
-if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop is not running.' }
+$previousErrorAction = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    & docker info *> $null
+    $dockerReady = $LASTEXITCODE -eq 0
+} finally {
+    $ErrorActionPreference = $previousErrorAction
+}
+if (-not $dockerReady) {
+    $dockerDesktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+    if (-not (Test-Path -LiteralPath $dockerDesktop)) { throw 'Docker Desktop is not installed in the expected location.' }
+    Write-Host 'Docker Desktop is not running; starting it now...' -ForegroundColor Yellow
+    Start-Process -FilePath $dockerDesktop -WindowStyle Hidden
+    $deadline = (Get-Date).AddMinutes(2)
+    do {
+        Start-Sleep -Seconds 3
+        $previousErrorAction = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & docker info *> $null
+            $dockerReady = $LASTEXITCODE -eq 0
+        } finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+    } until ($dockerReady -or (Get-Date) -ge $deadline)
+    if (-not $dockerReady) { throw 'Docker Desktop did not become ready within two minutes.' }
+}
 
 $simContainers = @(
     & docker ps -a --format '{{.Names}}|{{.Command}}' |
@@ -42,48 +89,107 @@ if ($simContainers.Count -gt 0) {
 }
 Write-Host 'No simulated radio or local-sim container is present.' -ForegroundColor Green
 
+$chudExists = & docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq 'chud-local' }
+if (-not $chudExists) { throw "The required external CHUD container 'chud-local' does not exist." }
+$chudInspect = & docker inspect chud-local | ConvertFrom-Json | Select-Object -First 1
+if ($LASTEXITCODE -ne 0 -or -not $chudInspect) { throw "The CHUD container definition could not be inspected." }
+$missingChudBindSources = @(
+    $chudInspect.Mounts |
+        Where-Object { $_.Type -eq 'bind' -and -not (Test-Path -LiteralPath $_.Source) } |
+        ForEach-Object { $_.Source }
+)
+if ($missingChudBindSources.Count -gt 0) {
+    throw "CHUD cannot start because these read-only bind sources are missing: $($missingChudBindSources -join ', ')"
+}
+Write-Host 'CHUD container bind sources are present.' -ForegroundColor Green
+
 Write-Section 'Restart the real-hardware-safe services'
+$freeSystemDriveGiB = (Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free / 1GB
+if ($freeSystemDriveGiB -lt 12) {
+    throw ("The ARC dev-bridge build requires at least 12 GiB free on {0}; only {1:N1} GiB is available." -f $env:SystemDrive, $freeSystemDriveGiB)
+}
 Push-Location $ArcRoot
 try {
-    & docker compose --project-name arc-avian-local --file $composeFile up --detach --no-build comms dev-bridge flight-recorder landing-advisor
+    & docker compose --project-name arc-avian-local --file $composeFile --file $realHardwareComposeFile build comms dev-bridge flight-recorder landing-advisor
+    if ($LASTEXITCODE -ne 0) { throw 'ARC backend build failed.' }
+    & docker compose --project-name arc-avian-local --file $composeFile --file $realHardwareComposeFile up --detach comms dev-bridge flight-recorder landing-advisor
     if ($LASTEXITCODE -ne 0) { throw 'ARC backend startup failed.' }
 } finally {
     Pop-Location
 }
 
-$chudExists = & docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq 'chud-local' }
-if (-not $chudExists) { throw "The required external CHUD container 'chud-local' does not exist." }
 & docker restart chud-local *> $null
 if ($LASTEXITCODE -ne 0) { throw 'CHUD restart failed.' }
+$chudDeadline = (Get-Date).AddSeconds(75)
+$chudReady = $false
+do {
+    Start-Sleep -Seconds 2
+    $chudState = & docker inspect --format '{{.State.Status}}' chud-local
+    if ($chudState -eq 'exited' -or $chudState -eq 'dead') {
+        throw "CHUD stopped during startup with container state '$chudState'."
+    }
+    try {
+        $chudResponse = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri 'http://127.0.0.1:8443/api/radio/devices' `
+            -TimeoutSec 3
+        $chudReady = $chudResponse.StatusCode -eq 200
+    } catch {
+        $chudReady = $false
+    }
+} until ($chudReady -or (Get-Date) -ge $chudDeadline)
+if (-not $chudReady) { throw 'CHUD did not expose its device API within 75 seconds.' }
+Write-Host 'CHUD device API is healthy at http://127.0.0.1:8443/api/radio/devices.' -ForegroundColor Green
 
 Write-Section 'Start the real AVIAN-to-ARC discovery path'
 $linkManagerName = 'arc-avian-real-link-manager'
 $linkManagerExists = & docker ps -a --filter "name=^/$linkManagerName$" --format '{{.Names}}'
 if ($linkManagerExists) {
-    & docker start $linkManagerName *> $null
+    throw "Container '$linkManagerName' already exists. Run Stop-RadioBenchTest.ps1 before starting a new evidence run."
 } else {
     & docker run --detach `
         --name $linkManagerName `
-        --restart unless-stopped `
+        --rm `
         --volume 'arc-avian-local_arc-ipc:/run/arc' `
         'arc-link-manager:dev' `
         --device-id "$env:COMPUTERNAME-radio-bench" *> $null
 }
 if ($LASTEXITCODE -ne 0) { throw 'The real ARC Link Manager failed to start.' }
 
-$avianPlugin = Join-Path $env:USERPROFILE 'Desktop\AVIAN\target\debug\arc-radio-plugin.exe'
-if (-not (Test-Path -LiteralPath $avianPlugin)) {
-    throw "The AVIAN radio plugin was not found at '$avianPlugin'."
+$deadline = (Get-Date).AddSeconds(30)
+$radioCoordinationReady = $false
+do {
+    try {
+        $health = Invoke-RestMethod -Uri 'http://127.0.0.1:9101/api/radio/streamcaster/health' -TimeoutSec 3
+        $radioCoordinationReady = $health.coordination_reachable -eq $true
+    } catch {
+        $radioCoordinationReady = $false
+    }
+    if (-not $radioCoordinationReady) { Start-Sleep -Seconds 2 }
+} until ($radioCoordinationReady -or (Get-Date) -ge $deadline)
+if (-not $radioCoordinationReady) {
+    throw 'ARC dev-bridge cannot query the radio coordination path. Do not connect hardware.'
 }
+Write-Host 'ARC radio coordination transport is healthy.' -ForegroundColor Green
+
+$existingPlugins = @(Get-CimInstance Win32_Process -Filter "Name = 'arc-radio-plugin.exe'")
+if ($existingPlugins.Count -gt 0) { throw 'An AVIAN radio plugin is already running. Stop it before starting an evidence run.' }
+Push-Location $AvianRoot
+try {
+    & cargo build --locked -p arc-radio-plugin
+    if ($LASTEXITCODE -ne 0) { throw 'AVIAN radio plugin build failed.' }
+} finally {
+    Pop-Location
+}
+$avianPlugin = Join-Path $AvianRoot 'target\debug\arc-radio-plugin.exe'
+if (-not (Test-Path -LiteralPath $avianPlugin)) { throw "The AVIAN radio plugin was not produced at '$avianPlugin'." }
 $discoveryDirectory = Join-Path $env:USERPROFILE 'Desktop\Radio Test Results\live-discovery'
 New-Item -ItemType Directory -Force -Path $discoveryDirectory | Out-Null
-Get-CimInstance Win32_Process -Filter "Name = 'arc-radio-plugin.exe'" |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 $discoveryStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $discoveryOutput = Join-Path $discoveryDirectory 'latest-discovery.json'
 $discoveryStdout = Join-Path $discoveryDirectory "avian-discovery-$discoveryStamp.out.log"
 $discoveryStderr = Join-Path $discoveryDirectory "avian-discovery-$discoveryStamp.err.log"
-Start-Process -FilePath $avianPlugin `
+$avianProcess = Start-Process -FilePath $avianPlugin `
     -ArgumentList @(
         'trellisware-discover', '--probe-ip', '10.1.0.2', '--watch',
         '--interval-seconds', '2', '--zenoh-endpoint', 'tcp/127.0.0.1:7447',
@@ -91,7 +197,20 @@ Start-Process -FilePath $avianPlugin `
     ) `
     -WindowStyle Hidden `
     -RedirectStandardOutput $discoveryStdout `
-    -RedirectStandardError $discoveryStderr
+    -RedirectStandardError $discoveryStderr `
+    -PassThru
+$arcCommit = (& git -C $ArcRoot rev-parse HEAD).Trim()
+$avianCommit = (& git -C $AvianRoot rev-parse HEAD).Trim()
+$linkManagerImage = (& docker image inspect arc-link-manager:dev --format '{{.Id}}').Trim()
+[pscustomobject]@{
+    CapturedAt = (Get-Date).ToString('o')
+    ArcCommit = $arcCommit
+    AvianCommit = $avianCommit
+    AvianPluginSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $avianPlugin).Hash
+    AvianPluginProcessId = $avianProcess.Id
+    LinkManagerImageId = $linkManagerImage
+    ComposeFileSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $composeFile).Hash
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $discoveryDirectory "bench-manifest-$discoveryStamp.json")
 Write-Host 'AVIAN is watching the Windows neighbor table and publishing real TW-950 discoveries to ARC.' -ForegroundColor Green
 
 Write-Section 'Restart the ARC UI'
@@ -127,18 +246,21 @@ if (-not $listener) {
 }
 Write-Host "ARC UI is listening at $ArcUrl" -ForegroundColor Green
 
-Write-Section 'Open the device page in Google Chrome'
-$chromeCandidates = @(
-    (Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')
-)
-$chrome = $chromeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $chrome) { throw 'Google Chrome is not installed in a standard location.' }
-Start-Process -FilePath $chrome -ArgumentList @('--new-window', $ArcUrl)
-Write-Host 'Chrome was opened to the ARC Devices page.' -ForegroundColor Green
-Write-Host 'If Chrome displays a local-certificate page, choose Advanced and continue to localhost.' -ForegroundColor Yellow
+if (-not $SkipBrowser) {
+    Write-Section 'Open the device page in Microsoft Edge'
+    $edgeCandidates = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe')
+    )
+    $edge = $edgeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $edge) { throw 'Microsoft Edge is not installed in a standard location.' }
+    Start-Process -FilePath $edge -ArgumentList @('--new-window', $ArcUrl)
+    Write-Host 'Edge was opened to the ARC Devices page.' -ForegroundColor Green
+    Write-Host 'If Edge displays a local-certificate page, choose Advanced and continue to localhost.' -ForegroundColor Yellow
+}
 
-Write-Section 'Start the connection monitor'
-$monitor = Join-Path $PSScriptRoot 'Monitor-RadioConnection.ps1'
-& $monitor
+if (-not $SkipConnectionMonitor) {
+    Write-Section 'Start the connection monitor'
+    $monitor = Join-Path $PSScriptRoot 'Monitor-RadioConnection.ps1'
+    & $monitor
+}

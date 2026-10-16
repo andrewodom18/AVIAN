@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fs};
 
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
-use mesh_core::{FlightStack, NodeRole, DEFAULT_MAX_NEIGHBORS};
+use mesh_core::{FlightStack, NodeId, NodeRole, RadioAttachmentAssertion, DEFAULT_MAX_NEIGHBORS};
 use mesh_peat::PeerDescriptor;
 use serde::{Deserialize, Serialize};
 
@@ -222,6 +222,17 @@ pub struct RadioConfig {
     pub probes: Vec<PeerProbeConfig>,
     pub probe_listen: Option<SocketAddr>,
     pub links: Vec<CalibratedLinkConfig>,
+    pub attachment: Option<RadioAttachmentConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioAttachmentConfig {
+    pub drone_id: String,
+    pub mac_address: String,
+    pub radio_node_id: Option<String>,
+    #[serde(default)]
+    pub radio_serial_number: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -400,6 +411,7 @@ struct FileRadio {
     probes: Vec<PeerProbeConfig>,
     probe_listen: Option<SocketAddr>,
     links: Vec<CalibratedLinkConfig>,
+    attachment: Option<RadioAttachmentConfig>,
 }
 
 impl Default for FileRadio {
@@ -412,6 +424,7 @@ impl Default for FileRadio {
             probes: Vec::new(),
             probe_listen: None,
             links: Vec::new(),
+            attachment: None,
         }
     }
 }
@@ -525,6 +538,7 @@ impl ResolvedConfig {
                 probes: value.radio.probes.clone(),
                 probe_listen: value.radio.probe_listen,
                 links: value.radio.links.clone(),
+                attachment: value.radio.attachment.clone(),
             });
 
         let resolved = Self {
@@ -610,6 +624,7 @@ impl ResolvedConfig {
                 probes: radio.probes,
                 probe_listen: radio.probe_listen,
                 links: radio.links,
+                attachment: radio.attachment,
             },
         };
         resolved.validate()?;
@@ -720,6 +735,23 @@ impl ResolvedConfig {
             validate_identifier(&device.name, "radio device name")?;
             if !radio_names.insert(device.name.as_str()) {
                 bail!("radio device names must be unique");
+            }
+        }
+        if let Some(attachment) = &self.radio.attachment {
+            let mut assertion = RadioAttachmentAssertion::new(
+                0,
+                NodeId::from(self.name.clone()),
+                attachment.drone_id.clone(),
+                attachment.mac_address.clone(),
+                attachment.radio_node_id.clone(),
+            )
+            .context("invalid radio attachment")?;
+            if let Some(serial_number) = attachment.radio_serial_number.as_deref() {
+                assertion = assertion.with_serial_number(serial_number);
+            }
+            assertion.validate().context("invalid radio attachment")?;
+            if self.role != ConfiguredNodeRole::Aircraft {
+                bail!("radio attachment assertions may be configured only on aircraft nodes");
             }
         }
         for probe in &self.radio.probes {

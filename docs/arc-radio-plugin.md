@@ -8,7 +8,7 @@ authority:
 
 ```mermaid
 flowchart LR
-    UI["ARC Devices\nread-only topology"] -. "open selected MAC" .-> CHUD["CHUD radio manager\nconfiguration authority"]
+    UI["ARC Devices\ntopology + guided workflow"] -- "normalized CHUD API only" --> CHUD["CHUD radio manager\nconfiguration authority"]
     CHUD --> RADIO["Physical radios"]
     CHUD -- "read-only device inventory" --> BRIDGE["ARC dev-bridge"]
     BRIDGE --> UI
@@ -37,9 +37,10 @@ In `--serve` mode the sidecar publishes a versioned PEAT observation containing:
 - the current fused ARC `local/telemetry` position when it is no more than 30
   seconds old. Raw GPS is not substituted for missing fused position data.
 
-ARC obtains physical radio identity for topology from CHUD's read-only device
-inventory. Configuration capabilities, effective settings, and transaction
-state remain in CHUD's UI/API. AVIAN has no CHUD URL, radio URL, credential
+ARC obtains physical radio identity for topology from CHUD's device inventory.
+ARC may render CHUD-provided capabilities, effective settings, and transaction
+state and persist an operator workflow journal, but CHUD remains the only
+physical write path. AVIAN has no CHUD URL, radio URL, credential
 mount, or vendor mutation interface.
 
 Each sidecar stores one stable, latest-value PEAT telemetry record for its own

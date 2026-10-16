@@ -1,0 +1,23 @@
+# Real-hardware ARC override used by Start-RadioBenchTest.ps1.
+#
+# ARC's ordinary development compose file injects `comms:7447` as a manual
+# fleet endpoint. That creates a local Docker drone whose heartbeat remains
+# live when physical hardware is unplugged. The bench instead connects the
+# same transport through the radio-only endpoint, which carries coordination
+# and observations without admitting a fleet/drone discovery candidate.
+services:
+  dev-bridge:
+    command:
+      - "--tcp-bind"
+      - "0.0.0.0"
+      - "--http-bind"
+      - "0.0.0.0"
+      - "--radio-management-api-url"
+      - "${RADIO_MANAGEMENT_API_URL:-http://host.docker.internal:8443}"
+      - "--radio-control-zenoh-endpoint"
+      - "tcp/comms:7447"
+    volumes:
+      - arc-real-hardware-fleet-state:/root/.local/state/arc/dev-bridge
+
+volumes:
+  arc-real-hardware-fleet-state:

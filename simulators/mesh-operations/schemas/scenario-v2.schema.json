@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avian.local/schemas/scenario-v2.schema.json",
+  "title": "AVIAN mesh validation scenario",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "aircraft", "seed", "direct_peer_limit", "messages_per_node", "failure_percent"],
+  "properties": {
+    "schema_version": { "const": "2.0.0" },
+    "aircraft": { "type": "integer", "minimum": 1, "maximum": 200 },
+    "seed": { "type": "integer", "minimum": 1 },
+    "direct_peer_limit": { "type": "integer", "minimum": 2, "maximum": 8 },
+    "messages_per_node": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "failure_percent": { "type": "integer", "minimum": 0, "maximum": 49 }
+  }
+}

@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::{
     Altitude, ArcRadioConfiguration, Detection, EmergencyCommand, ImageManifest,
     InFlightRelayDecision, LinkMonitorObservation, MissionAllocation, NodeId, NodeProfile,
-    RadioDeviceObservation, RelayLinkObservation, RelayRuntimeConfiguration,
-    StreamCasterMeshObservation, SwarmStatusSummary,
+    RadioAttachmentAssertion, RadioDeviceObservation, RelayLinkObservation,
+    RelayRuntimeConfiguration, StreamCasterMeshObservation, SwarmStatusSummary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -144,6 +144,9 @@ pub enum MeshPayload {
     /// Vendor-neutral read-only radio observation. New adapters publish this
     /// alongside any legacy vendor-specific record during migration.
     RadioDeviceObservation(RadioDeviceObservation),
+    /// Onboard assertion of the explicitly provisioned local radio identity.
+    /// Transport authentication establishes source; IP address is never identity.
+    RadioAttachmentAssertion(RadioAttachmentAssertion),
     LinkMonitorObservation(LinkMonitorObservation),
     Mission(MissionState),
     MissionAllocation(MissionAllocation),
