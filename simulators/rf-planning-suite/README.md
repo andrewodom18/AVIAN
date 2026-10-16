@@ -14,11 +14,19 @@ A local, single-page RF planning application with:
 Requires Node.js 22.13 or newer.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-Use `npm test` to run a production build plus calculation and rendered-page regression tests.
+Use `npm test` to run a production build plus calculation and rendered-page
+regression tests. Rendered-page tests execute the built Worker in the local
+Cloudflare runtime. Run `npm run lint` and `npm run typecheck` for static checks.
+
+The `fflate` override keeps upstream image-generation dependencies on the
+compatible 0.7.5 security patch while their manifests pin 0.7.3. Current
+upstream tooling still reports the unpatched `braces` dependency and the
+Drizzle generator's legacy `esbuild` loader in `npm audit`; avoid forced
+framework downgrades to clear those reports.
 
 ## Calculation provenance
 

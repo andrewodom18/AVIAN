@@ -439,7 +439,7 @@ export function applyEnvironmentDefaultsToNodes(nodes: NetworkNode[], environmen
   }));
 }
 
-export function assignRadioMix(nodes: NetworkNode[], sl5200Percent: number, placement: RadioMixPlacement) {
+export function assignRadioMix(nodes: NetworkNode[], sl5200Percent: number, placement: RadioMixPlacement): NetworkNode[] {
   const boundedPercent = Math.min(100, Math.max(0, sl5200Percent));
   const sl5200Count = Math.round(nodes.length * boundedPercent / 100);
   const series4000Count = nodes.length - sl5200Count;

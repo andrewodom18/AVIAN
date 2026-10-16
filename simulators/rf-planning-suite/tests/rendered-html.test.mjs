@@ -1,26 +1,38 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
-import test from "node:test";
+import { access, readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { Miniflare } from "miniflare";
+import test, { after } from "node:test";
+
+let runtime;
+after(async () => runtime?.dispose());
 
 async function render(pathname = "/") {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}-${pathname}`);
-  const { default: worker } = await import(workerUrl.href);
-
-  return worker.fetch(
-    new Request(`http://localhost${pathname}`, {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
+  if (!runtime) {
+    // The production bundle imports Cloudflare runtime modules. Exercise it
+    // inside workerd rather than mocking those modules in Node's ESM loader.
+    const root = fileURLToPath(new URL("../dist/server/", import.meta.url));
+    const config = JSON.parse(await readFile(path.join(root, "wrangler.json"), "utf8"));
+    const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".js"));
+    const modules = Object.fromEntries(await Promise.all(files.map(async (file) => [
+      file.replaceAll("\\", "/"),
+      { type: "esm", contents: await readFile(path.join(root, file), "utf8") },
+    ])));
+    runtime = new Miniflare({
+      workers: [{
+        config: {
+          name: "rf-planner-tests",
+          compatibilityDate: config.compatibility_date,
+          compatibilityFlags: config.compatibility_flags,
+          manifest: { mainModule: "index.js", modulesRoot: root, modules },
+        },
+      }],
+    });
+  }
+  return runtime.dispatchFetch(`http://localhost${pathname}`, {
+    headers: { accept: "text/html" },
+  });
 }
 
 test("server-renders the unified MN-MIMO RF planning suite", async () => {
