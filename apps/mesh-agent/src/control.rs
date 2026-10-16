@@ -6,6 +6,7 @@ use anyhow::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::protocol::{decode_request, encode_response, ControlRequest, ControlResponse};
@@ -29,8 +30,14 @@ pub async fn spawn_control_server(
     set_socket_permissions(&path)?;
     let permits = Arc::new(Semaphore::new(MAX_CONTROL_CONNECTIONS));
     Ok(tokio::spawn(async move {
+        // Dropping the listener task also cancels every owned connection.
+        let mut clients = JoinSet::new();
         loop {
-            let (stream, _) = match listener.accept().await {
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = clients.join_next(), if !clients.is_empty() => continue,
+            };
+            let (stream, _) = match accepted {
                 Ok(value) => value,
                 Err(error) => {
                     eprintln!("Control socket accept failed: {error}");
@@ -42,7 +49,7 @@ pub async fn spawn_control_server(
                 continue;
             };
             let request_sender = sender.clone();
-            tokio::spawn(async move {
+            clients.spawn(async move {
                 let _permit = permit;
                 if let Err(error) =
                     handle_connection(stream, max_message_bytes, request_sender).await

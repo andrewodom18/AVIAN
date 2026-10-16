@@ -8,7 +8,7 @@ use mavlink::dialects::common::{
 use mavlink::error::MessageReadError;
 use mavlink::{MavConnection, MavHeader};
 use mesh_core::{Altitude, FlightStack, NodeId, Telemetry};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::AdapterError;
 
@@ -41,6 +41,7 @@ struct MavlinkCommandRequest {
     target_system_id: u8,
     ack_timeout: Duration,
     retries: u8,
+    expires_at: std::time::Instant,
     respond_to: oneshot::Sender<MavlinkCommandOutcome>,
 }
 
@@ -56,40 +57,42 @@ impl MavlinkCommandSender {
         ack_timeout: Duration,
         retries: u8,
     ) -> MavlinkCommandOutcome {
+        let budget = ack_timeout.saturating_mul(u32::from(retries) + 1);
+        let expires_at = std::time::Instant::now() + budget;
         let (respond_to, response) = oneshot::channel();
-        if self
-            .sender
-            .send(MavlinkCommandRequest {
-                target_system_id,
-                ack_timeout,
-                retries,
-                respond_to,
-            })
-            .await
-            .is_err()
-        {
-            return MavlinkCommandOutcome::TransportUnavailable(
-                "MAVLink worker is not running".into(),
-            );
-        }
-        response.await.unwrap_or_else(|_| {
-            MavlinkCommandOutcome::TransportUnavailable("MAVLink worker stopped".into())
+        let request = MavlinkCommandRequest {
+            target_system_id,
+            ack_timeout,
+            retries,
+            expires_at,
+            respond_to,
+        };
+        match tokio::time::timeout(budget, async {
+            self.sender.send(request).await.map_err(|_| ())?;
+            response.await.map_err(|_| ())
         })
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(())) => {
+                MavlinkCommandOutcome::TransportUnavailable("MAVLink worker stopped".into())
+            }
+            Err(_) => MavlinkCommandOutcome::TimedOut,
+        }
     }
 }
 
 pub struct MavlinkRuntime {
-    pub events: mpsc::Receiver<MavlinkTelemetryEvent>,
+    pub events: MavlinkEventReceiver,
     pub commands: MavlinkCommandSender,
 }
 
-/// Starts rust-mavlink's blocking transport on a dedicated OS thread. The
-/// bounded channel applies backpressure instead of allowing telemetry to grow
-/// without limit when mesh publication is busy.
+/// Starts rust-mavlink's blocking transport on a dedicated OS thread. Latest
+/// telemetry and lifecycle state are coalesced without blocking command ACKs.
 pub fn spawn_mavlink_source(
     config: MavlinkSourceConfig,
     channel_capacity: usize,
-) -> Result<mpsc::Receiver<MavlinkTelemetryEvent>, AdapterError> {
+) -> Result<MavlinkEventReceiver, AdapterError> {
     Ok(spawn_mavlink_runtime(config, channel_capacity)?.events)
 }
 
@@ -100,7 +103,7 @@ pub fn spawn_mavlink_runtime(
     if channel_capacity == 0 {
         return Err(AdapterError::InvalidChannelCapacity);
     }
-    let (sender, receiver) = mpsc::channel(channel_capacity);
+    let (sender, receiver) = event_channel();
     let (command_sender, command_receiver) = mpsc::channel(8);
     thread::Builder::new()
         .name("avian-mavlink".to_owned())
@@ -116,7 +119,7 @@ pub fn spawn_mavlink_runtime(
 
 fn run_mavlink_source(
     config: MavlinkSourceConfig,
-    sender: mpsc::Sender<MavlinkTelemetryEvent>,
+    sender: watch::Sender<EventState>,
     mut commands: mpsc::Receiver<MavlinkCommandRequest>,
 ) {
     loop {
@@ -146,7 +149,7 @@ fn run_mavlink_source(
 fn receive_connection(
     config: &MavlinkSourceConfig,
     connection: &dyn MavConnection<MavMessage>,
-    sender: &mpsc::Sender<MavlinkTelemetryEvent>,
+    sender: &watch::Sender<EventState>,
     commands: &mut mpsc::Receiver<MavlinkCommandRequest>,
 ) -> bool {
     let mut accumulator =
@@ -159,8 +162,22 @@ fn receive_connection(
         };
     let mut pending: Option<PendingCommand> = None;
     loop {
+        if sender.is_closed() {
+            if let Some(command) = pending.take() {
+                let _ = command.respond(MavlinkCommandOutcome::TransportUnavailable(
+                    "MAVLink source stopped".into(),
+                ));
+            }
+            return false;
+        }
+        process_command_timeout(connection, &mut pending);
         if pending.is_none() {
             if let Ok(request) = commands.try_recv() {
+                if request.respond_to.is_closed() || std::time::Instant::now() >= request.expires_at
+                {
+                    let _ = request.respond_to.send(MavlinkCommandOutcome::TimedOut);
+                    continue;
+                }
                 if accumulator.target_system_id() != Some(request.target_system_id) {
                     let _ = request
                         .respond_to
@@ -171,10 +188,12 @@ fn receive_connection(
                     match send_rtl(connection, request.target_system_id, 0) {
                         Ok(()) => {
                             let ack_timeout = request.ack_timeout;
+                            let deadline =
+                                (std::time::Instant::now() + ack_timeout).min(request.expires_at);
                             pending = Some(PendingCommand {
                                 request,
                                 attempts: 1,
-                                deadline: std::time::Instant::now() + ack_timeout,
+                                deadline,
                             });
                         }
                         Err(error) => {
@@ -291,6 +310,16 @@ fn process_command_timeout(
     let Some(command) = pending.as_mut() else {
         return false;
     };
+    if command.request.respond_to.is_closed() {
+        pending.take();
+        return true;
+    }
+    if std::time::Instant::now() >= command.request.expires_at {
+        if let Some(command) = pending.take() {
+            let _ = command.respond(MavlinkCommandOutcome::TimedOut);
+        }
+        return true;
+    }
     if std::time::Instant::now() < command.deadline {
         return false;
     }
@@ -299,7 +328,8 @@ fn process_command_timeout(
         match send_rtl(connection, command.request.target_system_id, confirmation) {
             Ok(()) => {
                 command.attempts = command.attempts.saturating_add(1);
-                command.deadline = std::time::Instant::now() + command.request.ack_timeout;
+                command.deadline = (std::time::Instant::now() + command.request.ack_timeout)
+                    .min(command.request.expires_at);
             }
             Err(error) => {
                 if let Some(command) = pending.take() {
@@ -336,8 +366,76 @@ fn send_rtl(
     Ok(())
 }
 
-fn send_event(sender: &mpsc::Sender<MavlinkTelemetryEvent>, event: MavlinkTelemetryEvent) -> bool {
-    sender.blocking_send(event).is_ok()
+/// The reader exposes the existing event-oriented interface while retaining
+/// only the newest telemetry and each current lifecycle field. A slow consumer
+/// cannot stop the transport thread from receiving ACKs or checking deadlines.
+pub struct MavlinkEventReceiver {
+    state: watch::Receiver<EventState>,
+    seen: u64,
+}
+
+#[derive(Clone, Default)]
+struct EventState {
+    sequence: u64,
+    connection: Option<(u64, MavlinkTelemetryEvent)>,
+    target: Option<(u64, MavlinkTelemetryEvent)>,
+    telemetry: Option<(u64, MavlinkTelemetryEvent)>,
+    rejection: Option<(u64, MavlinkTelemetryEvent)>,
+}
+
+impl MavlinkEventReceiver {
+    pub async fn recv(&mut self) -> Option<MavlinkTelemetryEvent> {
+        loop {
+            let next = {
+                let state = self.state.borrow_and_update();
+                [
+                    &state.connection,
+                    &state.target,
+                    &state.telemetry,
+                    &state.rejection,
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|(sequence, _)| *sequence > self.seen)
+                .min_by_key(|(sequence, _)| *sequence)
+                .cloned()
+            };
+            if let Some((sequence, event)) = next {
+                self.seen = sequence;
+                return Some(event);
+            }
+            if self.state.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+}
+
+fn event_channel() -> (watch::Sender<EventState>, MavlinkEventReceiver) {
+    let (sender, state) = watch::channel(EventState::default());
+    (sender, MavlinkEventReceiver { state, seen: 0 })
+}
+
+fn send_event(sender: &watch::Sender<EventState>, event: MavlinkTelemetryEvent) -> bool {
+    if sender.is_closed() {
+        return false;
+    }
+    sender.send_modify(|state| {
+        state.sequence = state.sequence.saturating_add(1);
+        let stamped = (state.sequence, event.clone());
+        match event {
+            MavlinkTelemetryEvent::Connected | MavlinkTelemetryEvent::ConnectionLost(_) => {
+                state.connection = Some(stamped);
+                state.target = None;
+                state.telemetry = None;
+                state.rejection = None;
+            }
+            MavlinkTelemetryEvent::SystemLocked(_) => state.target = Some(stamped),
+            MavlinkTelemetryEvent::Telemetry(_) => state.telemetry = Some(stamped),
+            MavlinkTelemetryEvent::Rejected(_) => state.rejection = Some(stamped),
+        }
+    });
+    true
 }
 
 fn unix_time_ms() -> u64 {
@@ -636,6 +734,218 @@ mod tests {
             .await;
         assert_eq!(outcome, MavlinkCommandOutcome::Accepted);
         fake.join().unwrap();
+    }
+
+    /// A continuously readable transport catches deadline starvation without
+    /// relying on UDP packet scheduling or a real flight controller.
+    struct FloodConnection {
+        frames: std::sync::atomic::AtomicUsize,
+        sends: std::sync::atomic::AtomicUsize,
+        acknowledge: bool,
+    }
+
+    impl MavConnection<MavMessage> for FloodConnection {
+        fn recv(&self) -> Result<(MavHeader, MavMessage), MessageReadError> {
+            self.try_recv()
+        }
+        fn recv_raw(&self) -> Result<mavlink::MAVLinkMessageRaw, MessageReadError> {
+            unreachable!()
+        }
+        fn try_recv(&self) -> Result<(MavHeader, MavMessage), MessageReadError> {
+            use std::sync::atomic::Ordering;
+            let frame = self.frames.fetch_add(1, Ordering::Relaxed);
+            let message = if self.acknowledge && self.sends.load(Ordering::Relaxed) > 0 {
+                MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+                    command: MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                    result: MavResult::MAV_RESULT_ACCEPTED,
+                })
+            } else {
+                match frame % 3 {
+                    0 => heartbeat(MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA),
+                    1 => position(),
+                    _ => attitude(),
+                }
+            };
+            Ok((header(42), message))
+        }
+        fn send(
+            &self,
+            _: &MavHeader,
+            _: &MavMessage,
+        ) -> Result<usize, mavlink::error::MessageWriteError> {
+            self.sends
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(1)
+        }
+        fn set_protocol_version(&mut self, _: mavlink::MavlinkVersion) {}
+        fn protocol_version(&self) -> mavlink::MavlinkVersion {
+            mavlink::MavlinkVersion::V2
+        }
+        fn set_allow_recv_any_version(&mut self, _: bool) {}
+        fn allow_recv_any_version(&self) -> bool {
+            true
+        }
+    }
+
+    async fn command_under_telemetry_pressure(acknowledge: bool) -> (MavlinkCommandOutcome, usize) {
+        use std::sync::atomic::Ordering;
+        let (events, mut receiver) = event_channel();
+        let (sender, mut commands) = mpsc::channel(1);
+        let connection = std::sync::Arc::new(FloodConnection {
+            frames: std::sync::atomic::AtomicUsize::new(0),
+            sends: std::sync::atomic::AtomicUsize::new(0),
+            acknowledge,
+        });
+        let worker_connection = connection.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            receive_connection(
+                &MavlinkSourceConfig {
+                    address: String::new(),
+                    source: NodeId::from("flood"),
+                    expected_stack: FlightStack::ArduPilot,
+                    reconnect_delay: Duration::from_millis(1),
+                },
+                worker_connection.as_ref(),
+                &events,
+                &mut commands,
+            );
+        });
+        loop {
+            if matches!(
+                tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                    .unwrap(),
+                Some(MavlinkTelemetryEvent::SystemLocked(42))
+            ) {
+                break;
+            }
+        }
+        // Intentionally stop draining events. A telemetry consumer cannot hold
+        // up ACK handling or retry deadlines even while input remains readable.
+        let command = MavlinkCommandSender { sender };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            command.return_to_launch(42, Duration::from_millis(50), 1),
+        )
+        .await
+        .unwrap();
+        drop(receiver);
+        worker.await.unwrap();
+        assert!(connection.frames.load(Ordering::Relaxed) > 3);
+        (outcome, connection.sends.load(Ordering::Relaxed))
+    }
+
+    #[tokio::test]
+    async fn undrained_telemetry_does_not_block_acknowledgements() {
+        let (outcome, sends) = command_under_telemetry_pressure(true).await;
+        assert_eq!(outcome, MavlinkCommandOutcome::Accepted);
+        assert_eq!(sends, 1);
+    }
+
+    #[tokio::test]
+    async fn retry_deadlines_advance_during_continuous_telemetry() {
+        let (outcome, sends) = command_under_telemetry_pressure(false).await;
+        assert_eq!(outcome, MavlinkCommandOutcome::TimedOut);
+        assert_eq!(sends, 2, "retry must occur while reads keep succeeding");
+    }
+
+    #[tokio::test]
+    async fn latest_events_coalesce_without_losing_the_system_lock() {
+        let (sender, mut receiver) = event_channel();
+        assert!(send_event(&sender, MavlinkTelemetryEvent::Connected));
+        assert!(send_event(&sender, MavlinkTelemetryEvent::SystemLocked(42)));
+        let mut accumulator =
+            MavlinkTelemetryAccumulator::new("test", FlightStack::ArduPilot).unwrap();
+        accumulator
+            .ingest(
+                header(42),
+                &heartbeat(MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA),
+                0,
+            )
+            .unwrap();
+        accumulator.ingest(header(42), &attitude(), 0).unwrap();
+        for at in 1..=100 {
+            if let Some(telemetry) = accumulator.ingest(header(42), &position(), at).unwrap() {
+                assert!(send_event(
+                    &sender,
+                    MavlinkTelemetryEvent::Telemetry(telemetry)
+                ));
+            }
+        }
+        assert_eq!(
+            receiver.recv().await,
+            Some(MavlinkTelemetryEvent::Connected)
+        );
+        assert_eq!(
+            receiver.recv().await,
+            Some(MavlinkTelemetryEvent::SystemLocked(42))
+        );
+        let Some(MavlinkTelemetryEvent::Telemetry(telemetry)) = receiver.recv().await else {
+            panic!("latest telemetry")
+        };
+        assert_eq!(telemetry.timestamp_ms, 100);
+        drop(sender);
+        assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn expired_queued_commands_are_never_transmitted() {
+        use std::sync::atomic::Ordering;
+        let (events, receiver) = event_channel();
+        let (sender, mut commands) = mpsc::channel(1);
+        let (respond_to, response) = oneshot::channel();
+        sender
+            .send(MavlinkCommandRequest {
+                target_system_id: 42,
+                ack_timeout: Duration::from_millis(10),
+                retries: 1,
+                expires_at: std::time::Instant::now() - Duration::from_millis(1),
+                respond_to,
+            })
+            .await
+            .unwrap();
+        let connection = std::sync::Arc::new(FloodConnection {
+            frames: std::sync::atomic::AtomicUsize::new(0),
+            sends: std::sync::atomic::AtomicUsize::new(0),
+            acknowledge: false,
+        });
+        let worker_connection = connection.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            receive_connection(
+                &MavlinkSourceConfig {
+                    address: String::new(),
+                    source: NodeId::from("expired"),
+                    expected_stack: FlightStack::ArduPilot,
+                    reconnect_delay: Duration::from_millis(1),
+                },
+                worker_connection.as_ref(),
+                &events,
+                &mut commands,
+            )
+        });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), response)
+                .await
+                .unwrap()
+                .unwrap(),
+            MavlinkCommandOutcome::TimedOut
+        );
+        drop(receiver);
+        worker.await.unwrap();
+        assert_eq!(connection.sends.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn command_budget_bounds_time_waiting_for_a_worker() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let commands = MavlinkCommandSender { sender };
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(200),
+            commands.return_to_launch(42, Duration::from_millis(10), 0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, MavlinkCommandOutcome::TimedOut);
     }
 
     fn position() -> MavMessage {

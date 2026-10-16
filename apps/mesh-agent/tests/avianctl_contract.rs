@@ -29,6 +29,9 @@ fn exchange(args: &[&str], response: ControlResponse) -> (Output, ControlRequest
                 Err(error) => panic!("fixture accept: {error}"),
             }
         };
+        // macOS can inherit the listener's nonblocking flag on accept.
+        // The fixture uses blocking I/O with explicit deadlines below.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

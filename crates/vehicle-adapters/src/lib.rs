@@ -4,7 +4,8 @@ mod mavlink_adapter;
 
 pub use mavlink_adapter::{
     spawn_mavlink_runtime, spawn_mavlink_source, MavlinkCommandOutcome, MavlinkCommandSender,
-    MavlinkRuntime, MavlinkSourceConfig, MavlinkTelemetryAccumulator, MavlinkTelemetryEvent,
+    MavlinkEventReceiver, MavlinkRuntime, MavlinkSourceConfig, MavlinkTelemetryAccumulator,
+    MavlinkTelemetryEvent,
 };
 
 use async_trait::async_trait;
