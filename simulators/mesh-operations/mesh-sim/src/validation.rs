@@ -7,6 +7,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, VecDeque};
 
+use mesh_core::{NodeId, TopologyError, TopologyPlanner};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -133,7 +134,9 @@ pub fn run_validation_matrix(seed: u64) -> ValidationReport {
 
 pub fn run_validation_scenario(config: ValidationConfig) -> ScenarioValidation {
     let nodes = config.aircraft + 1;
-    let links = build_topology(nodes, config.direct_peer_limit, config.seed);
+    let topology = build_topology(nodes, config.direct_peer_limit, config.seed);
+    let topology_valid = topology.is_ok();
+    let links = topology.unwrap_or_default();
     let mut adjacency = vec![Vec::new(); nodes];
     for (index, link) in links.iter().enumerate() {
         adjacency[link.left].push((link.right, index));
@@ -225,7 +228,8 @@ pub fn run_validation_scenario(config: ValidationConfig) -> ScenarioValidation {
         recovery_ms,
         recovered_connected,
     };
-    let passed = self_links == 0
+    let passed = topology_valid
+        && self_links == 0
         && duplicate_links == 0
         && max_degree <= config.direct_peer_limit
         && surviving_connected
@@ -242,31 +246,39 @@ pub fn run_validation_scenario(config: ValidationConfig) -> ScenarioValidation {
     }
 }
 
-fn build_topology(nodes: usize, peer_limit: usize, seed: u64) -> Vec<LinkCondition> {
-    if nodes < 2 || peer_limit == 0 {
-        return Vec::new();
+// Apply synthetic transport conditions to the same overlay algorithm used by
+// companions. The ground station is included in the enrolled membership here.
+fn build_topology(
+    nodes: usize,
+    peer_limit: usize,
+    seed: u64,
+) -> Result<Vec<LinkCondition>, TopologyError> {
+    let members = (0..nodes)
+        .map(|index| NodeId::from(format!("node-{index:04}")))
+        .collect::<Vec<_>>();
+    let plan = TopologyPlanner {
+        max_neighbors: peer_limit,
     }
-    let mut pairs = BTreeSet::new();
-    let radius = (peer_limit / 2).max(1);
-    for left in 0..nodes {
-        for offset in 1..=radius {
-            let right = (left + offset) % nodes;
-            if left != right {
-                pairs.insert((left.min(right), left.max(right)));
+    .plan(&members)?;
+    let mut rng = DeterministicRng::new(seed ^ 0xa5a5_5a5a_d3c1_b7e9);
+    let mut links = Vec::new();
+    for (left, node) in members.iter().enumerate() {
+        for (right, peer) in members.iter().enumerate().skip(left + 1) {
+            if plan
+                .neighbors(node)
+                .is_some_and(|peers| peers.contains(peer))
+            {
+                links.push(LinkCondition {
+                    left,
+                    right,
+                    latency_ms: 8 + rng.bounded(23),
+                    jitter_ms: rng.bounded(8),
+                    loss_basis_points: rng.bounded(26) as u16,
+                });
             }
         }
     }
-    let mut rng = DeterministicRng::new(seed ^ 0xa5a5_5a5a_d3c1_b7e9);
-    pairs
-        .into_iter()
-        .map(|(left, right)| LinkCondition {
-            left,
-            right,
-            latency_ms: 8 + rng.bounded(23),
-            jitter_ms: rng.bounded(8),
-            loss_basis_points: (rng.bounded(26)) as u16,
-        })
-        .collect()
+    Ok(links)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -425,6 +437,29 @@ mod tests {
             .scenarios
             .iter()
             .all(|scenario| scenario.metrics.partitioned_nodes >= 1));
+    }
+
+    #[test]
+    fn validation_uses_the_production_overlay_edges() {
+        let members = (0..201)
+            .map(|index| NodeId::from(format!("node-{index:04}")))
+            .collect::<Vec<_>>();
+        let plan = TopologyPlanner::default().plan(&members).unwrap();
+        let links = build_topology(members.len(), 8, 42).unwrap();
+        assert_eq!(links.len(), plan.edge_count());
+        for link in links {
+            assert!(plan
+                .neighbors(&members[link.left])
+                .unwrap()
+                .contains(&members[link.right]));
+        }
+    }
+
+    #[test]
+    fn unsupported_topology_configuration_cannot_pass_validation() {
+        let mut config = ValidationConfig::standard(25, 42);
+        config.direct_peer_limit = 3;
+        assert!(!run_validation_scenario(config).passed);
     }
 
     #[test]

@@ -24,9 +24,18 @@ Run the deterministic validation matrix and API contract tests with:
 ```
 
 The report covers logical per-hop delivery for 5-200 aircraft, topology
-invariants, synthetic loss, partition recovery, and reproducibility. It is not
+invariants, synthetic loss, partition recovery, and reproducibility. Its
+overlay uses the production `mesh-core::TopologyPlanner`, with the ground
+station included in the enrolled membership; delay and loss remain synthetic. It is not
 RF, hardware, or flight-validation evidence. See
 [`docs/simulator-validation.md`](../docs/simulator-validation.md).
+
+Bounded transport validation runs real mesh nodes with independent persistent
+stores over loopback in one process:
+
+```sh
+cargo run -p mesh-sim -- --validate-mesh
+```
 
 ## RF Planning Suite
 
