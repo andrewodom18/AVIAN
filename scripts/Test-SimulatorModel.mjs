@@ -1,4 +1,4 @@
-// Tests the exact dependency-free-of-PEAT model source in an external Cargo package.
+// Tests the exact model and current mesh-core planner in an external Cargo package.
 // This is partial unit evidence and never replaces the workspace's locked gates.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -33,6 +33,10 @@ try {
   manifest.node = process.version;
   manifest.platform = { os: process.platform, arch: process.arch, release: os.release() };
   manifest.runner_sha256 = hash(readFileSync(fileURLToPath(import.meta.url)));
+  manifest.topology_source_hashes = Object.fromEntries(
+    ["Cargo.toml", "src/lib.rs", "src/node.rs", "src/topology.rs"].map((name) =>
+      [name, hash(readFileSync(path.join(root, "crates/mesh-core", name)))])
+  );
   for (const name of ["validation.rs", "transport.rs"]) {
     manifest.source_hashes[name] = hash(readFileSync(path.join(root, "simulators/mesh-operations/mesh-sim/src", name)));
   }
@@ -44,7 +48,7 @@ try {
     return match[1];
   };
   const source = path.join(root, "simulators/mesh-operations/mesh-sim/src/validation.rs");
-  writeFileSync(path.join(scratch, "Cargo.toml"), `[package]\nname = "avian-model-unit-check"\nversion = "0.0.0"\nedition = "2021"\n[lib]\npath = ${JSON.stringify(source)}\n[dependencies]\nserde = { version = "${version("serde")}", features = ["derive"] }\nserde_json = "${version("serde_json")}"\nsha2 = "${version("sha2")}"\n`);
+  writeFileSync(path.join(scratch, "Cargo.toml"), `[package]\nname = "avian-model-unit-check"\nversion = "0.0.0"\nedition = "2021"\n[lib]\npath = ${JSON.stringify(source)}\n[dependencies]\nmesh-core = { path = ${JSON.stringify(path.join(root, "crates/mesh-core"))} }\nserde = { version = "${version("serde")}", features = ["derive"] }\nserde_json = "${version("serde_json")}"\nsha2 = "${version("sha2")}"\n`);
   mkdirSync(path.join(scratch, "src"));
   writeFileSync(path.join(scratch, "src/main.rs"), 'fn main() { let seed = std::env::args().nth(1).unwrap().parse().unwrap(); println!("{}", serde_json::to_string(&avian_model_unit_check::run_validation_matrix(seed)).unwrap()); }\n');
   run("unit-tests", "cargo", ["test", "--offline"], scratch);

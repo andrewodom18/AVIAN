@@ -56,6 +56,10 @@ try {
   manifest.dirty = spawnSync('git', ['-C', root, 'status', '--porcelain'], { encoding: 'utf8' }).stdout;
   manifest.platform = { os: process.platform, arch: process.arch };
   manifest.runner_sha256 = hash(readFileSync(fileURLToPath(import.meta.url)));
+  manifest.topology_source_hashes = Object.fromEntries(
+    ['Cargo.toml', 'src/lib.rs', 'src/node.rs', 'src/topology.rs'].map((name) =>
+      [name, hash(readFileSync(path.join(root, 'crates/mesh-core', name)))])
+  );
   const version = command('rust-toolchain', ['--version']);
   if (version.status !== 0) throw new Error('Pinned toolchain unavailable');
   manifest.cargo = version.log.trim();
@@ -65,7 +69,9 @@ try {
     const bytes = readFileSync(path.join(root, 'simulators/mesh-operations/mesh-sim/src', name));
     manifest.source_hashes[name] = hash(bytes);
     writeFileSync(path.join(scratch, name), bytes);
-    if (name === 'transport.rs') original = bytes.toString('utf8');
+    // Windows worktrees may contain CRLF; match mutation snippets against the
+    // same logical source text without changing the checked-in file or its hash.
+    if (name === 'transport.rs') original = bytes.toString('utf8').replace(/\r\n/g, '\n');
   }
   const workspace = readFileSync(path.join(root, 'Cargo.toml'), 'utf8');
   const constraint = (name) => {
@@ -73,7 +79,7 @@ try {
     if (!match) throw new Error(`Missing dependency constraint: ${name}`);
     return match[1];
   };
-  const cargo = `[package]\nname = "avian-selected-mutations"\nversion = "0.0.0"\nedition = "2021"\n[lib]\npath = "validation.rs"\n[dependencies]\nserde = { version = "${constraint('serde')}", features = ["derive"] }\nserde_json = "${constraint('serde_json')}"\nsha2 = "${constraint('sha2')}"\n`;
+  const cargo = `[package]\nname = "avian-selected-mutations"\nversion = "0.0.0"\nedition = "2021"\n[lib]\npath = "validation.rs"\n[dependencies]\nmesh-core = { path = ${JSON.stringify(path.join(root, "crates/mesh-core"))} }\nserde = { version = "${constraint('serde')}", features = ["derive"] }\nserde_json = "${constraint('serde_json')}"\nsha2 = "${constraint('sha2')}"\n`;
   writeFileSync(path.join(scratch, 'Cargo.toml'), cargo); save('isolated-Cargo.toml', cargo);
   const baseline = command('baseline', ['test', '--offline', '--lib']);
   if (baseline.status !== 0) throw new Error('Unmodified baseline failed');
@@ -104,6 +110,9 @@ try {
   }
   for (const [name, expected] of Object.entries(manifest.source_hashes)) {
     if (hash(readFileSync(path.join(root, 'simulators/mesh-operations/mesh-sim/src', name))) !== expected) throw new Error('Source changed during mutation run');
+  }
+  for (const [name, expected] of Object.entries(manifest.topology_source_hashes)) {
+    if (hash(readFileSync(path.join(root, 'crates/mesh-core', name))) !== expected) throw new Error('Topology source changed during mutation run');
   }
   manifest.verdict = manifest.results.every((r) => r.disposition === 'caught') ? 'PASS' : 'FAIL';
 } catch (error) { manifest.error = error.message; }

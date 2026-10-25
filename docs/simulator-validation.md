@@ -64,7 +64,7 @@ three initial messages per aircraft plus an update during the outage and repair
 after restoration. Link-cut behavior has a separate focused fixture. No model
 command counter sends an aircraft command.
 
-### Isolated checks when PEAT is unavailable
+### Isolated model checks
 
 `just sim-model-isolated` tests the exact model source in a temporary external
 Cargo package with the same direct dependency version constraints. It resolves
@@ -72,10 +72,11 @@ an independent offline lockfile and saves it with source hashes, logs and strict
 reports for seeds 20260825, 20260929 and 43. Set `AVIAN_VALIDATION_OUTPUT` to an
 external directory; the default is `~/Downloads/AVIAN-validation`.
 
-This is partial model evidence, **not** a locked workspace build or real PEAT
-validation. The repository's Cargo.lock and PEAT pin remain unchanged.
-`just verify` still requires the locked workspace and PEAT gates. The full
-cross-repository workflow and separate-process PEAT lifecycle remain pending;
+This is partial model evidence, **not** a locked workspace build or real mesh
+validation. The model uses the current `mesh-core` production topology planner;
+the repository's Cargo.lock remains unchanged.
+`just verify` still requires the locked workspace and mesh gates. The full
+cross-repository workflow and separate-process mesh lifecycle remain pending;
 neither can be inferred from the fast/isolated checks.
 
 ## CHUD contract emulator

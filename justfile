@@ -26,14 +26,14 @@ docker-build:
 sim-deps:
     npm ci --prefix simulators/mesh-operations --ignore-scripts --no-audit --no-fund
 
-# Node-only emulator/schema gates; no PEAT acceptance claim.
+# Node-only emulator/schema gates; no live mesh acceptance claim.
 sim-fast: sim-deps
     npm run --prefix simulators/mesh-operations test:fast
 
 sim-contract: sim-fast
     node --test --test-concurrency=1 "simulators/mesh-operations/validation-contract.test.mjs" "simulators/mesh-operations/visualizer/visualizer.test.mjs"
 
-# Partial, external-package unit evidence while PEAT resolution is blocked.
+# Partial external-package model evidence, not locked workspace qualification.
 sim-model-isolated: sim-deps
     node scripts/Test-SimulatorModel.mjs
 

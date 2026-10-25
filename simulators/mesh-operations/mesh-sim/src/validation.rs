@@ -160,13 +160,18 @@ pub fn run_validation_scenario(config: ValidationConfig) -> ScenarioValidation {
     let members = (0..nodes)
         .map(|index| NodeId::from(format!("node-{index:04}")))
         .collect::<Vec<_>>();
-    let plan = TopologyPlanner { max_neighbors: config.direct_peer_limit }
-        .plan(&members)
-        .expect("validated topology configuration");
+    let plan = TopologyPlanner {
+        max_neighbors: config.direct_peer_limit,
+    }
+    .plan(&members)
+    .expect("validated topology configuration");
     let mut pairs = BTreeSet::new();
     for (left, node) in members.iter().enumerate() {
         for (right, peer) in members.iter().enumerate().skip(left + 1) {
-            if plan.neighbors(node).is_some_and(|peers| peers.contains(peer)) {
+            if plan
+                .neighbors(node)
+                .is_some_and(|peers| peers.contains(peer))
+            {
                 pairs.insert((left, right));
             }
         }
@@ -395,7 +400,10 @@ mod tests {
         let scenario = run_validation_scenario(ValidationConfig::standard(200, 42));
         assert_eq!(scenario.links.len(), plan.edge_count());
         for link in scenario.links {
-            assert!(plan.neighbors(&members[link.left]).unwrap().contains(&members[link.right]));
+            assert!(plan
+                .neighbors(&members[link.left])
+                .unwrap()
+                .contains(&members[link.right]));
         }
     }
 
