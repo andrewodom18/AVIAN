@@ -86,6 +86,8 @@ test("covers ARC-relevant state and transaction faults", async (t) => {
     body: JSON.stringify({ mac, desired: { network_id: { value: "MISSING-ID" } } }),
   }).then((response) => response.json());
   assert.equal(apply.operation_id, "");
+  // A lost operation ID does not permit a second blind apply on the device.
+  app.emulator.advance(31_000);
 
   await control("operation_expired");
   apply = await fetch(`${app.base}/api/radio/apply`, {
