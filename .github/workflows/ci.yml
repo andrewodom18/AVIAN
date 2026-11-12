@@ -43,7 +43,7 @@ jobs:
           fi
 
       - name: Reject unapproved dependency advisories
-        run: cargo audit
+        run: cargo audit --deny unsound
 
   rust-quality:
     name: Rust quality and tests
