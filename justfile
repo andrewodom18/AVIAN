@@ -52,7 +52,7 @@ docker-smoke: docker-build
     docker run --rm avian-arc-radio-plugin:ci --help
 
 audit:
-    cargo audit
+    cargo audit --deny unsound
 
 feature-check:
     cargo test --workspace --all-features --locked
@@ -68,10 +68,15 @@ coverage:
 # Require a passing baseline so dependency failures cannot appear as a green
 # run containing only unbuildable mutants.
 mutate-radio:
-    cargo mutants --package mesh-core --file crates/mesh-core/src/vendor_radio.rs --re 'RadioVendorId::as_str|validate_token'
+    node -e "require('node:fs').mkdirSync('target/ci-radio-mutations', { recursive: true })"
+    cargo mutants --package mesh-core --file crates/mesh-core/src/vendor_radio.rs --re 'RadioVendorId::as_str|validate_token' --baseline run --output target/ci-radio-mutations -- --locked
+    node scripts/ci/check-radio-mutations.mjs target/ci-radio-mutations/mutants.out
 
 powershell-quality:
     pwsh -NoLogo -NoProfile -File scripts/ci/Test-PowerShell.ps1
 
+ci-contracts:
+    node --test scripts/ci/*.test.mjs
+
 # `cargo test --workspace` already runs the workspace documentation tests.
-verify: fmt-check clippy test build sim-contract sim-validation mesh-validation
+verify: ci-contracts fmt-check clippy test build sim-contract sim-validation mesh-validation

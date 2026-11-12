@@ -2,10 +2,15 @@
 ignore = [
     # zenoh-transport 1.9 requires lz4_flex 0.10, but AVIAN disables the
     # transport_compression feature and never invokes its decompressor.
+    # Review owner: joeutz31 (#41). Reevaluate before enabling compression,
+    # changing Zenoh features/version, or introducing another lz4 consumer.
     "RUSTSEC-2026-0041",
 
     # quick-xml 0.39 is used only by mavlink-bindgen at build time to parse the
     # crate's fixed dialect definitions; AVIAN does not pass runtime XML to it.
+    # Review owner: joeutz31 (#41). Reevaluate on bindgen/dialect-source changes
+    # or before accepting externally supplied XML. Maintainer review remains
+    # part of delivery; these are existing exceptions, not new advisory ignores.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
 ]

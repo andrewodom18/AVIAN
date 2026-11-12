@@ -138,6 +138,16 @@ restricted file and pass its path with the option; do not put the password on
 the command line. The probe keeps the password and converted in-memory PEM in
 zeroizing buffers and emits only a generic identity error.
 
+Identity regression tests generate their certificate and private-key material
+in memory. They cover valid PEM, modern and legacy blank-password PKCS#12,
+wrong passwords, empty/truncated/malformed input, certificate-only stores,
+key-only stores, and incomplete PEM pairs. Rejected identities expose the same
+generic error through both display and debug formatting. Run them with
+`cargo test --locked -p trellisware-control`; workspace dependency resolution
+must succeed even for this focused package command. An isolated crate run is
+partial evidence and does not satisfy Windows or Linux plugin-container
+qualification, or prove authentication against radio firmware.
+
 Local parser validation confirms that the issued `oemcert-compat.p12` artifact
 loads with a blank password. The similarly named `oemcert.p12` artifact did not
 pass PKCS#12 MAC-integrity validation in the pure-Rust diagnostic path. This is
