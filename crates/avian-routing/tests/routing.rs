@@ -1,0 +1,432 @@
+use avian_routing::*;
+
+fn node(node_id: &str) -> NetworkNode {
+    NetworkNode {
+        node_id: node_id.into(),
+        relay_allowed: true,
+    }
+}
+
+fn link(
+    link_id: &str,
+    source: &str,
+    destination: &str,
+    latency_ms: f64,
+    capacity_bps: u64,
+) -> LinkObservation {
+    LinkObservation {
+        link_id: link_id.into(),
+        source: source.into(),
+        destination: destination.into(),
+        interface_name: "radio0".into(),
+        available: true,
+        metered: false,
+        observed_at_ms: 10_000,
+        round_trip_time_ms: Some(latency_ms),
+        loss_fraction: Some(0.0),
+        jitter_ms: None,
+        available_capacity_bps: Some(capacity_bps),
+    }
+}
+
+fn diamond() -> NetworkSnapshot {
+    NetworkSnapshot {
+        nodes: ["ground", "fast", "wide", "drone"].map(node).into(),
+        links: vec![
+            link("ground-fast", "ground", "fast", 3.0, 1_000_000),
+            link("fast-drone", "fast", "drone", 3.0, 1_000_000),
+            link("ground-wide", "ground", "wide", 20.0, 20_000_000),
+            link("wide-drone", "wide", "drone", 20.0, 20_000_000),
+        ],
+    }
+}
+
+#[test]
+fn control_and_video_choose_different_paths_without_fabricating_jitter() {
+    let planner = RoutePlanner::default();
+    let snapshot = diamond();
+    let control = planner
+        .plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000)
+        .unwrap();
+    let video = planner
+        .plan(&snapshot, "ground", "drone", TrafficClass::Video, 10_000)
+        .unwrap();
+    assert_eq!(control.link_ids, ["ground-fast", "fast-drone"]);
+    assert_eq!(video.link_ids, ["ground-wide", "wide-drone"]);
+    assert_eq!(video.bottleneck_capacity_bps, Some(20_000_000));
+    assert_eq!(control.estimated_jitter_ms, None);
+}
+
+#[test]
+fn direct_cellular_cannot_bypass_video_or_bulk_restrictions() {
+    let mut snapshot = diamond();
+    let mut cellular = link("cellular", "ground", "drone", 1.0, 500_000_000);
+    cellular.metered = true;
+    cellular.interface_name = "wwan0".into();
+    snapshot.links.push(cellular);
+    let planner = RoutePlanner::default();
+    assert_eq!(
+        planner
+            .plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000)
+            .unwrap()
+            .link_ids,
+        ["cellular"]
+    );
+    for traffic_class in [TrafficClass::Video, TrafficClass::Bulk] {
+        assert!(
+            !planner
+                .plan(&snapshot, "ground", "drone", traffic_class, 10_000)
+                .unwrap()
+                .uses_metered_link
+        );
+    }
+    snapshot.links.retain(|edge| edge.metered);
+    assert!(matches!(
+        planner.plan(&snapshot, "ground", "drone", TrafficClass::Video, 10_000),
+        Err(RoutingError::NoRoute { .. })
+    ));
+    let enabled = RoutePlanner::new(RoutingPolicy {
+        allow_metered_video: true,
+        ..Default::default()
+    });
+    assert!(
+        enabled
+            .plan(&snapshot, "ground", "drone", TrafficClass::Video, 10_000)
+            .unwrap()
+            .uses_metered_link
+    );
+    assert!(
+        enabled
+            .plan(&snapshot, "ground", "drone", TrafficClass::Bulk, 10_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn reverse_direction_enforces_the_same_metered_policy() {
+    let mut snapshot = diamond();
+    snapshot.links = snapshot
+        .links
+        .iter()
+        .map(|edge| {
+            let mut reverse = edge.clone();
+            std::mem::swap(&mut reverse.source, &mut reverse.destination);
+            reverse
+        })
+        .collect();
+    snapshot.links[1].metered = true;
+    let route = RoutePlanner::default()
+        .plan(&snapshot, "drone", "ground", TrafficClass::Video, 10_000)
+        .unwrap();
+    assert_eq!(route.link_ids, ["wide-drone", "ground-wide"]);
+}
+
+#[test]
+fn parallel_physical_connections_are_selected_independently() {
+    let mut cellular = link("cellular", "ground", "drone", 2.0, 1_000_000);
+    cellular.metered = true;
+    cellular.interface_name = "wwan0".into();
+    let snapshot = NetworkSnapshot {
+        nodes: vec![node("ground"), node("drone")],
+        links: vec![cellular, link("radio", "ground", "drone", 8.0, 10_000_000)],
+    };
+    let planner = RoutePlanner::default();
+    assert_eq!(
+        planner
+            .plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000)
+            .unwrap()
+            .link_ids,
+        ["cellular"]
+    );
+    assert_eq!(
+        planner
+            .plan(&snapshot, "ground", "drone", TrafficClass::Video, 10_000)
+            .unwrap()
+            .link_ids,
+        ["radio"]
+    );
+}
+
+#[test]
+fn downstream_bottleneck_does_not_hide_a_more_reliable_prefix() {
+    let mut unreliable = link("wide-lossy", "source", "middle", 1.0, 100);
+    unreliable.loss_fraction = Some(0.1);
+    let snapshot = NetworkSnapshot {
+        nodes: vec![node("source"), node("middle"), node("destination")],
+        links: vec![
+            unreliable,
+            link("narrow-reliable", "source", "middle", 10.0, 50),
+            link("bottleneck", "middle", "destination", 1.0, 10),
+        ],
+    };
+    let route = RoutePlanner::default()
+        .plan(
+            &snapshot,
+            "source",
+            "destination",
+            TrafficClass::Video,
+            10_000,
+        )
+        .unwrap();
+    assert_eq!(route.link_ids, ["narrow-reliable", "bottleneck"]);
+    assert_eq!(route.estimated_loss_fraction, 0.0);
+}
+
+#[test]
+fn missing_stale_future_and_total_loss_observations_do_not_create_paths() {
+    let planner = RoutePlanner::default();
+    let baseline = NetworkSnapshot {
+        nodes: vec![node("source"), node("destination")],
+        links: vec![link("radio", "source", "destination", 5.0, 100)],
+    };
+    for mode in [
+        "stale",
+        "future",
+        "missing_latency",
+        "missing_loss",
+        "total_loss",
+        "unavailable",
+    ] {
+        let mut snapshot = baseline.clone();
+        match mode {
+            "stale" => snapshot.links[0].observed_at_ms = 0,
+            "future" => snapshot.links[0].observed_at_ms = 20_000,
+            "missing_latency" => snapshot.links[0].round_trip_time_ms = None,
+            "missing_loss" => snapshot.links[0].loss_fraction = None,
+            "total_loss" => snapshot.links[0].loss_fraction = Some(1.0),
+            "unavailable" => snapshot.links[0].available = false,
+            _ => unreachable!(),
+        }
+        assert!(
+            matches!(
+                planner.plan(
+                    &snapshot,
+                    "source",
+                    "destination",
+                    TrafficClass::Control,
+                    10_000
+                ),
+                Err(RoutingError::NoRoute { .. })
+            ),
+            "{mode}"
+        );
+    }
+    let mut unknown_capacity = baseline;
+    unknown_capacity.links[0].available_capacity_bps = None;
+    assert!(
+        planner
+            .plan(
+                &unknown_capacity,
+                "source",
+                "destination",
+                TrafficClass::Video,
+                10_000
+            )
+            .is_err()
+    );
+    assert_eq!(
+        planner
+            .plan(
+                &unknown_capacity,
+                "source",
+                "destination",
+                TrafficClass::Control,
+                10_000
+            )
+            .unwrap()
+            .bottleneck_capacity_bps,
+        None
+    );
+}
+
+#[test]
+fn relay_permissions_do_not_prevent_endpoint_access() {
+    let mut snapshot = diamond();
+    snapshot
+        .nodes
+        .iter_mut()
+        .filter(|node| node.node_id == "fast" || node.node_id == "drone")
+        .for_each(|node| node.relay_allowed = false);
+    let planner = RoutePlanner::default();
+    assert_eq!(
+        planner
+            .plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000)
+            .unwrap()
+            .node_ids,
+        ["ground", "wide", "drone"]
+    );
+    assert!(
+        planner
+            .plan(&snapshot, "ground", "fast", TrafficClass::Control, 10_000)
+            .is_ok()
+    );
+}
+
+#[test]
+fn cycles_and_input_order_do_not_change_deterministic_routes() {
+    let mut snapshot = diamond();
+    snapshot
+        .links
+        .push(link("cycle", "fast", "ground", 0.0, 20_000_000));
+    let planner = RoutePlanner::default();
+    let expected = planner
+        .plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000)
+        .unwrap();
+    snapshot.nodes.reverse();
+    snapshot.links.reverse();
+    assert_eq!(
+        planner
+            .plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(expected.node_ids.len(), 3);
+}
+
+#[test]
+fn invalid_values_and_duplicate_identifiers_are_rejected() {
+    for value in [f64::NAN, f64::INFINITY, -1.0] {
+        let mut snapshot = diamond();
+        snapshot.links[0].round_trip_time_ms = Some(value);
+        assert!(matches!(
+            RoutePlanner::default().plan(
+                &snapshot,
+                "ground",
+                "drone",
+                TrafficClass::Control,
+                10_000
+            ),
+            Err(RoutingError::InvalidSnapshot(_))
+        ));
+    }
+    let mut snapshot = diamond();
+    snapshot.links.push(snapshot.links[0].clone());
+    assert!(matches!(
+        RoutePlanner::default().plan(&snapshot, "ground", "drone", TrafficClass::Control, 10_000),
+        Err(RoutingError::InvalidSnapshot(_))
+    ));
+}
+
+#[test]
+fn overflowing_latency_does_not_appear_as_a_valid_route() {
+    let snapshot = NetworkSnapshot {
+        nodes: vec![node("source"), node("middle"), node("destination")],
+        links: vec![
+            link("first", "source", "middle", f64::MAX, 100),
+            link("second", "middle", "destination", f64::MAX, 100),
+        ],
+    };
+    assert!(matches!(
+        RoutePlanner::default().plan(
+            &snapshot,
+            "source",
+            "destination",
+            TrafficClass::Control,
+            10_000
+        ),
+        Err(RoutingError::NoRoute { .. })
+    ));
+}
+
+fn flow(flow_id: &str) -> FlowRequest {
+    FlowRequest {
+        flow_id: flow_id.into(),
+        source: "ground".into(),
+        destination: "drone".into(),
+        traffic_class: TrafficClass::Control,
+    }
+}
+
+fn refresh(snapshot: &mut NetworkSnapshot, now_ms: u64) {
+    for link in &mut snapshot.links {
+        link.observed_at_ms = now_ms;
+    }
+}
+
+#[test]
+fn flow_improvements_wait_but_failed_paths_switch_immediately() {
+    let mut snapshot = diamond();
+    let mut router = FlowRouter::new(RoutePlanner::default(), FlowPolicy::default()).unwrap();
+    assert_eq!(
+        router
+            .route(&snapshot, flow("control"), 10_000)
+            .unwrap()
+            .reason,
+        RouteChangeReason::NewFlow
+    );
+    snapshot.links[0].round_trip_time_ms = Some(100.0);
+    refresh(&mut snapshot, 11_000);
+    let pending = router.route(&snapshot, flow("control"), 11_000).unwrap();
+    assert_eq!(pending.reason, RouteChangeReason::ImprovementPending);
+    assert_eq!(pending.route.link_ids, ["ground-fast", "fast-drone"]);
+    refresh(&mut snapshot, 16_000);
+    assert_eq!(
+        router
+            .route(&snapshot, flow("control"), 16_000)
+            .unwrap()
+            .reason,
+        RouteChangeReason::ImprovedPath
+    );
+    snapshot.links[2].available = false;
+    let fallback = router.route(&snapshot, flow("control"), 16_001).unwrap();
+    assert_eq!(fallback.reason, RouteChangeReason::PreviousPathUnavailable);
+    assert_eq!(fallback.route.link_ids, ["ground-fast", "fast-drone"]);
+    snapshot.links[0].available = false;
+    assert!(matches!(
+        router.route(&snapshot, flow("control"), 16_002),
+        Err(RoutingError::NoRoute { .. })
+    ));
+    assert_eq!(router.active_flow_count(), 0);
+}
+
+#[test]
+fn active_flow_budget_and_expiry_do_not_limit_network_membership() {
+    let snapshot = diamond();
+    let mut router = FlowRouter::new(
+        RoutePlanner::default(),
+        FlowPolicy {
+            maximum_active_flows: 1,
+            idle_timeout_ms: 1_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    router.route(&snapshot, flow("first"), 10_000).unwrap();
+    assert_eq!(
+        router.route(&snapshot, flow("second"), 10_001),
+        Err(RoutingError::FlowCapacityReached(1))
+    );
+    let mut changed = flow("first");
+    changed.traffic_class = TrafficClass::Telemetry;
+    assert_eq!(
+        router.route(&snapshot, changed, 10_002),
+        Err(RoutingError::FlowConflict)
+    );
+    assert_eq!(router.expire_idle_flows(11_000), 1);
+    assert!(router.route(&snapshot, flow("second"), 11_000).is_ok());
+}
+
+#[test]
+fn a_long_chain_preserves_class_and_hop_order() {
+    let labels: Vec<String> = (0..96).map(|number| format!("node-{number}")).collect();
+    let snapshot = NetworkSnapshot {
+        nodes: labels.iter().map(|label| node(label)).collect(),
+        links: labels
+            .windows(2)
+            .enumerate()
+            .map(|(number, pair)| link(&format!("edge-{number}"), &pair[0], &pair[1], 1.0, 1_000))
+            .collect(),
+    };
+    let route = RoutePlanner::default()
+        .plan(
+            &snapshot,
+            &labels[0],
+            labels.last().unwrap(),
+            TrafficClass::Video,
+            10_000,
+        )
+        .unwrap();
+    assert_eq!(route.node_ids, labels);
+    assert_eq!(route.traffic_class, TrafficClass::Video);
+    assert_eq!(route.link_ids.len(), 95);
+}

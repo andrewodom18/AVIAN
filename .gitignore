@@ -1,0 +1,9 @@
+/target/
+/.local/
+/qualification/results/
+/.cache/
+*.local.toml
+.DS_Store
+__pycache__/
+*.pyc
+/AGENTS.md
