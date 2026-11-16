@@ -20,6 +20,7 @@ use serde::Deserialize;
 use tokio::sync::{Mutex, Semaphore};
 
 #[derive(Clone, Parser)]
+#[command(version = avian::version::BUILD_VERSION)]
 #[command(about = "Exchange signed revocation records over an isolated private network")]
 struct Arguments {
     #[arg(long)]

@@ -43,12 +43,6 @@ CHUD credentials come from an owner-only file. HTTPS certificate verification is
 enabled; a configured certificate file supports private certificate authorities.
 Plain HTTP is accepted only for a loopback CHUD instance.
 
-## Engine tests
-
-See [qualification commands](qualification/README.md) for isolated EasyTier tests.
-The experimental engine is separate from the daemon and is not deployed to hardware.
-Local budgets bound work and response sizes without imposing a membership ceiling.
-
 ## Signed revocation exchange
 
 `avian-revocationd` exchanges administrator-signed updates over an explicitly
@@ -70,3 +64,32 @@ signed records; it does not expose administration or private keys. Configure
 when signed updates must cross metered links. Ordinary HTTP remains bulk traffic.
 The service renews engine leases from verified durable membership independently
 of peer availability. Unreachable peers leave the last accepted revision intact.
+
+## Engine tests
+
+See [qualification commands](qualification/README.md) for isolated EasyTier tests.
+The experimental engine is separate from the daemon and is not deployed to hardware.
+Local budgets bound work and response sizes without imposing a membership ceiling.
+
+## Releases and licensing
+
+AVIAN uses the [Rownd license](LICENSE.md) and preserves
+[third-party notices](THIRD_PARTY_NOTICES.md).
+
+The workspace version in `Cargo.toml` is shared by all AVIAN packages. Release
+tags follow ARC's prefixed semantic-version format: `avian-v0.1.0`, with optional
+prerelease identifiers such as `avian-v0.1.0-rc.1`. The first release is `avian-v0.1.0`.
+
+A push to GitLab `main` runs verification, builds with `AVIAN_RELEASE`, and creates
+an immutable tag and GitLab release for that commit. Manual pipelines are accepted
+only on `main`; other branches, tag pushes, and scheduled pipelines do not run.
+Retries reuse an existing release only when its commit matches. Change the workspace
+version on `dev` before promoting a subsequent release; tags are never moved.
+
+```sh
+AVIAN_RELEASE=avian-v0.1.0 cargo build --workspace --release --locked
+target/release/avianctl --version
+```
+
+Local builds without `AVIAN_RELEASE` report a development version with the source
+commit and dirty-state marker. The local API exposes the same identity in `/v1/status`.

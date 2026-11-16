@@ -20,6 +20,7 @@ use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 
 #[derive(Parser)]
+#[command(version = avian::version::BUILD_VERSION)]
 #[command(about = "AVIAN enrollment, inspection, and route qualification")]
 struct Arguments {
     #[arg(long, global = true)]

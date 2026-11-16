@@ -5,6 +5,7 @@ use avian::{api, configuration::Configuration, state::ApplicationState};
 use clap::Parser;
 
 #[derive(Parser)]
+#[command(version = avian::version::BUILD_VERSION)]
 #[command(about = "AVIAN local observation API. Does not change network ownership.")]
 struct Arguments {
     #[arg(long)]

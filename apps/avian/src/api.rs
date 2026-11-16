@@ -72,6 +72,10 @@ async fn status(State(state): State<Arc<ApplicationState>>) -> Json<Value> {
     let membership = state.membership.read().await;
     Json(json!({
         "api_version": 1,
+        "version": crate::version::BUILD_VERSION,
+        "release": crate::version::RELEASE_TAG,
+        "git_sha": crate::version::GIT_SHA,
+        "git_dirty": crate::version::GIT_DIRTY,
         "mode": "observation_only",
         "network_id": membership.trust_root().network_id,
         "revocation_revision": membership.revocation_revision(),

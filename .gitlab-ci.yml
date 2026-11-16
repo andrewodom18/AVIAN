@@ -1,0 +1,38 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+stages: [verify, release]
+
+default:
+  image: rust:1.95-bookworm
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates
+
+variables:
+  GIT_DEPTH: "0"
+
+verify:
+  stage: verify
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+  script:
+    - rustup component add rustfmt clippy
+    - python3 -m unittest discover -s tools -p 'test_*.py'
+    - cargo fmt --all -- --check
+    - rustc --edition 2024 --test apps/avian/build.rs -o /tmp/avian-version-tests
+    - /tmp/avian-version-tests
+    - cargo test --workspace --locked
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - export AVIAN_RELEASE="$(python3 tools/release_version.py --remote origin | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag"])')"
+    - cargo build --workspace --release --locked
+
+release:
+  stage: release
+  resource_group: avian-release
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+  script:
+    - python3 tools/publish_release.py
