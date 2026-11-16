@@ -4,6 +4,7 @@ members = ["crates/avian-membership", "crates/avian-routing", "crates/avian-engi
 
 [workspace.package]
 version = "0.1.0"
+license-file = "LICENSE.md"
 edition = "2024"
 rust-version = "1.88"
 

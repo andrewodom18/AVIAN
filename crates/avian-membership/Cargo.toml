@@ -1,7 +1,9 @@
 [package]
 name = "avian-membership"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+
+license-file.workspace = true
 
 [dependencies]
 ed25519-dalek = "2.2"
