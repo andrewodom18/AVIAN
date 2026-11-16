@@ -1,0 +1,45 @@
+{
+  "scope": "actual UDP, local per-connection enforcement; no claim of topology-wide optimization",
+  "gates": [
+    {
+      "name": "unmetered_relay_video_delivery",
+      "status": "pass"
+    },
+    {
+      "name": "metered_relay_control_delivery",
+      "status": "pass"
+    },
+    {
+      "name": "metered_relay_video_denied",
+      "status": "pass"
+    },
+    {
+      "name": "metered_relay_bulk_denied",
+      "status": "pass"
+    },
+    {
+      "name": "metered_relay_reverse_video_denied",
+      "status": "pass"
+    },
+    {
+      "name": "explicit_metered_video_allowance",
+      "status": "pass"
+    },
+    {
+      "name": "direct_metered_video_denied",
+      "status": "pass"
+    },
+    {
+      "name": "direct_metered_control_delivery",
+      "status": "pass"
+    }
+  ],
+  "qualified_for_cutover": false,
+  "engine": "2.6.4",
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "patch_sha256": "9c09bd3df85dccd6137c08a9535079c8160e5d465769216f2c6d7d08da1aa5ba",
+  "binary_sha256": {
+    "easytier-core": "393a2463c71324e423ad8c67e8db1dea6fc69645489bec2507e88f93404c3a09",
+    "easytier-cli": "e60728e943246c3a13a6ee0d62bc01802bf02d55f5c3d4770857870d9a59ddf6"
+  }
+}

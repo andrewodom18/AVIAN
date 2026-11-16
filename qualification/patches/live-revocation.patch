@@ -1,0 +1,210 @@
+diff --git a/easytier/src/peers/credential_manager.rs b/easytier/src/peers/credential_manager.rs
+index c13008c..e5d6efa 100644
+--- a/easytier/src/peers/credential_manager.rs
++++ b/easytier/src/peers/credential_manager.rs
+@@ -6,7 +6,7 @@ use std::{
+         Mutex,
+         atomic::{AtomicBool, Ordering},
+     },
+-    time::{Duration, SystemTime, UNIX_EPOCH},
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+ };
+ 
+ use base64::Engine;
+@@ -86,6 +86,7 @@ pub struct CredentialManager {
+     storage_path: Option<PathBuf>,
+     verified_membership: AtomicBool,
+     last_loaded_modified: Mutex<Option<SystemTime>>,
++    last_reload_check: Mutex<Option<Instant>>,
+ }
+ 
+ impl CredentialManager {
+@@ -95,6 +96,7 @@ impl CredentialManager {
+             storage_path,
+             verified_membership: AtomicBool::new(false),
+             last_loaded_modified: Mutex::new(None),
++            last_reload_check: Mutex::new(None),
+         };
+         mgr.load_from_disk();
+         assert!(
+@@ -314,6 +316,13 @@ impl CredentialManager {
+         if !self.uses_verified_membership() {
+             return;
+         }
++        {
++            let mut last_check = self.last_reload_check.lock().unwrap();
++            if last_check.is_some_and(|checked| checked.elapsed() < Duration::from_millis(100)) {
++                return;
++            }
++            *last_check = Some(Instant::now());
++        }
+         let Some(path) = &self.storage_path else {
+             return;
+         };
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+index a3f91be..859f8eb 100644
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -6,7 +6,7 @@ use std::{
+     pin::Pin,
+     sync::{
+         Arc,
+-        atomic::{AtomicU32, Ordering},
++        atomic::{AtomicBool, AtomicU32, Ordering},
+     },
+ };
+ 
+@@ -103,6 +103,7 @@ struct PeerSessionTunnelFilter {
+     session: Arc<std::sync::Mutex<Option<Arc<PeerSession>>>>,
+     hop_transport: Arc<std::sync::Mutex<Option<Arc<super::hop_transport::HopTransport>>>>,
+     pending_handshake_tail: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
++    admission_revoked: Arc<AtomicBool>,
+ }
+ 
+ impl PeerSessionTunnelFilter {
+@@ -114,6 +115,7 @@ impl PeerSessionTunnelFilter {
+             session: Arc::new(std::sync::Mutex::new(None)),
+             hop_transport: Arc::new(std::sync::Mutex::new(None)),
+             pending_handshake_tail: Arc::new(std::sync::Mutex::new(None)),
++            admission_revoked: Arc::new(AtomicBool::new(false)),
+         }
+     }
+ 
+@@ -125,6 +127,7 @@ impl PeerSessionTunnelFilter {
+             session: Arc::new(std::sync::Mutex::new(None)),
+             hop_transport: Arc::new(std::sync::Mutex::new(None)),
+             pending_handshake_tail: Arc::new(std::sync::Mutex::new(None)),
++            admission_revoked: Arc::new(AtomicBool::new(false)),
+         }
+     }
+ 
+@@ -264,6 +267,9 @@ impl TunnelFilter for PeerSessionTunnelFilter {
+     type FilterOutput = ();
+ 
+     fn before_send(&self, data: crate::tunnel::SinkItem) -> Option<crate::tunnel::SinkItem> {
++        if self.admission_revoked.load(Ordering::Acquire) {
++            return None;
++        }
+         // The terminal Noise message may still be in the asynchronous send queue when
+         // the handshake installs transport keys. Exempt that exact locally queued frame once.
+         {
+@@ -282,6 +288,9 @@ impl TunnelFilter for PeerSessionTunnelFilter {
+     }
+ 
+     fn after_received(&self, data: crate::tunnel::StreamItem) -> Option<crate::tunnel::StreamItem> {
++        if self.admission_revoked.load(Ordering::Acquire) {
++            return None;
++        }
+         let transport = self.hop_transport.lock().unwrap().clone();
+         let packet = match data {
+             Ok(packet) => packet,
+@@ -1457,7 +1466,41 @@ impl PeerConn {
+         self.control_metrics(network_name).record_rx(bytes);
+     }
+ 
++    fn watch_verified_membership(&mut self) {
++        if !self
++            .global_ctx
++            .get_credential_manager()
++            .uses_verified_membership()
++        {
++            return;
++        }
++        let Some(handshake) = self.noise_handshake_result.as_ref() else {
++            return;
++        };
++        let context = self.global_ctx.clone();
++        let local_key = handshake.local_static_pubkey.clone();
++        let remote_key = handshake.remote_static_pubkey.clone();
++        let session = handshake.session.clone();
++        let revoked = self.session_filter.admission_revoked.clone();
++        let close = self.close_event_notifier.clone();
++        self.tasks.spawn(async move {
++            let mut interval = tokio::time::interval(Duration::from_millis(100));
++            loop {
++                interval.tick().await;
++                let manager = context.get_credential_manager();
++                if !manager.is_pubkey_trusted(&local_key) || !manager.is_pubkey_trusted(&remote_key)
++                {
++                    revoked.store(true, Ordering::Release);
++                    session.invalidate();
++                    close.notify_close();
++                    return Ok(());
++                }
++            }
++        });
++    }
++
+     pub async fn start_recv_loop(&mut self, packet_recv_chan: PacketRecvChan) {
++        self.watch_verified_membership();
+         let mut stream = self.recv.lock().await.take().unwrap();
+         let sink = self.sink.clone();
+         let sender = packet_recv_chan.clone();
+diff --git a/easytier/src/peers/peer_manager.rs b/easytier/src/peers/peer_manager.rs
+index d5502ac..e6a5e26 100644
+--- a/easytier/src/peers/peer_manager.rs
++++ b/easytier/src/peers/peer_manager.rs
+@@ -1008,6 +1008,31 @@ impl PeerManager {
+                 let to_peer_id = hdr.to_peer_id.get();
+                 let packet_type = hdr.packet_type;
+                 let is_encrypted = hdr.is_encrypted();
++                if global_ctx
++                    .get_credential_manager()
++                    .uses_verified_membership()
++                    && packet_type == PacketType::Data as u8
++                {
++                    let mut admitted = true;
++                    for endpoint in [from_peer_id, to_peer_id] {
++                        if endpoint == my_peer_id {
++                            continue;
++                        }
++                        let trusted = match peers.get_route_peer_info(endpoint).await {
++                            Some(info) => global_ctx
++                                .get_credential_manager()
++                                .is_pubkey_trusted(&info.noise_static_pubkey),
++                            None => false,
++                        };
++                        if !trusted {
++                            admitted = false;
++                            break;
++                        }
++                    }
++                    if !admitted {
++                        continue;
++                    }
++                }
+                 if to_peer_id != my_peer_id {
+                     if disable_relay_data && is_relay_data_packet {
+                         tracing::debug!(
+diff --git a/easytier/src/peers/relay_peer_map.rs b/easytier/src/peers/relay_peer_map.rs
+index db7dd85..4d02091 100644
+--- a/easytier/src/peers/relay_peer_map.rs
++++ b/easytier/src/peers/relay_peer_map.rs
+@@ -172,6 +172,27 @@ impl RelayPeerMap {
+         policy: NextHopPolicy,
+     ) -> Result<(), Error> {
+         let now = Instant::now();
++        if self
++            .global_ctx
++            .get_credential_manager()
++            .uses_verified_membership()
++        {
++            let key = self.get_remote_static_pubkey(dst_peer_id).await?;
++            if !self
++                .global_ctx
++                .get_credential_manager()
++                .is_pubkey_trusted(&key)
++            {
++                self.pending_packets.remove(&dst_peer_id);
++                self.peer_session_store.remove(&SessionKey::new(
++                    self.global_ctx.get_network_name(),
++                    dst_peer_id,
++                ));
++                return Err(Error::RouteError(Some(
++                    "destination membership revoked or expired".into(),
++                )));
++            }
++        }
+ 
+         self.states.entry(dst_peer_id).or_default().last_active_at = now;
+ 

@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "patch_sha256": "35b98f0cbae59d69169def105d2c59c15938292fb85e2be526bf71ee24143b48",
+  "environment": "isolated Linux namespaces; authenticated transport and verified public membership; low-latency physical links",
+  "target_seconds": 2,
+  "trials": [
+    {
+      "fault": "blackhole",
+      "fast_failover": true,
+      "status": "pass",
+      "binary_sha256": "fdb4e3106b45efa16e9be4f2b0a98f74a32fa8345302bf99eaf2c2978832f0ae",
+      "route_change_seconds": 1.1638761669998985,
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 78,
+          "received_after": 274,
+          "first_delivery_after_fault_seconds": 1.4995537499999045,
+          "delivery_gap_seconds": 1.506133249999948,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 78,
+          "received_after": 254,
+          "first_delivery_after_fault_seconds": 1.0621479579999686,
+          "delivery_gap_seconds": 1.0704716669999925,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 78,
+          "received_after": 275,
+          "first_delivery_after_fault_seconds": 1.6898600419999639,
+          "delivery_gap_seconds": 1.6983963760001188,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 78,
+          "received_after": 255,
+          "first_delivery_after_fault_seconds": 1.0619225829998413,
+          "delivery_gap_seconds": 1.0673352499998146,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "fault": "blackhole",
+      "fast_failover": true,
+      "status": "pass",
+      "binary_sha256": "fdb4e3106b45efa16e9be4f2b0a98f74a32fa8345302bf99eaf2c2978832f0ae",
+      "route_change_seconds": 1.23968779300003,
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 78,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 1.5324842930001523,
+          "delivery_gap_seconds": 1.5487860430000637,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 77,
+          "received_after": 254,
+          "first_delivery_after_fault_seconds": 1.2060589180000534,
+          "delivery_gap_seconds": 1.2360428340000453,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 78,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 1.4662103760001628,
+          "delivery_gap_seconds": 1.482608417000165,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 78,
+          "received_after": 253,
+          "first_delivery_after_fault_seconds": 1.206854334000127,
+          "delivery_gap_seconds": 1.2244530420000501,
+          "passed": true
+        }
+      ]
+    },
+    {
+      "fault": "relay_stop",
+      "fast_failover": true,
+      "status": "pass",
+      "binary_sha256": "fdb4e3106b45efa16e9be4f2b0a98f74a32fa8345302bf99eaf2c2978832f0ae",
+      "route_change_seconds": 0.15995862499994473,
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 77,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.019727291999970475,
+          "delivery_gap_seconds": 0.07925599999998667,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 77,
+          "received_after": 276,
+          "first_delivery_after_fault_seconds": 0.01892787499991755,
+          "delivery_gap_seconds": 0.10318341700008204,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 77,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.02064162499982558,
+          "delivery_gap_seconds": 0.07951004200003808,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 77,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.019278291999853536,
+          "delivery_gap_seconds": 0.08033866700020553,
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "baseline": {
+    "relay_stop": "pass; delivery gaps below 0.28 seconds",
+    "blackhole": "fail; UDP gaps about 7.2 seconds and one TCP gap about 13.5 seconds"
+  },
+  "qualified_for_cutover": false,
+  "limitations": [
+    "Opt-in fast profile assumes ordinary peer RTT below the 500 ms probe deadline.",
+    "Trials do not qualify arbitrary path latency, congestion, workload, or hardware.",
+    "Traffic uses persistent TCP sockets and sequenced UDP echo in both directions; no application reconnect is performed."
+  ]
+}

@@ -21,4 +21,3 @@ The pinned engine accepts the changed hint while decrypting the original
 payload. This does **not** demonstrate altered application plaintext; it shows
 that relay-visible routing metadata cannot be trusted merely because the
 payload is encrypted.
-

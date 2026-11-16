@@ -1,0 +1,277 @@
+{
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "patches": [
+    {
+      "name": "verified-membership.patch",
+      "sha256": "c770d4c146dc188a986b271789831e1b04e73c000755ae3dcc45881c6237a077"
+    },
+    {
+      "name": "authenticated-forwarding.patch",
+      "sha256": "492fe4748a10721b7743c88e26f411cb1c967ab7110bde7e47ac72cea92092ac"
+    },
+    {
+      "name": "traffic-policy.patch",
+      "sha256": "7535cb49ad05201208c94c36c720442cf4caab434d9ca153c83e4e73a4c53ced"
+    },
+    {
+      "name": "live-revocation.patch",
+      "sha256": "9226d7de6fa969ca1f147fc6fe49acd9f5abce8b2a1ce55d8b6fc4d5e88c188f"
+    },
+    {
+      "name": "failover.patch",
+      "sha256": "35b98f0cbae59d69169def105d2c59c15938292fb85e2be526bf71ee24143b48"
+    }
+  ],
+  "binary_sha256": {
+    "easytier-core": "5b3ec7d84aabcbb71d2f2942d77eb332f536547df8509c332692f67951c8aae9",
+    "easytier-cli": "bdbc88aae67a23fe7dcd52d7e888cc80f746bc47ddda65569bb4eee88721a63f"
+  },
+  "qualified_for_cutover": false,
+  "checks": {
+    "traffic_policy": {
+      "gates": [
+        {
+          "name": "unmetered_relay_video_delivery",
+          "status": "pass"
+        },
+        {
+          "name": "metered_relay_control_delivery",
+          "status": "pass"
+        },
+        {
+          "name": "metered_relay_video_denied",
+          "status": "pass"
+        },
+        {
+          "name": "metered_relay_bulk_denied",
+          "status": "pass"
+        },
+        {
+          "name": "metered_relay_reverse_video_denied",
+          "status": "pass"
+        },
+        {
+          "name": "explicit_metered_video_allowance",
+          "status": "pass"
+        },
+        {
+          "name": "direct_metered_video_denied",
+          "status": "pass"
+        },
+        {
+          "name": "direct_metered_control_delivery",
+          "status": "pass"
+        }
+      ]
+    },
+    "revocation": {
+      "gates": [
+        {
+          "name": "removed_member",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": 1,
+          "established_tcp": true,
+          "sample_count": 45
+        },
+        {
+          "name": "relay_only_revocation",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": 1,
+          "established_tcp": true,
+          "sample_count": 44
+        },
+        {
+          "name": "source_only_revocation",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": 1,
+          "established_tcp": true,
+          "sample_count": 46
+        },
+        {
+          "name": "empty_snapshot",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": 1,
+          "established_tcp": true,
+          "sample_count": 45
+        },
+        {
+          "name": "malformed_cache",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": 1,
+          "established_tcp": true,
+          "sample_count": 70
+        },
+        {
+          "name": "lease_refresh",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": null,
+          "established_tcp": true,
+          "sample_count": 130
+        },
+        {
+          "name": "expired_lease",
+          "status": "pass",
+          "tcp_udp_stopped_within_seconds": 1,
+          "established_tcp": true,
+          "sample_count": 44
+        }
+      ]
+    },
+    "blackhole": {
+      "status": "pass",
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 78,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.0059139170000435115,
+          "delivery_gap_seconds": 1.499291292999942,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 78,
+          "received_after": 254,
+          "first_delivery_after_fault_seconds": 0.005705541999986963,
+          "delivery_gap_seconds": 1.2060109170001851,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 78,
+          "received_after": 278,
+          "first_delivery_after_fault_seconds": 0.005946209000057934,
+          "delivery_gap_seconds": 1.4999199169999429,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 78,
+          "received_after": 255,
+          "first_delivery_after_fault_seconds": 0.0023292920000130835,
+          "delivery_gap_seconds": 1.209735751000153,
+          "passed": true
+        }
+      ],
+      "route_change_seconds": 1.20319458400013
+    },
+    "relay_stop": {
+      "status": "pass",
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 78,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.07995549999986906,
+          "delivery_gap_seconds": 0.09742604199982452,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 78,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.08130800000003546,
+          "delivery_gap_seconds": 0.09656491700002334,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 78,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 0.08170245799988152,
+          "delivery_gap_seconds": 0.09863779099987369,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 78,
+          "received_after": 275,
+          "first_delivery_after_fault_seconds": 0.0777232919999733,
+          "delivery_gap_seconds": 0.09507554200013146,
+          "passed": true
+        }
+      ],
+      "route_change_seconds": 0.10113183299995399
+    }
+  },
+  "engine_regression": {
+    "status": "passed",
+    "tests": [
+      {
+        "name": "instance::virtual_nic::authenticated_forwarding_mtu_tests::avian_hop_mtu_accounts_for_envelopes_and_ipv6_minimum",
+        "status": "ok"
+      },
+      {
+        "name": "peers::traffic_policy::tests::avian_policy_classification_and_metered_restrictions",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_rejects_legacy_noise_prologue",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_rejects_tamper_without_consuming_nonce",
+        "status": "ok"
+      },
+      {
+        "name": "peers::traffic_policy::tests::avian_policy_rejects_authentication_only_peer",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::avian_hop_secure_server_rejects_legacy_handshake",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_roundtrip_replay_and_out_of_order",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_relay_preserves_inner_frame_and_reseals",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_connection_and_direction_keys_are_distinct",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_replay_window_and_message_bounds",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::avian_hop_peer_connection_rejects_wire_tampering_and_replay",
+        "status": "ok"
+      }
+    ],
+    "baseline_tests": [
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_pubkey_and_encryption",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_shared_node_pubkey_verified",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_network_secret_confirmed",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_different_network_name_ok",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_shared_node_without_pin_is_unauthenticated",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_data_roundtrip",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::peer_conn_secure_mode_server_rejects_legacy_client",
+        "status": "ok"
+      }
+    ],
+    "missing_required_tests": []
+  }
+}

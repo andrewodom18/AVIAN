@@ -1,0 +1,284 @@
+diff --git a/easytier/src/peers/mod.rs b/easytier/src/peers/mod.rs
+--- a/easytier/src/peers/mod.rs
++++ b/easytier/src/peers/mod.rs
+@@ -1,3 +1,4 @@
++mod traffic_policy;
+ mod hop_transport;
+ mod graph_algo;
+ 
+diff --git a/easytier/src/peers/peer.rs b/easytier/src/peers/peer.rs
+--- a/easytier/src/peers/peer.rs
++++ b/easytier/src/peers/peer.rs
+@@ -208,7 +208,17 @@
+     }
+ 
+     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
+-        let Some(conn) = self.select_conn().await else {
++        let mut eligible = self
++            .conns
++            .iter()
++            .filter_map(|connection| {
++                let info = connection.get_conn_info();
++                super::traffic_policy::permits_connection(&msg, info.tunnel.as_ref())
++                    .then(|| connection.value().clone())
++            })
++            .collect::<Vec<_>>();
++        eligible.sort_by_key(|connection| connection.get_stats().latency_us);
++        let Some(conn) = eligible.first() else {
+             return Err(Error::PeerNoConnectionError(self.peer_node_id));
+         };
+         conn.send_msg(msg).await?;
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -875,7 +875,7 @@
+     }
+ 
+     async fn do_noise_handshake_as_client(&self) -> Result<NoiseHandshakeResult, Error> {
+-        let prologue = b"avian-peerconn-noise-hop-v1".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-policy-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+@@ -1141,7 +1141,7 @@
+     where
+         Fn: FnMut(&mut PeerConn, &str) -> Result<(), Error> + Send,
+     {
+-        let prologue = b"avian-peerconn-noise-hop-v1".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-policy-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+diff --git a/easytier/src/peers/peer_manager.rs b/easytier/src/peers/peer_manager.rs
+--- a/easytier/src/peers/peer_manager.rs
++++ b/easytier/src/peers/peer_manager.rs
+@@ -1683,6 +1683,8 @@
+             0,
+             tunnel::packet_def::PacketType::Data as u8,
+         );
++        let traffic_class = super::traffic_policy::classify_ip_packet(msg.payload());
++        msg.mut_peer_manager_header().unwrap().set_avian_traffic_class(traffic_class);
+         if !self.run_nic_packet_process_pipeline(&mut msg).await {
+             return Ok(());
+         }
+diff --git a/easytier/src/peers/traffic_policy.rs b/easytier/src/peers/traffic_policy.rs
+new file mode 100644
+--- /dev/null
++++ b/easytier/src/peers/traffic_policy.rs
+@@ -0,0 +1,185 @@
++//! Local connection policy; the hop envelope authenticates the inner class byte.
++use crate::{
++    proto::common::TunnelInfo,
++    tunnel::packet_def::{PacketType, ZCPacket},
++};
++use std::{collections::BTreeSet, net::IpAddr, sync::OnceLock};
++
++pub(crate) const CONTROL: u8 = 1;
++pub(crate) const TELEMETRY: u8 = 2;
++pub(crate) const VIDEO: u8 = 3;
++pub(crate) const BULK: u8 = 4;
++
++#[derive(Default, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++struct LocalPolicy {
++    #[serde(default)]
++    metered_addresses: BTreeSet<IpAddr>,
++    #[serde(default)]
++    allow_metered_video: bool,
++    #[serde(default)]
++    allow_metered_bulk: bool,
++}
++
++fn policy() -> &'static Result<LocalPolicy, String> {
++    static POLICY: OnceLock<Result<LocalPolicy, String>> = OnceLock::new();
++    POLICY.get_or_init(|| match std::env::var("AVIAN_TRAFFIC_POLICY") {
++        Ok(encoded) => serde_json::from_str(&encoded).map_err(|error| error.to_string()),
++        Err(std::env::VarError::NotPresent) => Ok(LocalPolicy::default()),
++        Err(_) => Err("invalid traffic policy encoding".into()),
++    })
++}
++
++/// Classify only locally originated plaintext. Fragmented/unknown traffic is bulk.
++pub(crate) fn classify_ip_packet(packet: &[u8]) -> u8 {
++    let Some(first) = packet.first() else {
++        return BULK;
++    };
++    let (traffic_bits, protocol, offset) = match first >> 4 {
++        4 if packet.len() >= 20 => {
++            let header_length = usize::from(first & 15) * 4;
++            if header_length < 20
++                || packet.len() < header_length
++                || packet[6] & 0x3f != 0
++                || packet[7] != 0
++            {
++                return BULK;
++            }
++            (packet[1], packet[9], header_length)
++        }
++        6 if packet.len() >= 40 => (((first & 15) << 4) | (packet[1] >> 4), packet[6], 40),
++        _ => return BULK,
++    };
++    if traffic_bits >> 2 == 40 {
++        return CONTROL;
++    } // DSCP CS5; ignore ECN.
++    if traffic_bits >> 2 == 32 || protocol == 1 || protocol == 58 {
++        return TELEMETRY;
++    }
++    if protocol == 17 && packet.len() >= offset + 8 {
++        let destination = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
++        let source = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
++        if [source, destination]
++            .iter()
++            .any(|port| matches!(port, 8000 | 8001))
++        {
++            return VIDEO;
++        }
++    }
++    BULK
++}
++
++fn permitted(policy: &LocalPolicy, class: u8, local_address: Option<IpAddr>) -> bool {
++    if !(CONTROL..=BULK).contains(&class) {
++        return false;
++    }
++    let Some(address) = local_address else {
++        return false;
++    };
++    if !policy.metered_addresses.contains(&address) {
++        return true;
++    }
++    match class {
++        CONTROL | TELEMETRY => true,
++        VIDEO => policy.allow_metered_video,
++        BULK => policy.allow_metered_bulk,
++        _ => false,
++    }
++}
++
++pub(crate) fn permits_connection(packet: &ZCPacket, tunnel: Option<&TunnelInfo>) -> bool {
++    let Some(header) = packet.peer_manager_header() else {
++        return false;
++    };
++    if header.packet_type != PacketType::Data as u8 {
++        return true;
++    }
++    let Ok(policy) = policy() else {
++        return false;
++    };
++    let class = if header.avian_traffic_class() == 0 {
++        BULK
++    } else {
++        header.avian_traffic_class()
++    };
++    let local_address = tunnel
++        .and_then(|info| info.local_addr.as_ref())
++        .and_then(|address| url::Url::parse(&address.url).ok())
++        .and_then(|address| {
++            address
++                .host_str()
++                .map(|host| host.trim_matches(['[', ']']).to_owned())
++        })
++        .and_then(|host| host.parse::<IpAddr>().ok())
++        .filter(|address| !address.is_unspecified());
++    // In the default unmetered mode, non-IP internal tunnels remain usable.
++    if local_address.is_none() && policy.metered_addresses.is_empty() {
++        return (CONTROL..=BULK).contains(&class);
++    }
++    permitted(policy, class, local_address)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn avian_policy_rejects_authentication_only_peer() {
++        let parameters: snow::params::NoiseParams =
++            "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap();
++        let key = snow::Builder::new(parameters.clone())
++            .generate_keypair()
++            .unwrap();
++        let mut old_peer = snow::Builder::new(parameters.clone())
++            .prologue(b"avian-peerconn-noise-hop-v1")
++            .unwrap()
++            .local_private_key(&key.private)
++            .unwrap()
++            .build_initiator()
++            .unwrap();
++        let mut policy_peer = snow::Builder::new(parameters)
++            .prologue(b"avian-peerconn-noise-hop-policy-v1")
++            .unwrap()
++            .local_private_key(&key.private)
++            .unwrap()
++            .build_responder()
++            .unwrap();
++        let mut wire = vec![0; 1024];
++        let mut plaintext = vec![0; 1024];
++        let length = old_peer.write_message(&[], &mut wire).unwrap();
++        policy_peer
++            .read_message(&wire[..length], &mut plaintext)
++            .unwrap();
++        let length = policy_peer.write_message(&[], &mut wire).unwrap();
++        assert!(
++            old_peer
++                .read_message(&wire[..length], &mut plaintext)
++                .is_err()
++        );
++    }
++
++    #[test]
++    fn avian_policy_classification_and_metered_restrictions() {
++        let mut packet = vec![0u8; 28];
++        packet[0] = 0x45;
++        packet[9] = 17;
++        packet[22..24].copy_from_slice(&8000u16.to_be_bytes());
++        assert_eq!(classify_ip_packet(&packet), VIDEO);
++        packet[1] = 0xa3;
++        assert_eq!(classify_ip_packet(&packet), CONTROL);
++        packet[1] = 0x80;
++        assert_eq!(classify_ip_packet(&packet), TELEMETRY);
++        packet[6] = 0x20;
++        assert_eq!(classify_ip_packet(&packet), BULK);
++        let address: IpAddr = "172.30.0.2".parse().unwrap();
++        let mut policy = LocalPolicy::default();
++        policy.metered_addresses.insert(address);
++        assert!(permitted(&policy, CONTROL, Some(address)));
++        assert!(permitted(&policy, TELEMETRY, Some(address)));
++        assert!(!permitted(&policy, VIDEO, Some(address)));
++        assert!(!permitted(&policy, BULK, Some(address)));
++        assert!(!permitted(&policy, 99, Some(address)));
++        policy.allow_metered_video = true;
++        assert!(permitted(&policy, VIDEO, Some(address)));
++        assert!(!permitted(&policy, BULK, Some(address)));
++    }
++}
+diff --git a/easytier/src/tunnel/packet_def.rs b/easytier/src/tunnel/packet_def.rs
+--- a/easytier/src/tunnel/packet_def.rs
++++ b/easytier/src/tunnel/packet_def.rs
+@@ -124,6 +124,13 @@
+ pub const PEER_MANAGER_HEADER_SIZE: usize = std::mem::size_of::<PeerManagerHeader>();
+ 
+ impl PeerManagerHeader {
++    pub(crate) fn avian_traffic_class(&self) -> u8 {
++        self.reserved
++    }
++    pub(crate) fn set_avian_traffic_class(&mut self, class: u8) {
++        self.reserved = class;
++    }
++
+     pub fn is_encrypted(&self) -> bool {
+         PeerManagerHeaderFlags::from_bits(self.flags)
+             .unwrap()
+diff --git a/easytier/src/tunnel/tcp.rs b/easytier/src/tunnel/tcp.rs
+--- a/easytier/src/tunnel/tcp.rs
++++ b/easytier/src/tunnel/tcp.rs
+@@ -37,7 +37,9 @@
+ 
+         let info = TunnelInfo {
+             tunnel_type: "tcp".to_owned(),
+-            local_addr: Some(self.local_url().into()),
++            local_addr: Some(
++                super::build_url_from_socket_addr(&stream.local_addr()?.to_string(), "tcp").into(),
++            ),
+             remote_addr: Some(
+                 super::build_url_from_socket_addr(&stream.peer_addr()?.to_string(), "tcp").into(),
+             ),
