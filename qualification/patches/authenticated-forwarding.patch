@@ -1,0 +1,764 @@
+diff --git a/easytier/src/peers/mod.rs b/easytier/src/peers/mod.rs
+index c94a65d..8cbd878 100644
+--- a/easytier/src/peers/mod.rs
++++ b/easytier/src/peers/mod.rs
+@@ -1,3 +1,4 @@
++mod hop_transport;
+ mod graph_algo;
+ 
+ pub mod acl_filter;
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+index 624ee4c..a3f91be 100644
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -80,6 +80,7 @@ struct NoiseHandshakeResult {
+     local_static_pubkey: Vec<u8>,
+     remote_static_pubkey: Vec<u8>,
+     handshake_hash: Vec<u8>,
++    hop_transport: Arc<super::hop_transport::HopTransport>,
+     secure_auth_level: SecureAuthLevel,
+     peer_identity_type: PeerIdentityType,
+     remote_network_name: String,
+@@ -100,6 +101,8 @@ struct PeerSessionTunnelFilter {
+     my_peer_id: Arc<AtomicCell<PeerId>>,
+     peer_id: Arc<AtomicCell<Option<PeerId>>>,
+     session: Arc<std::sync::Mutex<Option<Arc<PeerSession>>>>,
++    hop_transport: Arc<std::sync::Mutex<Option<Arc<super::hop_transport::HopTransport>>>>,
++    pending_handshake_tail: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+ }
+ 
+ impl PeerSessionTunnelFilter {
+@@ -109,6 +112,8 @@ impl PeerSessionTunnelFilter {
+             my_peer_id: Arc::new(AtomicCell::new(PeerId::default())),
+             peer_id: Arc::new(AtomicCell::new(None)),
+             session: Arc::new(std::sync::Mutex::new(None)),
++            hop_transport: Arc::new(std::sync::Mutex::new(None)),
++            pending_handshake_tail: Arc::new(std::sync::Mutex::new(None)),
+         }
+     }
+ 
+@@ -118,6 +123,8 @@ impl PeerSessionTunnelFilter {
+             my_peer_id: Arc::new(AtomicCell::new(my_peer_id)),
+             peer_id: Arc::new(AtomicCell::new(None)),
+             session: Arc::new(std::sync::Mutex::new(None)),
++            hop_transport: Arc::new(std::sync::Mutex::new(None)),
++            pending_handshake_tail: Arc::new(std::sync::Mutex::new(None)),
+         }
+     }
+ 
+@@ -129,6 +136,10 @@ impl PeerSessionTunnelFilter {
+         self.peer_id.store(Some(peer_id));
+     }
+ 
++    fn set_hop_transport(&self, transport: Arc<super::hop_transport::HopTransport>) {
++        *self.hop_transport.lock().unwrap() = Some(transport);
++    }
++
+     fn set_session(&self, session: Arc<PeerSession>) {
+         *self.session.lock().unwrap() = Some(session);
+     }
+@@ -144,10 +155,11 @@ impl PeerSessionTunnelFilter {
+     }
+ }
+ 
+-impl TunnelFilter for PeerSessionTunnelFilter {
+-    type FilterOutput = ();
+-
+-    fn before_send(&self, mut data: crate::tunnel::SinkItem) -> Option<crate::tunnel::SinkItem> {
++impl PeerSessionTunnelFilter {
++    fn encrypt_session_packet(
++        &self,
++        mut data: crate::tunnel::SinkItem,
++    ) -> Option<crate::tunnel::SinkItem> {
+         if !self.enabled {
+             return Some(data);
+         }
+@@ -187,7 +199,10 @@ impl TunnelFilter for PeerSessionTunnelFilter {
+         Some(data)
+     }
+ 
+-    fn after_received(&self, data: crate::tunnel::StreamItem) -> Option<crate::tunnel::StreamItem> {
++    fn decrypt_session_packet(
++        &self,
++        data: crate::tunnel::StreamItem,
++    ) -> Option<crate::tunnel::StreamItem> {
+         if !self.enabled {
+             return Some(data);
+         }
+@@ -243,6 +258,41 @@ impl TunnelFilter for PeerSessionTunnelFilter {
+ 
+         Some(Ok(data))
+     }
++}
++
++impl TunnelFilter for PeerSessionTunnelFilter {
++    type FilterOutput = ();
++
++    fn before_send(&self, data: crate::tunnel::SinkItem) -> Option<crate::tunnel::SinkItem> {
++        // The terminal Noise message may still be in the asynchronous send queue when
++        // the handshake installs transport keys. Exempt that exact locally queued frame once.
++        {
++            let mut pending = self.pending_handshake_tail.lock().unwrap();
++            if pending.as_deref() == Some(data.tunnel_payload()) {
++                pending.take();
++                return Some(data);
++            }
++        }
++        let data = self.encrypt_session_packet(data)?;
++        let transport = self.hop_transport.lock().unwrap().clone();
++        match transport {
++            Some(transport) => transport.seal(data).ok(),
++            None => Some(data),
++        }
++    }
++
++    fn after_received(&self, data: crate::tunnel::StreamItem) -> Option<crate::tunnel::StreamItem> {
++        let transport = self.hop_transport.lock().unwrap().clone();
++        let packet = match data {
++            Ok(packet) => packet,
++            Err(error) => return Some(Err(error)),
++        };
++        let packet = match transport {
++            Some(transport) => transport.open(packet).ok()?,
++            None => packet,
++        };
++        self.decrypt_session_packet(Ok(packet))
++    }
+ 
+     fn filter_output(&self) {}
+ }
+@@ -677,6 +727,10 @@ impl PeerConn {
+         let mut pkt = ZCPacket::new_with_payload(&msg[..msg_len]);
+         pkt.fill_peer_manager_hdr(self.my_peer_id, remote_peer_id, packet_type as u8);
+         let pkt_len = pkt.buf_len() as u64;
++        if matches!(packet_type, PacketType::NoiseHandshakeMsg3) {
++            *self.session_filter.pending_handshake_tail.lock().unwrap() =
++                Some(pkt.tunnel_payload().to_vec());
++        }
+         self.sink.send(pkt).await?;
+         self.record_control_tx(metric_network_name, pkt_len);
+         Ok(())
+@@ -821,7 +875,7 @@ impl PeerConn {
+     }
+ 
+     async fn do_noise_handshake_as_client(&self) -> Result<NoiseHandshakeResult, Error> {
+-        let prologue = b"easytier-peerconn-noise".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+@@ -1006,6 +1060,9 @@ impl PeerConn {
+             local_static_pubkey: local_static_pubkey.to_vec(),
+             remote_static_pubkey: remote_static,
+             handshake_hash,
++            hop_transport: Arc::new(super::hop_transport::HopTransport::new(
++                hs.into_stateless_transport_mode()?,
++            )),
+             secure_auth_level,
+             peer_identity_type,
+             remote_network_name,
+@@ -1084,7 +1141,7 @@ impl PeerConn {
+     where
+         Fn: FnMut(&mut PeerConn, &str) -> Result<(), Error> + Send,
+     {
+-        let prologue = b"easytier-peerconn-noise".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+@@ -1239,6 +1296,9 @@ impl PeerConn {
+             local_static_pubkey: local_static_pubkey.to_vec(),
+             remote_static_pubkey: remote_static,
+             handshake_hash,
++            hop_transport: Arc::new(super::hop_transport::HopTransport::new(
++                hs.into_stateless_transport_mode()?,
++            )),
+             secure_auth_level,
+             peer_identity_type,
+             remote_network_name,
+@@ -1274,6 +1334,7 @@ impl PeerConn {
+     where
+         Fn: FnMut(&mut PeerConn, &str) -> Result<(), Error> + Send,
+     {
++        self.require_authenticated_forwarding()?;
+         let first_pkt = timeout(
+             Duration::from_secs(5),
+             self.recv_next_peer_manager_packet(None),
+@@ -1293,12 +1354,14 @@ impl PeerConn {
+             // construct handshake rsp from noise result for compat.
+             let handshake_rsp = self.build_handshake_rsp(&noise);
+             self.session_filter.set_session(noise.session.clone());
++            self.session_filter
++                .set_hop_transport(noise.hop_transport.clone());
+             self.session_filter.set_peer_id(noise.peer_id);
+             self.noise_handshake_result = Some(noise);
+ 
+             self.info = Some(handshake_rsp);
+             self.is_client = Some(false);
+-        } else if hdr.packet_type == PacketType::HandShake as u8 {
++        } else if !self.is_secure_mode_enabled() && hdr.packet_type == PacketType::HandShake as u8 {
+             let rsp = Self::decode_handshake_packet(&first_pkt)?;
+             handshake_recved(self, &rsp.network_name)?;
+             tracing::info!("handshake request: {:?}", rsp);
+@@ -1329,10 +1392,27 @@ impl PeerConn {
+     }
+ 
+     #[tracing::instrument]
++    fn require_authenticated_forwarding(&self) -> Result<(), Error> {
++        if self
++            .global_ctx
++            .get_credential_manager()
++            .uses_verified_membership()
++            && !self.is_secure_mode_enabled()
++        {
++            return Err(Error::WaitRespError(
++                "verified membership requires authenticated forwarding Secure Mode".into(),
++            ));
++        }
++        Ok(())
++    }
++
+     pub async fn do_handshake_as_client(&mut self) -> Result<(), Error> {
++        self.require_authenticated_forwarding()?;
+         if self.is_secure_mode_enabled() {
+             let noise = self.do_noise_handshake_as_client().await?;
+             self.session_filter.set_session(noise.session.clone());
++            self.session_filter
++                .set_hop_transport(noise.hop_transport.clone());
+             self.session_filter.set_peer_id(noise.peer_id);
+ 
+             let handshake_rsp = self.build_handshake_rsp(&noise);
+@@ -1907,7 +1987,7 @@ pub mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn peer_conn_secure_mode_server_accept_legacy_client() {
++    async fn peer_conn_secure_mode_server_rejects_legacy_client() {
+         let (c, s) = create_ring_tunnel_pair();
+ 
+         let c_peer_id = new_peer_id();
+@@ -1935,20 +2015,8 @@ pub mod tests {
+             s_peer.do_handshake_as_server()
+         );
+ 
+-        c_ret.unwrap();
+-        s_ret.unwrap();
+-
+-        assert_eq!(
+-            c_peer.get_conn_info().secure_auth_level,
+-            SecureAuthLevel::None as i32,
+-        );
+-        assert_eq!(
+-            s_peer.get_conn_info().secure_auth_level,
+-            SecureAuthLevel::None as i32,
+-        );
+-
+-        assert_eq!(c_peer.get_conn_info().network_name, "shared".to_string());
+-        assert_eq!(s_peer.get_conn_info().network_name, "user".to_string());
++        assert!(s_ret.is_err());
++        assert!(c_ret.is_err());
+     }
+ 
+     #[tokio::test]
+@@ -1996,6 +2064,154 @@ pub mod tests {
+         assert_eq!(s_peer.get_conn_info().network_name, "user".to_string());
+     }
+ 
++    #[tokio::test]
++    async fn avian_hop_peer_connection_rejects_wire_tampering_and_replay() {
++        use std::sync::atomic::{AtomicUsize, Ordering as MemoryOrdering};
++        struct WireAttack {
++            mode: AtomicUsize,
++            captured: std::sync::Mutex<Option<ZCPacket>>,
++        }
++        impl TunnelFilter for WireAttack {
++            type FilterOutput = ();
++            fn before_send(&self, mut packet: ZCPacket) -> Option<ZCPacket> {
++                if packet.peer_manager_header().unwrap().packet_type != 250 {
++                    return Some(packet);
++                }
++                match self.mode.load(MemoryOrdering::SeqCst) {
++                    1 => packet.mut_payload()[16] ^= 1,
++                    2 => {
++                        packet
++                            .mut_peer_manager_header()
++                            .unwrap()
++                            .set_latency_first(true);
++                    }
++                    3 => {
++                        let mut clear = ZCPacket::new_with_payload(b"unsealed");
++                        clear.fill_peer_manager_hdr(1, 2, PacketType::Ping as u8);
++                        return Some(clear);
++                    }
++                    6 => {
++                        let mut clear = ZCPacket::new_with_payload(b"unsealed-data");
++                        clear.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
++                        return Some(clear);
++                    }
++                    5 => {
++                        let mut clear = ZCPacket::new_with_payload(b"unsealed-noise");
++                        clear.fill_peer_manager_hdr(1, 2, PacketType::NoiseHandshakeMsg1 as u8);
++                        return Some(clear);
++                    }
++                    4 => return self.captured.lock().unwrap().clone(),
++                    _ => *self.captured.lock().unwrap() = Some(packet.clone()),
++                }
++                Some(packet)
++            }
++            fn filter_output(&self) {}
++        }
++        let attack = Arc::new(WireAttack {
++            mode: AtomicUsize::new(0),
++            captured: std::sync::Mutex::new(None),
++        });
++        let (source_tunnel, destination_tunnel) = create_ring_tunnel_pair();
++        let source_context = get_mock_global_ctx();
++        let destination_context = get_mock_global_ctx();
++        set_secure_mode_cfg(&source_context, true);
++        set_secure_mode_cfg(&destination_context, true);
++        let source_id = new_peer_id();
++        let destination_id = new_peer_id();
++        let mut source = PeerConn::new(
++            source_id,
++            source_context,
++            Box::new(TunnelWithFilter::new(source_tunnel, attack.clone())),
++            Arc::new(PeerSessionStore::new()),
++        );
++        let mut destination = PeerConn::new(
++            destination_id,
++            destination_context,
++            Box::new(destination_tunnel),
++            Arc::new(PeerSessionStore::new()),
++        );
++        let (source_result, destination_result) = tokio::join!(
++            source.do_handshake_as_client(),
++            destination.do_handshake_as_server()
++        );
++        source_result.unwrap();
++        destination_result.unwrap();
++        let (sender, mut receiver) = create_packet_recv_chan();
++        destination.start_recv_loop(sender).await;
++        let make_packet = || {
++            let mut packet = ZCPacket::new_with_payload(b"application-message");
++            packet.fill_peer_manager_hdr(source_id, destination_id, PacketType::Data as u8);
++            packet
++        };
++        source.send_msg(make_packet()).await.unwrap();
++        assert_eq!(
++            timeout(Duration::from_secs(2), receiver.recv())
++                .await
++                .unwrap()
++                .unwrap()
++                .payload(),
++            b"application-message"
++        );
++        for mode in [4, 1, 2, 3, 5, 6] {
++            attack.mode.store(mode, MemoryOrdering::SeqCst);
++            source.send_msg(make_packet()).await.unwrap();
++            assert!(
++                timeout(Duration::from_millis(150), receiver.recv())
++                    .await
++                    .is_err(),
++                "accepted wire attack mode {mode}"
++            );
++        }
++        attack.mode.store(0, MemoryOrdering::SeqCst);
++        let mut transit = ZCPacket::new_with_payload(b"opaque-end-to-end-payload");
++        transit.fill_peer_manager_hdr(
++            source_id.wrapping_add(42),
++            destination_id.wrapping_add(42),
++            PacketType::Data as u8,
++        );
++        transit
++            .mut_peer_manager_header()
++            .unwrap()
++            .set_encrypted(true);
++        source.send_msg(transit.clone()).await.unwrap();
++        assert_eq!(
++            timeout(Duration::from_secs(2), receiver.recv())
++                .await
++                .unwrap()
++                .unwrap()
++                .tunnel_payload(),
++            transit.tunnel_payload()
++        );
++    }
++    #[tokio::test]
++    async fn avian_hop_secure_server_rejects_legacy_handshake() {
++        let (source_tunnel, destination_tunnel) = create_ring_tunnel_pair();
++        let source_context = get_mock_global_ctx();
++        let destination_context = get_mock_global_ctx();
++        set_secure_mode_cfg(&source_context, false);
++        set_secure_mode_cfg(&destination_context, true);
++        let mut source = PeerConn::new(
++            new_peer_id(),
++            source_context,
++            Box::new(source_tunnel),
++            Arc::new(PeerSessionStore::new()),
++        );
++        let mut destination = PeerConn::new(
++            new_peer_id(),
++            destination_context,
++            Box::new(destination_tunnel),
++            Arc::new(PeerSessionStore::new()),
++        );
++        let source_task = tokio::spawn(async move { source.do_handshake_as_client().await });
++        assert!(
++            timeout(Duration::from_secs(2), destination.do_handshake_as_server())
++                .await
++                .unwrap()
++                .is_err()
++        );
++        source_task.abort();
++    }
++
+     #[tokio::test]
+     async fn peer_conn_secure_mode_data_roundtrip() {
+         let (c, s) = create_ring_tunnel_pair();
+diff --git a/easytier/src/peers/hop_transport.rs b/easytier/src/peers/hop_transport.rs
+new file mode 100644
+index 0000000..f4c0979
+--- /dev/null
++++ b/easytier/src/peers/hop_transport.rs
+@@ -0,0 +1,289 @@
++//! Per-connection Noise transport envelope. The complete forwarding frame is authenticated.
++use crate::tunnel::packet_def::{PEER_MANAGER_HEADER_SIZE, PeerManagerHeader, ZCPacket};
++use snow::StatelessTransportState;
++use std::sync::Mutex;
++use zerocopy::FromBytes;
++
++const HOP_ENVELOPE: u8 = 250;
++const MAXIMUM_PLAINTEXT: usize = 65_459;
++const REPLAY_WINDOW: u64 = 128;
++
++#[derive(Default, Debug)]
++struct ReplayWindow {
++    highest: Option<u64>,
++    seen: u128,
++}
++impl ReplayWindow {
++    fn accepts(&self, nonce: u64) -> bool {
++        match self.highest {
++            None => true,
++            Some(highest) if nonce > highest => true,
++            Some(highest) => {
++                let distance = highest - nonce;
++                distance < REPLAY_WINDOW && self.seen & (1u128 << distance) == 0
++            }
++        }
++    }
++    fn record(&mut self, nonce: u64) {
++        match self.highest {
++            None => {
++                self.highest = Some(nonce);
++                self.seen = 1;
++            }
++            Some(highest) if nonce > highest => {
++                let distance = nonce - highest;
++                self.seen = if distance >= REPLAY_WINDOW {
++                    1
++                } else {
++                    (self.seen << distance) | 1
++                };
++                self.highest = Some(nonce);
++            }
++            Some(highest) => self.seen |= 1u128 << (highest - nonce),
++        }
++    }
++}
++
++pub(super) struct HopTransport {
++    noise: StatelessTransportState,
++    next_nonce: Mutex<u64>,
++    replay: Mutex<ReplayWindow>,
++}
++impl std::fmt::Debug for HopTransport {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        formatter.write_str("HopTransport")
++    }
++}
++impl HopTransport {
++    pub(super) fn new(noise: StatelessTransportState) -> Self {
++        Self {
++            noise,
++            next_nonce: Mutex::new(0),
++            replay: Mutex::new(ReplayWindow::default()),
++        }
++    }
++    pub(super) fn seal(&self, packet: ZCPacket) -> Result<ZCPacket, String> {
++        let plaintext = packet.tunnel_payload();
++        if plaintext.len() < PEER_MANAGER_HEADER_SIZE || plaintext.len() > MAXIMUM_PLAINTEXT {
++            return Err("forwarding frame exceeds Noise envelope bounds".into());
++        }
++        let mut nonce_guard = self.next_nonce.lock().unwrap();
++        let nonce = *nonce_guard;
++        *nonce_guard = nonce.checked_add(1).ok_or("hop nonce exhausted")?;
++        let mut ciphertext = vec![0u8; plaintext.len() + 16];
++        let length = self
++            .noise
++            .write_message(nonce, plaintext, &mut ciphertext)
++            .map_err(|error| format!("hop encryption failed: {error}"))?;
++        let mut body = Vec::with_capacity(8 + length);
++        body.extend_from_slice(&nonce.to_le_bytes());
++        body.extend_from_slice(&ciphertext[..length]);
++        let mut envelope = ZCPacket::new_with_payload(&body);
++        // The outer header is framing only; no routing fields are consumed before authentication.
++        envelope.fill_peer_manager_hdr(0, 0, HOP_ENVELOPE);
++        Ok(envelope)
++    }
++    pub(super) fn open(&self, envelope: ZCPacket) -> Result<ZCPacket, String> {
++        let header = envelope
++            .peer_manager_header()
++            .ok_or("missing hop envelope header")?;
++        let payload = envelope.payload();
++        if header.packet_type != HOP_ENVELOPE
++            || header.from_peer_id.get() != 0
++            || header.to_peer_id.get() != 0
++            || header.flags != 0
++            || header.forward_counter != 1
++            || header.len.get() as usize != payload.len()
++            || payload.len() < 8 + 16 + PEER_MANAGER_HEADER_SIZE
++            || payload.len() > 8 + MAXIMUM_PLAINTEXT + 16
++        {
++            return Err("invalid or unsealed forwarding envelope".into());
++        }
++        let nonce = u64::from_le_bytes(payload[..8].try_into().unwrap());
++        let mut replay = self.replay.lock().unwrap();
++        if !replay.accepts(nonce) {
++            return Err("replayed forwarding envelope".into());
++        }
++        let mut plaintext = vec![0u8; payload.len() - 8];
++        let length = self
++            .noise
++            .read_message(nonce, &payload[8..], &mut plaintext)
++            .map_err(|_| "forwarding envelope authentication failed")?;
++        if length < PEER_MANAGER_HEADER_SIZE {
++            return Err("truncated forwarding frame".into());
++        }
++        let header = PeerManagerHeader::read_from(&plaintext[..PEER_MANAGER_HEADER_SIZE])
++            .ok_or("invalid forwarding header")?;
++        let mut packet = ZCPacket::new_with_payload(&plaintext[PEER_MANAGER_HEADER_SIZE..length]);
++        *packet.mut_peer_manager_header().unwrap() = header;
++        replay.record(nonce);
++        Ok(packet)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::tunnel::packet_def::PacketType;
++
++    fn pair() -> (HopTransport, HopTransport) {
++        let parameters: snow::params::NoiseParams =
++            "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap();
++        let source_key = snow::Builder::new(parameters.clone())
++            .generate_keypair()
++            .unwrap();
++        let destination_key = snow::Builder::new(parameters.clone())
++            .generate_keypair()
++            .unwrap();
++        let mut source = snow::Builder::new(parameters.clone())
++            .prologue(b"avian-peerconn-noise-hop-v1")
++            .unwrap()
++            .local_private_key(&source_key.private)
++            .unwrap()
++            .build_initiator()
++            .unwrap();
++        let mut destination = snow::Builder::new(parameters)
++            .prologue(b"avian-peerconn-noise-hop-v1")
++            .unwrap()
++            .local_private_key(&destination_key.private)
++            .unwrap()
++            .build_responder()
++            .unwrap();
++        let mut wire = vec![0u8; 1024];
++        let mut clear = vec![0u8; 1024];
++        let length = source.write_message(&[], &mut wire).unwrap();
++        destination
++            .read_message(&wire[..length], &mut clear)
++            .unwrap();
++        let length = destination.write_message(&[], &mut wire).unwrap();
++        source.read_message(&wire[..length], &mut clear).unwrap();
++        let length = source.write_message(&[], &mut wire).unwrap();
++        destination
++            .read_message(&wire[..length], &mut clear)
++            .unwrap();
++        (
++            HopTransport::new(source.into_stateless_transport_mode().unwrap()),
++            HopTransport::new(destination.into_stateless_transport_mode().unwrap()),
++        )
++    }
++    fn packet() -> ZCPacket {
++        let mut packet = ZCPacket::new_with_payload(b"end-to-end-ciphertext");
++        packet.fill_peer_manager_hdr(10, 30, PacketType::Data as u8);
++        packet
++            .mut_peer_manager_header()
++            .unwrap()
++            .set_latency_first(true);
++        packet
++    }
++    #[test]
++    fn avian_hop_roundtrip_replay_and_out_of_order() {
++        let (source, destination) = pair();
++        let first = source.seal(packet()).unwrap();
++        let second = source.seal(packet()).unwrap();
++        let third = source.seal(packet()).unwrap();
++        assert_eq!(
++            destination.open(third).unwrap().payload(),
++            b"end-to-end-ciphertext"
++        );
++        assert!(destination.open(first.clone()).is_ok());
++        assert!(destination.open(first).is_err());
++        assert!(destination.open(second).is_ok());
++        assert!(source.open(destination.seal(packet()).unwrap()).is_ok());
++    }
++    #[test]
++    fn avian_hop_rejects_tamper_without_consuming_nonce() {
++        let (source, destination) = pair();
++        let sealed = source.seal(packet()).unwrap();
++        for offset in [0, 8, 16, sealed.payload().len() - 1] {
++            let mut changed = sealed.clone();
++            changed.mut_payload()[offset] ^= 1;
++            assert!(destination.open(changed).is_err());
++        }
++        let mut wrong_type = sealed.clone();
++        wrong_type.mut_peer_manager_header().unwrap().packet_type = PacketType::Ping as u8;
++        assert!(destination.open(wrong_type).is_err());
++        let mut wrong_header = sealed.clone();
++        wrong_header
++            .mut_peer_manager_header()
++            .unwrap()
++            .set_latency_first(true);
++        assert!(destination.open(wrong_header).is_err());
++        assert!(
++            destination
++                .open(sealed)
++                .unwrap()
++                .peer_manager_header()
++                .unwrap()
++                .is_latency_first()
++        );
++        assert!(destination.open(packet()).is_err());
++    }
++    #[test]
++    fn avian_hop_connection_and_direction_keys_are_distinct() {
++        let (source, destination) = pair();
++        let (_, stranger) = pair();
++        let sealed = source.seal(packet()).unwrap();
++        assert!(stranger.open(sealed.clone()).is_err());
++        assert!(source.open(sealed.clone()).is_err());
++        assert!(destination.open(sealed).is_ok());
++    }
++    #[test]
++    fn avian_hop_relay_preserves_inner_frame_and_reseals() {
++        let (source, relay_inbound) = pair();
++        let (relay_outbound, destination) = pair();
++        let mut inner = packet();
++        inner.mut_peer_manager_header().unwrap().set_encrypted(true);
++        let relayed = relay_inbound
++            .open(source.seal(inner.clone()).unwrap())
++            .unwrap();
++        assert_eq!(relayed.tunnel_payload(), inner.tunnel_payload());
++        let resealed = relay_outbound.seal(relayed).unwrap();
++        assert!(relay_inbound.open(resealed.clone()).is_err());
++        assert_eq!(
++            destination.open(resealed).unwrap().tunnel_payload(),
++            inner.tunnel_payload()
++        );
++    }
++    #[test]
++    fn avian_hop_replay_window_and_message_bounds() {
++        let (source, destination) = pair();
++        let old = source.seal(packet()).unwrap();
++        for _ in 0..REPLAY_WINDOW {
++            destination.open(source.seal(packet()).unwrap()).unwrap();
++        }
++        assert!(destination.open(old).is_err());
++        let mut oversized = ZCPacket::new_with_payload(&vec![0; MAXIMUM_PLAINTEXT]);
++        oversized.fill_peer_manager_hdr(10, 30, PacketType::Data as u8);
++        assert!(source.seal(oversized).is_err());
++        *source.next_nonce.lock().unwrap() = u64::MAX;
++        assert!(source.seal(packet()).is_err());
++    }
++    #[test]
++    fn avian_hop_rejects_legacy_noise_prologue() {
++        let parameters: snow::params::NoiseParams =
++            "Noise_XX_25519_ChaChaPoly_SHA256".parse().unwrap();
++        let key = snow::Builder::new(parameters.clone())
++            .generate_keypair()
++            .unwrap();
++        let mut legacy = snow::Builder::new(parameters.clone())
++            .prologue(b"easytier-peerconn-noise")
++            .unwrap()
++            .local_private_key(&key.private)
++            .unwrap()
++            .build_initiator()
++            .unwrap();
++        let mut candidate = snow::Builder::new(parameters)
++            .prologue(b"avian-peerconn-noise-hop-v1")
++            .unwrap()
++            .local_private_key(&key.private)
++            .unwrap()
++            .build_responder()
++            .unwrap();
++        let mut wire = vec![0; 1024];
++        let mut clear = vec![0; 1024];
++        let length = legacy.write_message(&[], &mut wire).unwrap();
++        candidate.read_message(&wire[..length], &mut clear).unwrap();
++        let length = candidate.write_message(&[], &mut wire).unwrap();
++        assert!(legacy.read_message(&wire[..length], &mut clear).is_err());
++    }
++}
+diff --git a/easytier/src/instance/virtual_nic.rs b/easytier/src/instance/virtual_nic.rs
+index 1faa1fd..664dc50 100644
+--- a/easytier/src/instance/virtual_nic.rs
++++ b/easytier/src/instance/virtual_nic.rs
+@@ -669,10 +669,11 @@ impl VirtualNic {
+         let dev = AsyncDevice::new(dev)?;
+ 
+         let flags = self.global_ctx.config.get_flags();
+-        let mut mtu_in_config = flags.mtu;
+-        if flags.enable_encryption {
+-            mtu_in_config -= 20;
+-        }
++        let authenticated_hops = self.global_ctx.config.get_secure_mode()
++            .is_some_and(|configuration| configuration.enabled);
++        let mtu_in_config = forwarding_interface_mtu(
++            flags.mtu, flags.enable_encryption, authenticated_hops, flags.enable_ipv6,
++        )?;
+         {
+             // set mtu by ourselves, rust-tun does not handle it correctly on windows
+             let _g = self.global_ctx.net_ns.guard();
+@@ -1461,3 +1462,31 @@ mod tests {
+         // }
+     }
+ }
++
++
++/// Preserve the configured packet budget after end-to-end and hop encryption.
++fn forwarding_interface_mtu(configured: u32, payload_encryption: bool, authenticated_hops: bool, ipv6: bool) -> Result<u32, Error> {
++    let overhead = if payload_encryption { 20 } else { 0 }
++        + if authenticated_hops { 40 } else { 0 };
++    let effective = configured.checked_sub(overhead)
++        .ok_or_else(|| Error::AnyhowError(anyhow::anyhow!("MTU is smaller than encryption overhead")))?;
++    if effective == 0 || (ipv6 && effective < 1280) {
++        return Err(Error::AnyhowError(anyhow::anyhow!("effective forwarding MTU is too small for the enabled IP version")));
++    }
++    Ok(effective)
++}
++
++#[cfg(test)]
++mod authenticated_forwarding_mtu_tests {
++    use super::forwarding_interface_mtu;
++
++    #[test]
++    fn avian_hop_mtu_accounts_for_envelopes_and_ipv6_minimum() {
++        assert_eq!(forwarding_interface_mtu(1380, true, true, true).unwrap(), 1320);
++        assert_eq!(forwarding_interface_mtu(1380, true, false, true).unwrap(), 1360);
++        assert_eq!(forwarding_interface_mtu(1380, false, true, true).unwrap(), 1340);
++        assert!(forwarding_interface_mtu(40, true, true, false).is_err());
++        assert!(forwarding_interface_mtu(1339, true, true, true).is_err());
++        assert_eq!(forwarding_interface_mtu(1340, true, true, true).unwrap(), 1280);
++    }
++}

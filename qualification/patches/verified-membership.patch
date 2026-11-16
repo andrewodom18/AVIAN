@@ -1,0 +1,421 @@
+diff --git a/easytier/src/common/global_ctx.rs b/easytier/src/common/global_ctx.rs
+index 91a4c45..4f7522e 100644
+--- a/easytier/src/common/global_ctx.rs
++++ b/easytier/src/common/global_ctx.rs
+@@ -670,6 +670,10 @@ impl GlobalCtx {
+     /// 1. OSPF propagated trusted_keys (lock-free)
+     /// 2. Local credential_manager
+     pub fn is_pubkey_trusted(&self, pubkey: &[u8], network_name: &str) -> bool {
++        if self.credential_manager.uses_verified_membership() {
++            return network_name == self.get_network_name()
++                && self.credential_manager.is_pubkey_trusted(pubkey);
++        }
+         // First level: check OSPF propagated keys (lock-free)
+         if self.trusted_keys.verify_trusted_key(pubkey, network_name) {
+             return true;
+diff --git a/easytier/src/peers/credential_manager.rs b/easytier/src/peers/credential_manager.rs
+index bc5988d..c13008c 100644
+--- a/easytier/src/peers/credential_manager.rs
++++ b/easytier/src/peers/credential_manager.rs
+@@ -1,7 +1,11 @@
+ use std::{
+     collections::HashMap,
++    io::Read,
+     path::PathBuf,
+-    sync::Mutex,
++    sync::{
++        Mutex,
++        atomic::{AtomicBool, Ordering},
++    },
+     time::{Duration, SystemTime, UNIX_EPOCH},
+ };
+ 
+@@ -35,6 +39,8 @@ struct CredentialEntry {
+     reusable: bool,
+     expiry_unix: i64,
+     created_at_unix: i64,
++    #[serde(default)]
++    overlay_addresses: Vec<String>,
+ }
+ 
+ impl CredentialEntry {
+@@ -68,9 +74,18 @@ impl CredentialEntry {
+     }
+ }
+ 
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct VerifiedMembershipFile {
++    format: String,
++    credentials: HashMap<String, CredentialEntry>,
++}
++
+ pub struct CredentialManager {
+     credentials: Mutex<HashMap<String, CredentialEntry>>,
+     storage_path: Option<PathBuf>,
++    verified_membership: AtomicBool,
++    last_loaded_modified: Mutex<Option<SystemTime>>,
+ }
+ 
+ impl CredentialManager {
+@@ -78,8 +93,15 @@ impl CredentialManager {
+         let mgr = CredentialManager {
+             credentials: Mutex::new(HashMap::new()),
+             storage_path,
++            verified_membership: AtomicBool::new(false),
++            last_loaded_modified: Mutex::new(None),
+         };
+         mgr.load_from_disk();
++        assert!(
++            std::env::var("ET_REQUIRE_VERIFIED_MEMBERSHIP").as_deref() != Ok("1")
++                || mgr.uses_verified_membership(),
++            "verified membership cache is required"
++        );
+         mgr
+     }
+ 
+@@ -177,6 +199,7 @@ impl CredentialManager {
+             reusable,
+             expiry_unix,
+             created_at_unix: now,
++            overlay_addresses: Vec::new(),
+         };
+         (entry, secret)
+     }
+@@ -210,7 +233,45 @@ impl CredentialManager {
+             .collect()
+     }
+ 
++    /// Public trust installed by the local membership verifier, without issuer secrets.
++    pub fn local_trusted_credentials(&self) -> Vec<TrustedCredentialPubkey> {
++        self.reload_verified_membership();
++        let now = current_unix_timestamp();
++        self.credentials
++            .lock()
++            .unwrap()
++            .values()
++            .filter(|entry| entry.is_active_at(now))
++            .filter_map(CredentialEntry::to_trusted_credential)
++            .collect()
++    }
++
++    pub fn requires_overlay_binding(&self, pubkey: &[u8]) -> bool {
++        let encoded = BASE64_STANDARD.encode(pubkey);
++        self.credentials
++            .lock()
++            .unwrap()
++            .values()
++            .any(|entry| entry.pubkey == encoded && !entry.overlay_addresses.is_empty())
++    }
++
++    /// A forwarded identity must match the addresses in its locally verified membership.
++    pub fn permits_overlay_addresses(&self, pubkey: &[u8], addresses: &[String]) -> bool {
++        let now = current_unix_timestamp();
++        let encoded = BASE64_STANDARD.encode(pubkey);
++        self.credentials.lock().unwrap().values().any(|entry| {
++            entry.pubkey == encoded
++                && entry.is_active_at(now)
++                && !entry.overlay_addresses.is_empty()
++                && !addresses.is_empty()
++                && addresses
++                    .iter()
++                    .all(|address| entry.overlay_addresses.contains(address))
++        })
++    }
++
+     pub fn is_pubkey_trusted(&self, pubkey: &[u8]) -> bool {
++        self.reload_verified_membership();
+         let now = current_unix_timestamp();
+ 
+         let encoded = BASE64_STANDARD.encode(pubkey);
+@@ -245,22 +306,64 @@ impl CredentialManager {
+         }
+     }
+ 
++    pub fn uses_verified_membership(&self) -> bool {
++        self.verified_membership.load(Ordering::Acquire)
++    }
++
++    fn reload_verified_membership(&self) {
++        if !self.uses_verified_membership() {
++            return;
++        }
++        let Some(path) = &self.storage_path else {
++            return;
++        };
++        let modified = std::fs::metadata(path)
++            .and_then(|metadata| metadata.modified())
++            .ok();
++        if modified.is_some() && modified != *self.last_loaded_modified.lock().unwrap() {
++            self.load_from_disk();
++        }
++    }
++
+     fn load_from_disk(&self) {
+         let Some(path) = &self.storage_path else {
+             return;
+         };
+-        let Ok(data) = std::fs::read_to_string(path) else {
++        let Ok(mut file) = std::fs::File::open(path) else {
+             return;
+         };
+-        match serde_json::from_str::<HashMap<String, CredentialEntry>>(&data) {
+-            Ok(loaded) => {
+-                *self.credentials.lock().unwrap() = loaded;
+-                tracing::info!("loaded credentials from {}", path.display());
+-            }
+-            Err(e) => {
+-                tracing::warn!(?e, "failed to parse credentials file");
+-            }
++        let modified = file
++            .metadata()
++            .and_then(|metadata| metadata.modified())
++            .ok();
++        let mut data = String::new();
++        if file.read_to_string(&mut data).is_err() {
++            return;
+         }
++        let loaded = if let Ok(snapshot) = serde_json::from_str::<VerifiedMembershipFile>(&data) {
++            if snapshot.format != "avian-verified-membership-v1"
++                || snapshot.credentials.values().any(|entry| {
++                    !entry.secret.is_empty() || Self::decode_pubkey_b64(&entry.pubkey).is_none()
++                })
++            {
++                tracing::warn!("invalid verified membership cache");
++                return;
++            }
++            self.verified_membership.store(true, Ordering::Release);
++            snapshot.credentials
++        } else if self.uses_verified_membership() {
++            tracing::warn!(
++                "refusing to replace verified membership with native credential storage"
++            );
++            return;
++        } else if let Ok(loaded) = serde_json::from_str::<HashMap<String, CredentialEntry>>(&data) {
++            loaded
++        } else {
++            tracing::warn!("failed to parse credentials file");
++            return;
++        };
++        *self.credentials.lock().unwrap() = loaded;
++        *self.last_loaded_modified.lock().unwrap() = modified;
+     }
+ 
+     fn decode_pubkey_b64(s: &str) -> Option<Vec<u8>> {
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+index 5e2b6d5..624ee4c 100644
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -714,6 +714,29 @@ impl PeerConn {
+         is_initiator: bool,
+         remote_network_name: &str,
+     ) -> Result<SecureAuthLevel, Error> {
++        // Locally verified membership is authoritative even when remote peers offer other proofs.
++        if self
++            .global_ctx
++            .get_credential_manager()
++            .uses_verified_membership()
++        {
++            return if self
++                .global_ctx
++                .is_pubkey_trusted(remote_pubkey, remote_network_name)
++            {
++                if pinned_pubkey.is_some_and(|pinned| pinned != remote_pubkey) {
++                    Err(Error::WaitRespError(
++                        "pinned remote static pubkey mismatch".to_owned(),
++                    ))
++                } else {
++                    Ok(SecureAuthLevel::PeerVerified)
++                }
++            } else {
++                Err(Error::WaitRespError(
++                    "peer is not in verified membership".to_owned(),
++                ))
++            };
++        }
+         // 1. Verify proof
+         if let Some(proof) = proof
+             && let Some(mac) = self.global_ctx.get_secret_proof(handshake_hash)
+@@ -769,6 +792,13 @@ impl PeerConn {
+         remote_sent_secret_proof: bool,
+         is_client: bool,
+     ) -> PeerIdentityType {
++        if self
++            .global_ctx
++            .get_credential_manager()
++            .uses_verified_membership()
++        {
++            return PeerIdentityType::Credential;
++        }
+         if !remote_role_hint_is_same_network
+             || remote_network_name != self.global_ctx.get_network_name()
+         {
+@@ -915,7 +945,13 @@ impl PeerConn {
+         };
+ 
+         // Verify server authentication using unified logic
+-        let secure_auth_level = if msg2_pb.role_hint != 1 && pinned_remote_pubkey.is_none() {
++        let secure_auth_level = if msg2_pb.role_hint != 1
++            && pinned_remote_pubkey.is_none()
++            && !self
++                .global_ctx
++                .get_credential_manager()
++                .uses_verified_membership()
++        {
+             SecureAuthLevel::EncryptedUnauthenticated
+         } else {
+             self.verify_remote_auth(
+diff --git a/easytier/src/peers/peer_ospf_route.rs b/easytier/src/peers/peer_ospf_route.rs
+index 6081c0c..b99343b 100644
+--- a/easytier/src/peers/peer_ospf_route.rs
++++ b/easytier/src/peers/peer_ospf_route.rs
+@@ -436,6 +436,7 @@ struct SyncedRouteInfo {
+     // Aggregated trusted credential pubkeys from all admin nodes
+     // Maps pubkey bytes -> TrustedCredentialPubkey
+     trusted_credential_pubkeys: DashMap<Vec<u8>, TrustedCredentialPubkey>,
++    local_credentials: Arc<crate::peers::credential_manager::CredentialManager>,
+     // Tracks the currently accepted peer for non-reusable credentials.
+     // Maps credential pubkey bytes -> peer_id.
+     non_reusable_credential_owners: DashMap<Vec<u8>, PeerId>,
+@@ -531,7 +532,20 @@ impl SyncedRouteInfo {
+ 
+         let mut all_trusted = HashMap::new();
+         let mut global_trusted_keys = HashMap::new();
++        for credential in self.local_credentials.local_trusted_credentials() {
++            global_trusted_keys.insert(
++                credential.pubkey.clone(),
++                TrustedKeyMetadata {
++                    source: TrustedKeySource::OspfCredential,
++                    expiry_unix: Some(credential.expiry_unix),
++                },
++            );
++            all_trusted.insert(credential.pubkey.clone(), credential);
++        }
+ 
++        if self.local_credentials.uses_verified_membership() {
++            return (all_trusted, global_trusted_keys);
++        }
+         for (peer_id, info) in peer_infos.iter() {
+             if !self.is_admin_peer(info) {
+                 continue;
+@@ -1305,6 +1319,12 @@ impl SyncedRouteInfo {
+         self.trusted_credential_pubkeys
+             .get(peer_pubkey)
+             .map(|r| r.value().clone())
++            .or_else(|| {
++                self.local_credentials
++                    .local_trusted_credentials()
++                    .into_iter()
++                    .find(|credential| credential.pubkey == peer_pubkey)
++            })
+     }
+ }
+ 
+@@ -2124,7 +2144,7 @@ impl PeerRouteServiceImpl {
+         PeerRouteServiceImpl {
+             my_peer_id,
+             my_peer_route_id: rand::random(),
+-            global_ctx,
++            global_ctx: global_ctx.clone(),
+             sessions: DashMap::new(),
+ 
+             interface: Mutex::new(None),
+@@ -2144,6 +2164,7 @@ impl PeerRouteServiceImpl {
+                 group_trust_map: DashMap::new(),
+                 group_trust_map_cache: DashMap::new(),
+                 trusted_credential_pubkeys: DashMap::new(),
++                local_credentials: global_ctx.get_credential_manager().clone(),
+                 non_reusable_credential_owners: DashMap::new(),
+                 version: AtomicVersion::new(),
+             },
+@@ -3327,7 +3348,12 @@ impl RouteSessionManager {
+                     .copied()
+                     .flatten()
+                     .unwrap_or(PeerIdentityType::Admin);
+-                if matches!(identity_type, PeerIdentityType::Credential) {
++                if matches!(identity_type, PeerIdentityType::Credential)
++                    && !service_impl
++                        .global_ctx
++                        .get_credential_manager()
++                        .uses_verified_membership()
++                {
+                     continue;
+                 }
+ 
+@@ -3521,17 +3547,67 @@ impl RouteSessionManager {
+         if let Some(peer_infos) = &peer_infos {
+             // Step 9b: credential peers can only propagate their own route info
+             // patch_raw_from_info(&mut raw, info, &["proxy_cidrs", "feature_flag"]);
++            let mut filtered_infos = Vec::new();
++            let mut filtered_raw_infos = Vec::new();
+             let (pi, rpi) = if from_is_credential {
+-                if let Some(ret) = self.extract_credential_peer_info(
+-                    from_peer_id,
+-                    peer_infos,
+-                    raw_peer_infos.as_deref().unwrap(),
+-                    credential_info.as_ref().unwrap(),
+-                ) {
+-                    (&vec![ret.0], &vec![ret.1])
+-                } else {
+-                    (&vec![], &vec![])
++                let sender_credential = credential_info.as_ref().unwrap();
++                for advertised in peer_infos {
++                    let mut addresses = Vec::new();
++                    if let Some(address) = advertised.ipv4_addr {
++                        addresses.push(address.to_string());
++                    }
++                    if let Some(address) = advertised.ipv6_addr.and_then(|value| value.address) {
++                        addresses.push(address.to_string());
++                    }
++                    let local_credentials = service_impl.global_ctx.get_credential_manager();
++                    let credential = if advertised.peer_id == from_peer_id {
++                        if advertised.noise_static_pubkey != sender_credential.pubkey {
++                            None
++                        } else if local_credentials
++                            .requires_overlay_binding(&sender_credential.pubkey)
++                            && !local_credentials
++                                .permits_overlay_addresses(&sender_credential.pubkey, &addresses)
++                        {
++                            None
++                        } else {
++                            Some(sender_credential.clone())
++                        }
++                    } else if sender_credential.allow_relay {
++                        if service_impl
++                            .global_ctx
++                            .get_credential_manager()
++                            .permits_overlay_addresses(&advertised.noise_static_pubkey, &addresses)
++                        {
++                            service_impl
++                                .synced_route_info
++                                .get_credential_info_by_pubkey(&advertised.noise_static_pubkey)
++                        } else {
++                            None
++                        }
++                    } else {
++                        None
++                    };
++                    if let Some(credential) = credential {
++                        if let Some((mut info, mut raw)) = self.extract_credential_peer_info(
++                            advertised.peer_id,
++                            peer_infos,
++                            raw_peer_infos.as_deref().unwrap(),
++                            &credential,
++                        ) {
++                            // Relay permission never grants authority to publish new membership or groups.
++                            info.trusted_credential_pubkeys.clear();
++                            info.groups.clear();
++                            patch_raw_from_info(
++                                &mut raw,
++                                &info,
++                                &["trusted_credential_pubkeys", "groups"],
++                            );
++                            filtered_infos.push(info);
++                            filtered_raw_infos.push(raw);
++                        }
++                    }
+                 }
++                (&filtered_infos, &filtered_raw_infos)
+             } else {
+                 (peer_infos, raw_peer_infos.as_ref().unwrap())
+             };

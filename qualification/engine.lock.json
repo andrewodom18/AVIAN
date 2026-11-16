@@ -1,0 +1,14 @@
+{
+  "version": "2.6.4",
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "assets": {
+    "aarch64": {
+      "url": "https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-aarch64-v2.6.4.zip",
+      "sha256": "f533ec25a7ea714e09f645615012200278058525795cc3bb690ff011aec1a70f"
+    },
+    "x86_64": {
+      "url": "https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/easytier-linux-x86_64-v2.6.4.zip",
+      "sha256": "61b659eaedba658fa66fe47d17e1426cdd77e5d02fa15fed447bb4357c09dfd6"
+    }
+  }
+}

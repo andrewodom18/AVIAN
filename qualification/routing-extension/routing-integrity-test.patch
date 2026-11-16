@@ -1,0 +1,103 @@
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+index 5e2b6d5..ae9c855 100644
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -2005,6 +2005,98 @@ pub mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn avian_routing_metadata_must_be_authenticated() {
++        use std::sync::atomic::{AtomicBool, Ordering};
++
++        struct ChangeRoutingHint {
++            enabled: AtomicBool,
++            saw_encrypted_payload: AtomicBool,
++        }
++
++        impl TunnelFilter for ChangeRoutingHint {
++            type FilterOutput = ();
++
++            fn before_send(
++                &self,
++                mut packet: crate::tunnel::SinkItem,
++            ) -> Option<crate::tunnel::SinkItem> {
++                if let Some(header) = packet.mut_peer_manager_header()
++                    && header.packet_type == PacketType::Data as u8
++                    && self.enabled.load(Ordering::SeqCst)
++                {
++                    assert!(
++                        header.is_encrypted(),
++                        "test must alter the wire packet after encryption"
++                    );
++                    self.saw_encrypted_payload.store(true, Ordering::SeqCst);
++                    header.set_latency_first(!header.is_latency_first());
++                }
++                Some(packet)
++            }
++
++            fn filter_output(&self) {}
++        }
++
++        let (source_tunnel, destination_tunnel) = create_ring_tunnel_pair();
++        let tampering = Arc::new(ChangeRoutingHint {
++            enabled: AtomicBool::new(false),
++            saw_encrypted_payload: AtomicBool::new(false),
++        });
++        let source_tunnel = TunnelWithFilter::new(source_tunnel, tampering.clone());
++        let source_id = new_peer_id();
++        let destination_id = new_peer_id();
++        let source_context = get_mock_global_ctx();
++        let destination_context = get_mock_global_ctx();
++        set_secure_mode_cfg(&source_context, true);
++        set_secure_mode_cfg(&destination_context, true);
++        let mut source = PeerConn::new(
++            source_id,
++            source_context,
++            Box::new(source_tunnel),
++            Arc::new(PeerSessionStore::new()),
++        );
++        let mut destination = PeerConn::new(
++            destination_id,
++            destination_context,
++            Box::new(destination_tunnel),
++            Arc::new(PeerSessionStore::new()),
++        );
++        let (source_handshake, destination_handshake) = tokio::join!(
++            source.do_handshake_as_client(),
++            destination.do_handshake_as_server()
++        );
++        source_handshake.unwrap();
++        destination_handshake.unwrap();
++        let (received_packets, mut receiver) = create_packet_recv_chan();
++        destination.start_recv_loop(received_packets).await;
++        let mut baseline = ZCPacket::new_with_payload(b"untouched-baseline");
++        baseline.fill_peer_manager_hdr(source_id, destination_id, PacketType::Data as u8);
++        source.send_msg(baseline).await.unwrap();
++        let baseline = timeout(Duration::from_secs(2), receiver.recv())
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(baseline.payload(), b"untouched-baseline");
++        tampering.enabled.store(true, Ordering::SeqCst);
++        let mut packet = ZCPacket::new_with_payload(b"routing-integrity-check");
++        packet.fill_peer_manager_hdr(source_id, destination_id, PacketType::Data as u8);
++        packet
++            .mut_peer_manager_header()
++            .unwrap()
++            .set_latency_first(false);
++        source.send_msg(packet).await.unwrap();
++        let delivery = timeout(Duration::from_millis(500), receiver.recv()).await;
++        assert!(tampering.saw_encrypted_payload.load(Ordering::SeqCst));
++        if let Ok(Some(received)) = delivery {
++            assert_eq!(received.payload(), b"routing-integrity-check");
++            assert!(received.peer_manager_header().unwrap().is_latency_first());
++            panic!(
++                "authenticated connection accepted modified routing metadata; class restrictions cannot trust this header"
++            );
++        }
++    }
++
+     #[tokio::test]
+     async fn peer_conn_secure_mode_network_secret_confirmed() {
+         let (c, s) = create_ring_tunnel_pair();

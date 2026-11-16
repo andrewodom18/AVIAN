@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "engine": "2.6.4",
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "environment": "isolated Linux container; no external network",
+  "binary_version": "easytier-core 2.6.4-8428a89d~",
+  "binary_sha256": "6c6eb99ad0f92bac6582d28545f1bb9d3e3961f04cb155c0696bed73c1d9571e",
+  "gates": [
+    {
+      "name": "credential_direct_connectivity",
+      "status": "pass",
+      "evidence": "Real ICMP traffic from independently credentialed endpoints to the administrator"
+    },
+    {
+      "name": "credential_route_discovery",
+      "status": "pass",
+      "evidence": "Destination overlay address appears in source routing information"
+    },
+    {
+      "name": "unknown_identity_rejected",
+      "status": "pass",
+      "evidence": "Random unissued credential cannot exchange overlay ICMP with administrator"
+    },
+    {
+      "name": "fresh_session_through_ordinary_relay",
+      "status": "pass",
+      "evidence": "Administrator stopped before first endpoint-to-endpoint ICMP; ordinary relay has no network secret"
+    },
+    {
+      "name": "offline_restart_without_administrator",
+      "status": "fail",
+      "evidence": "All ordinary nodes restarted with the same private keys and configuration; administrator remains stopped"
+    },
+    {
+      "name": "public_trust_file_cold_restart",
+      "status": "pass",
+      "evidence": "Public-only cache restored on each member with five-minute leases; no administrator online or private issuer/device keys copied; signed membership verification is tested separately"
+    },
+    {
+      "name": "unassigned_overlay_address_rejected",
+      "status": "pass",
+      "evidence": "A member advertises an address absent from its verified key binding; source-to-relay control remains reachable"
+    },
+    {
+      "name": "authorized_address_restored",
+      "status": "pass",
+      "evidence": "Restoring the assigned address restores endpoint traffic"
+    },
+    {
+      "name": "relay_permission_enforced",
+      "status": "pass",
+      "evidence": "After cold restart with relay permission removed, both direct links work but endpoint traffic cannot traverse the relay"
+    },
+    {
+      "name": "missing_required_cache_stops_startup",
+      "status": "pass",
+      "evidence": "Explicit verified-membership mode refuses startup when its authoritative public cache is missing"
+    },
+    {
+      "name": "revocation_propagation",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "traffic_class_path_selection",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "cellular_exclusion_each_hop",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "two_second_tcp_udp_recovery",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "congestion_control_priority",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "progressive_scale",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "relay_payload_confidentiality",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "android_physical_network_binding",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    }
+  ],
+  "qualified_for_cutover": false,
+  "patch_sha256": "c770d4c146dc188a986b271789831e1b04e73c000755ae3dcc45881c6237a077",
+  "test_date": "2026-11-16",
+  "candidate_status": "unqualified; separate routing metadata integrity gate failed",
+  "build_validation": "Exact exported patch applied to pinned base; reproduced source byte-for-byte; source rebuilt and runtime rerun. End-to-end build.py wrapper not run."
+}

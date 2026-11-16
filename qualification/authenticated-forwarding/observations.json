@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "patch_sha256": {
+    "verified-membership.patch": "c770d4c146dc188a986b271789831e1b04e73c000755ae3dcc45881c6237a077",
+    "authenticated-forwarding.patch": "492fe4748a10721b7743c88e26f411cb1c967ab7110bde7e47ac72cea92092ac"
+  },
+  "test_date": "2026-11-16",
+  "authenticated_forwarding": {
+    "status": "passed",
+    "tests": [
+      {
+        "name": "instance::virtual_nic::authenticated_forwarding_mtu_tests::avian_hop_mtu_accounts_for_envelopes_and_ipv6_minimum",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_rejects_legacy_noise_prologue",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_rejects_tamper_without_consuming_nonce",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_roundtrip_replay_and_out_of_order",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::avian_hop_secure_server_rejects_legacy_handshake",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_connection_and_direction_keys_are_distinct",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_relay_preserves_inner_frame_and_reseals",
+        "status": "ok"
+      },
+      {
+        "name": "peers::hop_transport::tests::avian_hop_replay_window_and_message_bounds",
+        "status": "ok"
+      },
+      {
+        "name": "peers::peer_conn::tests::avian_hop_peer_connection_rejects_wire_tampering_and_replay",
+        "status": "ok"
+      }
+    ]
+  },
+  "regressions": [
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_shared_node_without_pin_is_unauthenticated",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_shared_node_pubkey_verified",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_network_secret_confirmed",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_data_roundtrip",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_different_network_name_ok",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_pubkey_and_encryption",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_conn::tests::peer_conn_secure_mode_server_rejects_legacy_client",
+      "status": "ok"
+    }
+  ],
+  "runtime_gates": [
+    {
+      "name": "credential_direct_connectivity",
+      "status": "pass",
+      "evidence": "Real ICMP traffic from independently credentialed endpoints to the administrator"
+    },
+    {
+      "name": "credential_route_discovery",
+      "status": "pass",
+      "evidence": "Destination overlay address appears in source routing information"
+    },
+    {
+      "name": "unknown_identity_rejected",
+      "status": "pass",
+      "evidence": "Random unissued credential cannot exchange overlay ICMP with administrator"
+    },
+    {
+      "name": "fresh_session_through_ordinary_relay",
+      "status": "pass",
+      "evidence": "Administrator stopped before first endpoint-to-endpoint ICMP; ordinary relay has no network secret"
+    },
+    {
+      "name": "offline_restart_without_administrator",
+      "status": "fail",
+      "evidence": "All ordinary nodes restarted with the same private keys and configuration; administrator remains stopped"
+    },
+    {
+      "name": "public_trust_file_cold_restart",
+      "status": "pass",
+      "evidence": "Public-only cache restored on each member with five-minute leases; no administrator online or private issuer/device keys copied; signed membership verification is tested separately"
+    },
+    {
+      "name": "unassigned_overlay_address_rejected",
+      "status": "pass",
+      "evidence": "A member advertises an address absent from its verified key binding; source-to-relay control remains reachable"
+    },
+    {
+      "name": "authorized_address_restored",
+      "status": "pass",
+      "evidence": "Restoring the assigned address restores endpoint traffic"
+    },
+    {
+      "name": "relay_permission_enforced",
+      "status": "pass",
+      "evidence": "After cold restart with relay permission removed, both direct links work but endpoint traffic cannot traverse the relay"
+    },
+    {
+      "name": "missing_required_cache_stops_startup",
+      "status": "pass",
+      "evidence": "Explicit verified-membership mode refuses startup when its authoritative public cache is missing"
+    },
+    {
+      "name": "revocation_propagation",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "traffic_class_path_selection",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "cellular_exclusion_each_hop",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "two_second_tcp_udp_recovery",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "congestion_control_priority",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "progressive_scale",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "relay_payload_confidentiality",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    },
+    {
+      "name": "android_physical_network_binding",
+      "status": "not_run",
+      "evidence": "Requires AVIAN engine extensions or a separate platform/load test; upstream baseline does not establish this requirement"
+    }
+  ],
+  "binary_sha256": {
+    "easytier-core": "247450a711267ae06ba2546da1026dec240f9bfd7f329960a8b2bb0c9ab74338",
+    "easytier-cli": "41392a5190fe73ac3534b329773bcbbb4ef4b4b980372d089f71d976749317a2"
+  },
+  "qualified_for_cutover": false,
+  "limitations": [
+    "Admitted relays enforce local policy; compromised-relay relabeling is outside hop authentication.",
+    "Traffic-class routing, timed recovery, live revocation, and native platform qualification remain incomplete."
+  ]
+}
