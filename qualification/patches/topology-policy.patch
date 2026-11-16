@@ -1,0 +1,867 @@
+diff --git a/easytier/src/proto/peer_rpc.proto b/easytier/src/proto/peer_rpc.proto
+index 23dc417..e9af980 100644
+--- a/easytier/src/proto/peer_rpc.proto
++++ b/easytier/src/proto/peer_rpc.proto
+@@ -19,6 +19,12 @@ message TrustedCredentialPubkeyProof {
+   bytes credential_hmac = 2;
+ }
+ 
++message AvianPolicyEdge {
++  uint32 destination = 1;
++  uint32 allowed_classes = 2;
++  uint64 latency_us = 3;
++}
++
+ message RoutePeerInfo {
+   // means next hop in route table.
+   uint32 peer_id = 1;
+@@ -50,6 +56,7 @@ message RoutePeerInfo {
+ 
+   optional common.Ipv6Inet ipv6_public_addr_prefix = 22;
+   optional common.Ipv6Inet ipv6_public_addr_lease = 24;
++  repeated AvianPolicyEdge avian_policy_edges = 25;
+ }
+ 
+ message PeerIdVersion {
+diff --git a/easytier/src/peers/traffic_policy.rs b/easytier/src/peers/traffic_policy.rs
+index 70c678a..ab69005 100644
+--- a/easytier/src/peers/traffic_policy.rs
++++ b/easytier/src/peers/traffic_policy.rs
+@@ -12,19 +12,29 @@ pub(crate) const BULK: u8 = 4;
+ 
+ #[derive(Default, serde::Deserialize)]
+ #[serde(deny_unknown_fields)]
+-struct LocalPolicy {
++pub(crate) struct LocalPolicy {
+     #[serde(default)]
+     metered_addresses: BTreeSet<IpAddr>,
+     #[serde(default)]
++    control_tcp_ports: BTreeSet<u16>,
++    #[serde(default)]
+     allow_metered_video: bool,
+     #[serde(default)]
+     allow_metered_bulk: bool,
+ }
+ 
+-fn policy() -> &'static Result<LocalPolicy, String> {
++pub(crate) fn policy() -> &'static Result<LocalPolicy, String> {
+     static POLICY: OnceLock<Result<LocalPolicy, String>> = OnceLock::new();
+     POLICY.get_or_init(|| match std::env::var("AVIAN_TRAFFIC_POLICY") {
+-        Ok(encoded) => serde_json::from_str(&encoded).map_err(|error| error.to_string()),
++        Ok(encoded) => serde_json::from_str::<LocalPolicy>(&encoded)
++            .map_err(|error| error.to_string())
++            .and_then(|policy| {
++                if policy.control_tcp_ports.contains(&0) {
++                    Err("control TCP port must be nonzero".into())
++                } else {
++                    Ok(policy)
++                }
++            }),
+         Err(std::env::VarError::NotPresent) => Ok(LocalPolicy::default()),
+         Err(_) => Err("invalid traffic policy encoding".into()),
+     })
+@@ -32,6 +42,14 @@ fn policy() -> &'static Result<LocalPolicy, String> {
+ 
+ /// Classify only locally originated plaintext. Fragmented/unknown traffic is bulk.
+ pub(crate) fn classify_ip_packet(packet: &[u8]) -> u8 {
++    let ports = policy()
++        .as_ref()
++        .map(|policy| &policy.control_tcp_ports)
++        .ok();
++    classify_ip_packet_with_ports(packet, ports)
++}
++
++fn classify_ip_packet_with_ports(packet: &[u8], control_ports: Option<&BTreeSet<u16>>) -> u8 {
+     let Some(first) = packet.first() else {
+         return BULK;
+     };
+@@ -50,6 +68,15 @@ pub(crate) fn classify_ip_packet(packet: &[u8]) -> u8 {
+         6 if packet.len() >= 40 => (((first & 15) << 4) | (packet[1] >> 4), packet[6], 40),
+         _ => return BULK,
+     };
++    if protocol == 6 && packet.len() >= offset + 20 {
++        let source = u16::from_be_bytes([packet[offset], packet[offset + 1]]);
++        let destination = u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]);
++        if control_ports
++            .is_some_and(|ports| ports.contains(&source) || ports.contains(&destination))
++        {
++            return CONTROL;
++        }
++    }
+     if traffic_bits >> 2 == 40 {
+         return CONTROL;
+     } // DSCP CS5; ignore ECN.
+@@ -183,3 +210,30 @@ mod tests {
+         assert!(!permitted(&policy, BULK, Some(address)));
+     }
+ }
++
++#[cfg(test)]
++mod control_port_tests {
++    use super::*;
++    #[test]
++    fn avian_topology_control_ports_are_explicit_and_bidirectional() {
++        let ports = BTreeSet::from([4180]);
++        for version in [4u8, 6u8] {
++            let offset = if version == 4 { 20 } else { 40 };
++            let mut packet = vec![0u8; offset + 20];
++            packet[0] = if version == 4 { 0x45 } else { 0x60 };
++            packet[if version == 4 { 9 } else { 6 }] = 6;
++            packet[offset + 2..offset + 4].copy_from_slice(&4180u16.to_be_bytes());
++            assert_eq!(
++                classify_ip_packet_with_ports(&packet, Some(&ports)),
++                CONTROL
++            );
++            assert_eq!(classify_ip_packet_with_ports(&packet, None), BULK);
++            packet[offset..offset + 2].copy_from_slice(&4180u16.to_be_bytes());
++            packet[offset + 2..offset + 4].copy_from_slice(&50000u16.to_be_bytes());
++            assert_eq!(
++                classify_ip_packet_with_ports(&packet, Some(&ports)),
++                CONTROL
++            );
++        }
++    }
++}
+diff --git a/easytier/src/peers/topology_policy.rs b/easytier/src/peers/topology_policy.rs
+new file mode 100644
+index 0000000..0de95f1
+--- /dev/null
++++ b/easytier/src/peers/topology_policy.rs
+@@ -0,0 +1,146 @@
++//! Per-class routes calculated from authenticated, directed neighbor advertisements.
++use crate::{common::PeerId, proto::peer_rpc::RoutePeerInfo};
++use std::cmp::Reverse;
++use std::collections::{BTreeMap, BinaryHeap};
++
++pub(super) fn calculate(
++    source: PeerId,
++    records: Vec<RoutePeerInfo>,
++) -> BTreeMap<(u8, PeerId), PeerId> {
++    let records: BTreeMap<_, _> = records
++        .into_iter()
++        .map(|record| (record.peer_id, record))
++        .collect();
++    let mut routes = BTreeMap::new();
++    for class in 1..=4 {
++        let mut costs = BTreeMap::new();
++        let mut queue = BinaryHeap::new();
++        costs.insert(source, (0u64, source));
++        queue.push(Reverse((0u64, source, source)));
++        while let Some(Reverse((cost, first_hop, current))) = queue.pop() {
++            if costs.get(&current) != Some(&(cost, first_hop)) {
++                continue;
++            }
++            let Some(record) = records.get(&current) else {
++                continue;
++            };
++            if current != source
++                && record
++                    .feature_flag
++                    .is_some_and(|flags| flags.avoid_relay_data)
++            {
++                continue;
++            }
++            for edge in &record.avian_policy_edges {
++                if edge.allowed_classes & (1 << class) == 0
++                    || !records.contains_key(&edge.destination)
++                {
++                    continue;
++                }
++                let Some(next_cost) = cost.checked_add(if edge.latency_us == 0 {
++                    1_000_000
++                } else {
++                    edge.latency_us
++                }) else {
++                    continue;
++                };
++                let next_hop = if current == source {
++                    edge.destination
++                } else {
++                    first_hop
++                };
++                let candidate = (next_cost, next_hop);
++                if costs
++                    .get(&edge.destination)
++                    .is_none_or(|old| candidate < *old)
++                {
++                    costs.insert(edge.destination, candidate);
++                    queue.push(Reverse((next_cost, next_hop, edge.destination)));
++                }
++            }
++        }
++        for (destination, (_, next_hop)) in costs {
++            if destination != source {
++                routes.insert((class, destination), next_hop);
++            }
++        }
++    }
++    routes
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::proto::peer_rpc::AvianPolicyEdge;
++    fn node(id: u32, edges: &[(u32, u32, u64)]) -> RoutePeerInfo {
++        let mut record = RoutePeerInfo::new();
++        record.peer_id = id;
++        record.avian_policy_edges = edges
++            .iter()
++            .map(
++                |(destination, allowed_classes, latency_us)| AvianPolicyEdge {
++                    destination: *destination,
++                    allowed_classes: *allowed_classes,
++                    latency_us: *latency_us,
++                },
++            )
++            .collect();
++        record
++    }
++    #[test]
++    fn avian_topology_remote_restrictions_and_direct_bypass() {
++        let mut records = vec![
++            node(1, &[(2, 30, 1), (3, 30, 20), (4, 6, 1)]),
++            node(2, &[(4, 6, 1)]),
++            node(3, &[(4, 30, 20)]),
++            node(4, &[]),
++        ];
++        let routes = calculate(1, records.clone());
++        assert_eq!(routes.get(&(1, 4)), Some(&4));
++        assert_eq!(routes.get(&(3, 4)), Some(&3));
++        assert_eq!(routes.get(&(4, 4)), Some(&3));
++        records.retain(|record| record.peer_id != 3);
++        let routes = calculate(1, records);
++        assert_eq!(routes.get(&(1, 4)), Some(&4));
++        assert!(!routes.contains_key(&(3, 4)));
++    }
++    #[test]
++    fn avian_topology_unknown_metrics_and_cycles() {
++        let records = vec![
++            node(1, &[(2, 30, 0), (3, 30, 20)]),
++            node(2, &[(4, 30, 0)]),
++            node(3, &[(1, 30, 1), (4, 30, 20)]),
++            node(4, &[]),
++        ];
++        assert_eq!(calculate(1, records).get(&(3, 4)), Some(&3));
++    }
++}
++
++#[cfg(test)]
++mod parallel_link_tests {
++    use super::*;
++    use crate::proto::peer_rpc::AvianPolicyEdge;
++    #[test]
++    fn avian_topology_parallel_connection_cost_matches_class_eligibility() {
++        let record = |id, edges| {
++            let mut value = RoutePeerInfo::new();
++            value.peer_id = id;
++            value.avian_policy_edges = edges;
++            value
++        };
++        let edge = |destination, allowed_classes, latency_us| AvianPolicyEdge {
++            destination,
++            allowed_classes,
++            latency_us,
++        };
++        let records = vec![
++            record(1, vec![edge(2, 6, 1), edge(2, 30, 100), edge(3, 30, 20)]),
++            record(2, vec![edge(4, 30, 1)]),
++            record(3, vec![edge(4, 30, 20)]),
++            record(4, vec![]),
++        ];
++        let routes = calculate(1, records);
++        assert_eq!(routes.get(&(1, 4)), Some(&2));
++        assert_eq!(routes.get(&(3, 4)), Some(&3));
++    }
++}
+diff --git a/easytier/src/peers/peer.rs b/easytier/src/peers/peer.rs
+index 0d44719..2ceebdc 100644
+--- a/easytier/src/peers/peer.rs
++++ b/easytier/src/peers/peer.rs
+@@ -226,6 +226,45 @@ impl Peer {
+         Ok(())
+     }
+ 
++    pub(crate) fn policy_edges(&self) -> Vec<crate::proto::peer_rpc::AvianPolicyEdge> {
++        let mut edges = Vec::new();
++        for connection in self.conns.iter() {
++            if connection.is_closed() {
++                continue;
++            }
++            let mut allowed_classes = 0u32;
++            let info = connection.get_conn_info();
++            let measured = connection.get_stats().latency_us as u64;
++            let latency_us = if measured > 0 {
++                measured.div_ceil(1000) * 1000
++            } else {
++                0
++            };
++            for class in 1..=4 {
++                let mut packet = ZCPacket::new_with_payload(&[]);
++                packet.fill_peer_manager_hdr(
++                    1,
++                    self.peer_node_id,
++                    crate::tunnel::packet_def::PacketType::Data as u8,
++                );
++                packet
++                    .mut_peer_manager_header()
++                    .unwrap()
++                    .set_avian_traffic_class(class);
++                if super::traffic_policy::permits_connection(&packet, info.tunnel.as_ref()) {
++                    allowed_classes |= 1 << class;
++                }
++            }
++            edges.push(crate::proto::peer_rpc::AvianPolicyEdge {
++                destination: self.peer_node_id,
++                allowed_classes,
++                latency_us,
++            });
++        }
++        edges.sort_by_key(|edge| (edge.allowed_classes, edge.latency_us));
++        edges
++    }
++
+     pub async fn close_peer_conn(&self, conn_id: &PeerConnId) -> Result<(), Error> {
+         let has_key = self.conns.contains_key(conn_id);
+         if !has_key {
+diff --git a/easytier/src/peers/peer_map.rs b/easytier/src/peers/peer_map.rs
+index 46e55aa..3780ab6 100644
+--- a/easytier/src/peers/peer_map.rs
++++ b/easytier/src/peers/peer_map.rs
+@@ -357,6 +357,16 @@ impl PeerMap {
+         }
+     }
+ 
++    pub(crate) fn policy_edges(&self) -> Vec<crate::proto::peer_rpc::AvianPolicyEdge> {
++        let mut edges = self
++            .peer_map
++            .iter()
++            .flat_map(|peer| peer.policy_edges())
++            .collect::<Vec<_>>();
++        edges.sort_by_key(|edge| (edge.destination, edge.allowed_classes, edge.latency_us));
++        edges
++    }
++
+     pub async fn list_routes(&self) -> DashMap<PeerId, PeerId> {
+         let route_map = DashMap::new();
+         for route in self.routes.read().await.iter() {
+diff --git a/easytier/src/peers/peer_manager.rs b/easytier/src/peers/peer_manager.rs
+index 17031a9..f9ded6b 100644
+--- a/easytier/src/peers/peer_manager.rs
++++ b/easytier/src/peers/peer_manager.rs
+@@ -1296,6 +1296,13 @@ impl PeerManager {
+                 peers
+             }
+ 
++            async fn policy_edges(&self) -> Vec<crate::proto::peer_rpc::AvianPolicyEdge> {
++                self.peers
++                    .upgrade()
++                    .map(|peers| peers.policy_edges())
++                    .unwrap_or_default()
++            }
++
+             fn my_peer_id(&self) -> PeerId {
+                 self.my_peer_id
+             }
+@@ -1529,11 +1536,24 @@ impl PeerManager {
+         msg: ZCPacket,
+         dst_peer_id: PeerId,
+     ) -> Result<(), Error> {
+-        let policy =
+-            Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first());
++        let policy = if msg.peer_manager_header().unwrap().packet_type == PacketType::Data as u8 {
++            NextHopPolicy::TrafficClass(msg.peer_manager_header().unwrap().avian_traffic_class())
++        } else {
++            Self::get_next_hop_policy(msg.peer_manager_header().unwrap().is_latency_first())
++        };
+         let packet_type = msg.peer_manager_header().unwrap().packet_type;
+         let msg_len = msg.buf_len() as u64;
+-        let send_result = if peers.has_peer(dst_peer_id) {
++        let send_result = if matches!(policy, NextHopPolicy::TrafficClass(_)) {
++            let next = peers
++                .get_gateway_peer_id(dst_peer_id, policy.clone())
++                .await
++                .ok_or_else(|| Error::RouteError(Some("no class-eligible topology path".into())))?;
++            if next == dst_peer_id {
++                peers.send_msg_directly(msg, dst_peer_id).await
++            } else {
++                relay_peer_map.send_msg(msg, dst_peer_id, policy).await
++            }
++        } else if peers.has_peer(dst_peer_id) {
+             peers.send_msg_directly(msg, dst_peer_id).await
+         } else if foreign_network_client.has_next_hop(dst_peer_id) {
+             foreign_network_client.send_msg(msg, dst_peer_id).await
+@@ -1709,7 +1729,9 @@ impl PeerManager {
+             tunnel::packet_def::PacketType::Data as u8,
+         );
+         let traffic_class = super::traffic_policy::classify_ip_packet(msg.payload());
+-        msg.mut_peer_manager_header().unwrap().set_avian_traffic_class(traffic_class);
++        msg.mut_peer_manager_header()
++            .unwrap()
++            .set_avian_traffic_class(traffic_class);
+         if !self.run_nic_packet_process_pipeline(&mut msg).await {
+             return Ok(());
+         }
+diff --git a/easytier/src/peers/peer_ospf_route.rs b/easytier/src/peers/peer_ospf_route.rs
+index b99343b..7e9a5f4 100644
+--- a/easytier/src/peers/peer_ospf_route.rs
++++ b/easytier/src/peers/peer_ospf_route.rs
+@@ -76,7 +76,7 @@ use super::{
+ use atomic_shim::AtomicU64;
+ 
+ static SERVICE_ID: u32 = 7;
+-static UPDATE_PEER_INFO_PERIOD: Duration = Duration::from_secs(3600);
++static UPDATE_PEER_INFO_PERIOD: Duration = Duration::from_secs(5);
+ static REMOVE_DEAD_PEER_INFO_AFTER: Duration = Duration::from_secs(3660);
+ // the cost (latency between two peers) is i32, i32::MAX is large enough.
+ static AVOID_RELAY_COST: usize = i32::MAX as usize;
+@@ -213,6 +213,7 @@ impl RoutePeerInfo {
+             quic_port: None,
+             noise_static_pubkey: Vec::new(),
+             trusted_credential_pubkeys: Vec::new(),
++            avian_policy_edges: Vec::new(),
+             ipv6_public_addr_prefix: None,
+             ipv6_public_addr_lease: None,
+         }
+@@ -241,6 +242,7 @@ impl RoutePeerInfo {
+             .map(|pk| pk.as_bytes().to_vec())
+             .unwrap_or_default();
+         Self {
++            avian_policy_edges: Vec::new(),
+             peer_id: my_peer_id,
+             inst_id: Some(global_ctx.get_id().into()),
+             cost: 0,
+@@ -428,6 +430,7 @@ struct SyncedRouteInfo {
+     peer_infos: RwLock<OrderedHashMap<PeerId, RoutePeerInfo>>,
+     // prost doesn't support unknown fields, so we use DynamicMessage to store raw infos and propagate them to other peers.
+     raw_peer_infos: DashMap<PeerId, DynamicMessage>,
++    policy_received: DashMap<PeerId, Instant>,
+     conn_map: RwLock<OrderedHashMap<PeerId, RouteConnInfo>>,
+     foreign_network: DashMap<ForeignNetworkRouteInfoKey, ForeignNetworkRouteInfoEntry>,
+     group_trust_map: DashMap<PeerId, HashMap<String, Vec<u8>>>,
+@@ -744,6 +747,7 @@ impl SyncedRouteInfo {
+             let mut conn_map = self.conn_map.write();
+             for peer_id in &peer_ids {
+                 peer_infos.remove(peer_id);
++                self.policy_received.remove(peer_id);
+                 conn_map.remove(peer_id);
+             }
+         }
+@@ -888,6 +892,8 @@ impl SyncedRouteInfo {
+             {
+                 self.raw_peer_infos
+                     .insert(route_info.peer_id, raw_route_info.clone());
++                self.policy_received
++                    .insert(route_info.peer_id, Instant::now());
+                 guard.insert(route_info.peer_id, route_info);
+                 need_inc_version = true;
+             }
+@@ -1000,6 +1006,7 @@ impl SyncedRouteInfo {
+         my_peer_route_id: u64,
+         global_ctx: &ArcGlobalCtx,
+         public_ipv6_addr_lease: Option<Ipv6Inet>,
++        policy_edges: Vec<crate::proto::peer_rpc::AvianPolicyEdge>,
+     ) -> bool {
+         let mut new = RoutePeerInfo::new_updated_self(
+             my_peer_id,
+@@ -1007,6 +1014,7 @@ impl SyncedRouteInfo {
+             global_ctx,
+             public_ipv6_addr_lease,
+         );
++        new.avian_policy_edges = policy_edges;
+         let mut guard = self.peer_infos.upgradable_read();
+         let old = guard.get(&my_peer_id);
+         let new_version = old.map(|x| x.version).unwrap_or(0) + 1;
+@@ -1026,6 +1034,7 @@ impl SyncedRouteInfo {
+             guard.with_upgraded(|peer_infos| {
+                 new.last_update = Some(SystemTime::now().into());
+                 new.version = new_version;
++                self.policy_received.insert(my_peer_id, Instant::now());
+                 peer_infos.insert(my_peer_id, new)
+             });
+             drop(guard);
+@@ -2100,6 +2109,9 @@ struct PeerRouteServiceImpl {
+     cost_calculator: std::sync::RwLock<Option<RouteCostCalculator>>,
+     route_table: RouteTable,
+     route_table_with_cost: RouteTable,
++    policy_tables: std::sync::RwLock<std::collections::BTreeMap<(u8, PeerId), PeerId>>,
++    local_policy_edges: std::sync::RwLock<Vec<crate::proto::peer_rpc::AvianPolicyEdge>>,
++    policy_expires: std::sync::Mutex<Instant>,
+     foreign_network_owner_map: DashMap<NetworkIdentity, Vec<PeerId>>,
+     foreign_network_my_peer_id_map: DashMap<(String, PeerId), PeerId>,
+     synced_route_info: SyncedRouteInfo,
+@@ -2153,12 +2165,16 @@ impl PeerRouteServiceImpl {
+ 
+             route_table: RouteTable::new(),
+             route_table_with_cost: RouteTable::new(),
++            policy_tables: Default::default(),
++            local_policy_edges: Default::default(),
++            policy_expires: std::sync::Mutex::new(Instant::now()),
+             foreign_network_owner_map: DashMap::new(),
+             foreign_network_my_peer_id_map: DashMap::new(),
+ 
+             synced_route_info: SyncedRouteInfo {
+                 peer_infos: RwLock::new(OrderedHashMap::new()),
+                 raw_peer_infos: DashMap::new(),
++                policy_received: DashMap::new(),
+                 conn_map: RwLock::new(OrderedHashMap::new()),
+                 foreign_network: DashMap::new(),
+                 group_trust_map: DashMap::new(),
+@@ -2334,10 +2350,14 @@ impl PeerRouteServiceImpl {
+             self.my_peer_route_id,
+             &self.global_ctx,
+             *self.self_public_ipv6_addr_lease.lock().unwrap(),
++            self.local_policy_edges.read().unwrap().clone(),
+         )
+     }
+ 
+     async fn update_my_conn_info(&self) -> bool {
++        if let Some(interface) = self.interface.lock().await.as_ref() {
++            *self.local_policy_edges.write().unwrap() = interface.policy_edges().await;
++        }
+         let current_generation = self.interface_peers_generation.load(Ordering::Acquire);
+         let generation_applied = self
+             .applied_interface_peers_generation
+@@ -2420,6 +2440,46 @@ impl PeerRouteServiceImpl {
+ 
+         drop(calc_locked);
+ 
++        let relay_keys: BTreeSet<Vec<u8>> = self
++            .synced_route_info
++            .local_credentials
++            .local_trusted_credentials()
++            .into_iter()
++            .filter(|credential| credential.allow_relay)
++            .map(|credential| credential.pubkey)
++            .collect();
++        let infos = self.synced_route_info.peer_infos.read();
++        let mut minimum_lifetime = Duration::from_secs(20);
++        let fresh = infos
++            .values()
++            .filter(|record| {
++                let age = self
++                    .synced_route_info
++                    .policy_received
++                    .get(&record.peer_id)
++                    .and_then(|received| Instant::now().checked_duration_since(*received));
++                if let Some(age) = age.filter(|age| *age < Duration::from_secs(20)) {
++                    minimum_lifetime = minimum_lifetime.min(Duration::from_secs(20) - age);
++                    true
++                } else {
++                    false
++                }
++            })
++            .cloned()
++            .map(|mut record| {
++                let relay_allowed = relay_keys.contains(&record.noise_static_pubkey);
++                if !relay_allowed {
++                    let mut flags = record.feature_flag.unwrap_or_default();
++                    flags.avoid_relay_data = true;
++                    record.feature_flag = Some(flags);
++                }
++                record
++            })
++            .collect();
++        *self.policy_tables.write().unwrap() =
++            super::topology_policy::calculate(self.my_peer_id, fresh);
++        *self.policy_expires.lock().unwrap() =
++            Instant::now() + minimum_lifetime.max(Duration::from_millis(100));
+         self.cost_calculator
+             .write()
+             .unwrap()
+@@ -2714,8 +2774,9 @@ impl PeerRouteServiceImpl {
+     }
+ 
+     async fn update_my_infos(&self) -> bool {
+-        let my_peer_info_updated = self.update_my_peer_info();
++        // Collect connection policy before publishing this revision, including withdrawals.
+         let my_conn_info_updated = self.update_my_conn_info().await;
++        let my_peer_info_updated = self.update_my_peer_info();
+         let my_foreign_network_updated = self.update_my_foreign_network().await;
+         let mut untrusted_changed = false;
+         if my_peer_info_updated {
+@@ -3986,6 +4047,20 @@ impl Route for PeerRoute {
+         dst_peer_id: PeerId,
+         policy: NextHopPolicy,
+     ) -> Option<PeerId> {
++        if let NextHopPolicy::TrafficClass(class) = policy {
++            let expired = Instant::now() >= *self.service_impl.policy_expires.lock().unwrap();
++            if expired {
++                self.service_impl.update_route_table();
++            }
++            let next = self
++                .service_impl
++                .policy_tables
++                .read()
++                .unwrap()
++                .get(&(class, dst_peer_id))
++                .copied()?;
++            return Some(next);
++        }
+         let route_table = if matches!(policy, NextHopPolicy::LeastCost) {
+             &self.service_impl.route_table_with_cost
+         } else {
+@@ -6750,3 +6825,111 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod avian_topology_freshness_tests {
++    use super::*;
++    use crate::common::global_ctx::tests::get_mock_global_ctx;
++    use crate::peers::route_trait::RouteInterface;
++    struct PolicyInterface;
++    #[async_trait::async_trait]
++    impl RouteInterface for PolicyInterface {
++        async fn list_peers(&self) -> Vec<PeerId> {
++            vec![2]
++        }
++        fn my_peer_id(&self) -> PeerId {
++            1
++        }
++        async fn policy_edges(&self) -> Vec<crate::proto::peer_rpc::AvianPolicyEdge> {
++            vec![crate::proto::peer_rpc::AvianPolicyEdge {
++                destination: 2,
++                allowed_classes: 6,
++                latency_us: 1000,
++            }]
++        }
++    }
++    #[tokio::test]
++    async fn avian_topology_connection_policy_published_in_same_update() {
++        let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
++        *service.interface.lock().await = Some(Box::new(PolicyInterface));
++        service.mark_interface_peers_dirty();
++        service.update_my_infos().await;
++        let info = service
++            .synced_route_info
++            .peer_infos
++            .read()
++            .get(&1)
++            .unwrap()
++            .clone();
++        assert_eq!(info.avian_policy_edges.len(), 1);
++        assert_eq!(info.avian_policy_edges[0].allowed_classes, 6);
++    }
++    #[tokio::test]
++    async fn avian_topology_duplicate_advertisement_does_not_refresh_expired_policy() {
++        let service = PeerRouteServiceImpl::new(1, get_mock_global_ctx());
++        let mut source = RoutePeerInfo::new();
++        source.peer_id = 1;
++        source.version = 1;
++        source
++            .avian_policy_edges
++            .push(crate::proto::peer_rpc::AvianPolicyEdge {
++                destination: 2,
++                allowed_classes: 30,
++                latency_us: 1000,
++            });
++        service
++            .synced_route_info
++            .peer_infos
++            .write()
++            .insert(1, source);
++        service
++            .synced_route_info
++            .policy_received
++            .insert(1, Instant::now());
++        let mut destination = RoutePeerInfo::new();
++        destination.peer_id = 2;
++        destination.version = 1;
++        let make_raw = |record: &RoutePeerInfo| {
++            let mut raw = DynamicMessage::new(RoutePeerInfo::default().descriptor());
++            raw.transcode_from(record).unwrap();
++            raw
++        };
++        let raw = make_raw(&destination);
++        service
++            .synced_route_info
++            .update_peer_infos(
++                1,
++                service.my_peer_route_id,
++                2,
++                &[destination.clone()],
++                &[raw.clone()],
++            )
++            .unwrap();
++        let expired = Instant::now() - Duration::from_secs(21);
++        service.synced_route_info.policy_received.insert(2, expired);
++        service
++            .synced_route_info
++            .update_peer_infos(
++                1,
++                service.my_peer_route_id,
++                2,
++                &[destination.clone()],
++                &[raw],
++            )
++            .unwrap();
++        assert_eq!(
++            *service.synced_route_info.policy_received.get(&2).unwrap(),
++            expired
++        );
++        service.update_route_table();
++        assert!(!service.policy_tables.read().unwrap().contains_key(&(1, 2)));
++        destination.version = 2;
++        let raw = make_raw(&destination);
++        service
++            .synced_route_info
++            .update_peer_infos(1, service.my_peer_route_id, 2, &[destination], &[raw])
++            .unwrap();
++        service.update_route_table();
++        assert_eq!(service.policy_tables.read().unwrap().get(&(1, 2)), Some(&2));
++    }
++}
+diff --git a/easytier/src/peers/route_trait.rs b/easytier/src/peers/route_trait.rs
+index e6427ce..5d241a3 100644
+--- a/easytier/src/peers/route_trait.rs
++++ b/easytier/src/peers/route_trait.rs
+@@ -23,6 +23,7 @@ pub enum NextHopPolicy {
+     #[default]
+     LeastHop,
+     LeastCost,
++    TrafficClass(u8),
+ }
+ 
+ pub type ForeignNetworkRouteInfoMap =
+@@ -31,6 +32,9 @@ pub type ForeignNetworkRouteInfoMap =
+ #[async_trait::async_trait]
+ pub trait RouteInterface {
+     async fn list_peers(&self) -> Vec<PeerId>;
++    async fn policy_edges(&self) -> Vec<crate::proto::peer_rpc::AvianPolicyEdge> {
++        Vec::new()
++    }
+     fn my_peer_id(&self) -> PeerId;
+     fn need_periodic_requery_peers(&self) -> bool {
+         false
+@@ -84,8 +88,11 @@ pub trait Route {
+     async fn get_next_hop_with_policy(
+         &self,
+         peer_id: PeerId,
+-        _policy: NextHopPolicy,
++        policy: NextHopPolicy,
+     ) -> Option<PeerId> {
++        if matches!(policy, NextHopPolicy::TrafficClass(_)) {
++            return None;
++        }
+         self.get_next_hop(peer_id).await
+     }
+ 
+@@ -234,3 +241,80 @@ impl Route for MockRoute {
+         panic!("mock route")
+     }
+ }
++
++#[cfg(test)]
++mod policy_default_tests {
++    use super::*;
++    struct StaticRoute;
++    #[async_trait::async_trait]
++    impl Route for StaticRoute {
++        async fn open(&self, _interface: RouteInterfaceBox) -> Result<u8, ()> {
++            panic!("mock route")
++        }
++
++        async fn close(&self) {
++            panic!("mock route")
++        }
++
++        async fn get_next_hop(&self, peer_id: PeerId) -> Option<PeerId> {
++            Some(peer_id + 1)
++        }
++
++        async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route> {
++            panic!("mock route")
++        }
++
++        // TODO: rewrite route management, remove this
++        async fn list_proxy_cidrs(&self) -> BTreeSet<Ipv4Cidr> {
++            unimplemented!()
++        }
++
++        // TODO: rewrite route management, remove this
++        async fn list_proxy_cidrs_v6(&self) -> BTreeSet<Ipv6Cidr> {
++            unimplemented!()
++        }
++
++        async fn list_public_ipv6_routes(&self) -> BTreeSet<Ipv6Inet> {
++            unimplemented!()
++        }
++
++        async fn get_my_public_ipv6_addr(&self) -> Option<Ipv6Inet> {
++            panic!("mock route")
++        }
++
++        async fn get_peer_info(&self, _peer_id: PeerId) -> Option<RoutePeerInfo> {
++            panic!("mock route")
++        }
++
++        async fn get_peer_info_last_update_time(&self) -> std::time::Instant {
++            panic!("mock route")
++        }
++
++        fn get_peer_groups(&self, _peer_id: PeerId) -> Arc<Vec<String>> {
++            panic!("mock route")
++        }
++    }
++
++    #[tokio::test]
++    async fn avian_topology_provider_without_policy_support_fails_closed() {
++        let route = StaticRoute;
++        assert_eq!(
++            route
++                .get_next_hop_with_policy(2, NextHopPolicy::TrafficClass(3))
++                .await,
++            None
++        );
++        assert_eq!(
++            route
++                .get_next_hop_with_policy(2, NextHopPolicy::LeastCost)
++                .await,
++            Some(3)
++        );
++        assert_eq!(
++            route
++                .get_next_hop_with_policy(2, NextHopPolicy::LeastHop)
++                .await,
++            Some(3)
++        );
++    }
++}
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+index 7d47ffb..661d2d1 100644
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -884,7 +884,7 @@ impl PeerConn {
+     }
+ 
+     async fn do_noise_handshake_as_client(&self) -> Result<NoiseHandshakeResult, Error> {
+-        let prologue = b"avian-peerconn-noise-hop-policy-v1".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-topology-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+@@ -1150,7 +1150,7 @@ impl PeerConn {
+     where
+         Fn: FnMut(&mut PeerConn, &str) -> Result<(), Error> + Send,
+     {
+-        let prologue = b"avian-peerconn-noise-hop-policy-v1".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-topology-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+diff --git a/easytier/src/peers/mod.rs b/easytier/src/peers/mod.rs
+index f6ba5e0..9653acc 100644
+--- a/easytier/src/peers/mod.rs
++++ b/easytier/src/peers/mod.rs
+@@ -1,6 +1,7 @@
+-mod traffic_policy;
+-mod hop_transport;
+ mod graph_algo;
++mod hop_transport;
++mod topology_policy;
++mod traffic_policy;
+ 
+ pub mod acl_filter;
+ pub mod credential_manager;

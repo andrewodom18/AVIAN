@@ -4,7 +4,15 @@ The harness creates an offline four-node diamond with individually keyed,
 verified members. It sends sequenced UDP and persistent TCP echo traffic in both
 directions, then stops the selected relay or drops its physical traffic without
 changing link state. TCP connections are never reopened. Reports record route
-change latency separately from the maximum application-delivery gap.
+display changes separately from the maximum application-delivery gap. Both TCP
+and UDP test flows use the same bulk traffic class.
+
+The fault target comes from measured physical traffic at the relays, not the
+generic route display. The harness first measures idle control traffic, then
+requires one relay's excess workload bytes to exceed twice the other's before
+faulting it. Ambiguous fixtures stop with an error. After the fault, a passing
+run also requires the alternate relay to carry the workload. The generic route
+display is diagnostic only and cannot establish which class-specific path was used.
 
 ```sh
 python3 qualification/failover/run.py --engine-directory .local/authenticated-engine-final \

@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--image", default="avian-engine-build:local")
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--network-policy", action="store_true")
+    parser.add_argument("--topology-policy", action="store_true")
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("timeout must be positive")
@@ -48,12 +49,22 @@ def main():
                QUALIFICATION / "patches" / "authenticated-forwarding.patch"]
     required_tests = set(REQUIRED_TESTS)
     test_filter = "avian_hop"
-    if arguments.network_policy:
+    if arguments.network_policy or arguments.topology_policy:
         patches.extend(QUALIFICATION / "patches" / name for name in
                        ["traffic-policy.patch", "live-revocation.patch", "failover.patch"])
         required_tests.update(["avian_policy_classification_and_metered_restrictions",
                                "avian_policy_rejects_authentication_only_peer"])
         test_filter = "avian_"
+    if arguments.topology_policy:
+        patches.append(QUALIFICATION / "patches" / "topology-policy.patch")
+        required_tests.update([
+            "avian_topology_remote_restrictions_and_direct_bypass",
+            "avian_topology_unknown_metrics_and_cycles",
+            "avian_topology_parallel_connection_cost_matches_class_eligibility",
+            "avian_topology_control_ports_are_explicit_and_bidirectional",
+            "avian_topology_duplicate_advertisement_does_not_refresh_expired_policy",
+            "avian_topology_provider_without_policy_support_fails_closed",
+        ])
     for patch in patches:
         if not patch.is_file():
             parser.error(f"required patch is missing: {patch}")

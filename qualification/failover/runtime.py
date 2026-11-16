@@ -29,6 +29,14 @@ class TrialNode(Node):
         ], stdout=self.log_handle, stderr=subprocess.STDOUT, env=environment)
 
 
+def relay_bytes(node):
+    """Observe actual physical traffic, independently of the generic route display."""
+    result = namespace_command(node.name, ['ip', '-s', '-j', 'link', 'show', 'dev', f'peer{node.number}'])
+    interface = json.loads(result.stdout)[0]
+    statistics = interface.get('stats64', interface.get('stats'))
+    return statistics['rx']['bytes'] + statistics['tx']['bytes']
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fast-failover', action='store_true')
@@ -66,10 +74,12 @@ def main():
         report['destination_peers_before_fault'] = destination.command('peer')
         route = next(row for row in source.command('route') if row.get('hostname') == 'destination')
         report['initial_route'] = route
-        primary_address = route.get('next_hop_ipv4', '').split('/')[0]
-        primary = next((node for node in [relay_a, relay_b] if node.address == primary_address), None)
-        if primary is None:
-            raise RuntimeError('could not identify primary relay')
+        relays = [relay_a, relay_b]
+        idle_start = {node.name: relay_bytes(node) for node in relays}
+        idle_at = time.monotonic()
+        time.sleep(2)
+        idle_duration = time.monotonic() - idle_at
+        idle_rates = {node.name: (relay_bytes(node) - idle_start[node.name]) / idle_duration for node in relays}
         for endpoint in [source, destination]:
             workers.append(subprocess.Popen(['ip', 'netns', 'exec', endpoint.name, 'python3', '/qualification/failover/traffic.py', 'serve', endpoint.address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         time.sleep(0.4)
@@ -84,6 +94,28 @@ def main():
         for name, path in streams:
             if not path.exists() or len(path.read_text().splitlines()) < 10:
                 raise RuntimeError(f'persistent baseline stream missing: {name}')
+        active_start = {node.name: relay_bytes(node) for node in relays}
+        active_at = time.monotonic()
+        time.sleep(2)
+        active_duration = time.monotonic() - active_at
+        before_fault_bytes = {node.name: relay_bytes(node) for node in relays}
+        workload_bytes = {
+            node.name: max(0, before_fault_bytes[node.name] - active_start[node.name]
+                           - idle_rates[node.name] * active_duration)
+            for node in relays
+        }
+        primary = max(relays, key=lambda node: workload_bytes[node.name])
+        alternate = next(node for node in relays if node is not primary)
+        report['path_witness'] = {
+            'idle_control_bytes_per_second': idle_rates,
+            'active_interval_seconds': active_duration,
+            'excess_workload_bytes': workload_bytes,
+            'faulted_relay': primary.name,
+            'alternate_relay': alternate.name,
+        }
+        if workload_bytes[primary.name] < 1024 or workload_bytes[primary.name] <= 2 * workload_bytes[alternate.name]:
+            raise RuntimeError('actual workload path is ambiguous; refusing to fault a relay selected only by the generic route display')
+        primary_address = primary.address
         fault_time = time.monotonic()
         if arguments.fault == 'relay_stop':
             primary.stop()
@@ -94,13 +126,13 @@ def main():
                     namespace_command(node.name, ['iptables', '-I', chain, flag, primary.physical_address, '-j', 'DROP'])
         report['fault_at_monotonic'] = fault_time
         deadline = fault_time + 14
-        report['route_change_seconds'] = None
+        report['generic_route_change_seconds'] = None
         while time.monotonic() < deadline:
-            if report['route_change_seconds'] is None:
+            if report['generic_route_change_seconds'] is None:
                 routes = source.command('route')
                 active = next((row for row in routes if row.get('hostname') == 'destination'), None)
                 if active and active.get('next_hop_ipv4', '').split('/')[0] != primary_address:
-                    report['route_change_seconds'] = time.monotonic() - fault_time
+                    report['generic_route_change_seconds'] = time.monotonic() - fault_time
             time.sleep(0.2)
         report['streams'] = []
         for name, path in streams:
@@ -115,7 +147,16 @@ def main():
             report['streams'].append({'name': name, 'received_before': len(before), 'received_after': len(after),
                 'first_delivery_after_fault_seconds': recovery, 'delivery_gap_seconds': gap,
                 'passed': gap is not None and gap <= 2})
-        report['status'] = 'pass' if all(stream['passed'] for stream in report['streams']) else 'fail'
+        after_fault_duration = time.monotonic() - fault_time
+        after_workload = {
+            node.name: max(0, relay_bytes(node) - before_fault_bytes[node.name]
+                           - idle_rates[node.name] * after_fault_duration)
+            for node in relays
+        }
+        report['path_witness']['post_fault_excess_workload_bytes'] = after_workload
+        alternate_observed = after_workload[alternate.name] > 1024 and after_workload[alternate.name] > 2 * after_workload[primary.name]
+        report['path_witness']['alternate_carries_workload'] = alternate_observed
+        report['status'] = 'pass' if alternate_observed and all(stream['passed'] for stream in report['streams']) else 'fail'
         report['route_after_fault'] = source.command('route')
     except Exception as error:
         report['status'] = 'error'

@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "patches": [
+    {
+      "name": "verified-membership.patch",
+      "sha256": "c770d4c146dc188a986b271789831e1b04e73c000755ae3dcc45881c6237a077"
+    },
+    {
+      "name": "authenticated-forwarding.patch",
+      "sha256": "492fe4748a10721b7743c88e26f411cb1c967ab7110bde7e47ac72cea92092ac"
+    },
+    {
+      "name": "traffic-policy.patch",
+      "sha256": "7535cb49ad05201208c94c36c720442cf4caab434d9ca153c83e4e73a4c53ced"
+    },
+    {
+      "name": "live-revocation.patch",
+      "sha256": "9226d7de6fa969ca1f147fc6fe49acd9f5abce8b2a1ce55d8b6fc4d5e88c188f"
+    },
+    {
+      "name": "failover.patch",
+      "sha256": "35b98f0cbae59d69169def105d2c59c15938292fb85e2be526bf71ee24143b48"
+    },
+    {
+      "name": "topology-policy.patch",
+      "sha256": "0d26b33a228613b07aae0f8eacc8dd171339337fe23eec14778ffe473cb0cac4"
+    }
+  ],
+  "engine_binary_sha256": {
+    "easytier-core": "3344ac072f87da93745c75ecfb0dbb0336d1df9ec5f8409c2cbd302965a7e750",
+    "easytier-cli": "7f7bfdad2eb77ca8512aa57a3186710fa0fca918186b374df7fb31d922bb3ade"
+  },
+  "qualified_for_cutover": false,
+  "scope": "Isolated Linux networks; per-class eligibility and latency routing; public-key signed revocation exchange.",
+  "checks": {
+    "topology": {
+      "gates": [
+        {
+          "name": "video_uses_longer_permitted_remote_path",
+          "status": "pass"
+        },
+        {
+          "name": "reverse_video_uses_permitted_remote_path",
+          "status": "pass"
+        },
+        {
+          "name": "control_uses_remaining_metered_path",
+          "status": "pass"
+        },
+        {
+          "name": "video_denied_without_eligible_remote_path",
+          "status": "pass"
+        },
+        {
+          "name": "bulk_denied_without_eligible_remote_path",
+          "status": "pass"
+        },
+        {
+          "name": "remote_explicit_video_allowance",
+          "status": "pass"
+        },
+        {
+          "name": "partition_rejoin_restores_delivery",
+          "status": "pass"
+        }
+      ]
+    },
+    "signed_distribution": {
+      "gates": [
+        {
+          "name": "signed_update_crosses_relay",
+          "status": "pass"
+        },
+        {
+          "name": "unregistered_http_denied_on_metered_link",
+          "status": "pass"
+        },
+        {
+          "name": "tampered_signature_rejected",
+          "status": "pass"
+        },
+        {
+          "name": "wrong_network_rejected",
+          "status": "pass"
+        },
+        {
+          "name": "signed_replay_rejected",
+          "status": "pass"
+        },
+        {
+          "name": "missing_signed_revision_rejected",
+          "status": "pass"
+        },
+        {
+          "name": "partition_does_not_invent_revision",
+          "status": "pass"
+        },
+        {
+          "name": "partition_restart_catches_up",
+          "status": "pass"
+        },
+        {
+          "name": "persistent_tcp_udp_baseline",
+          "status": "pass"
+        },
+        {
+          "name": "distributed_revocation_stops_established_traffic",
+          "status": "pass",
+          "bound_seconds": 2,
+          "signed_revision_received": true,
+          "successful_baseline_samples": 9,
+          "after_deadline_samples": 3,
+          "successful_after_deadline": 0
+        },
+        {
+          "name": "ordinary_peers_have_no_issuer_key",
+          "status": "pass"
+        }
+      ]
+    },
+    "blackhole": {
+      "status": "pass",
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 118,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 1.5117660839999871,
+          "delivery_gap_seconds": 1.5186311249999562,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 118,
+          "received_after": 253,
+          "first_delivery_after_fault_seconds": 1.2594509179999704,
+          "delivery_gap_seconds": 1.2665624179999213,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 118,
+          "received_after": 277,
+          "first_delivery_after_fault_seconds": 1.511987543000032,
+          "delivery_gap_seconds": 1.5186194589999786,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 118,
+          "received_after": 253,
+          "first_delivery_after_fault_seconds": 1.2588611260000562,
+          "delivery_gap_seconds": 1.2655243340000197,
+          "passed": true
+        }
+      ],
+      "target_seconds": 2
+    },
+    "blackhole_repeat": {
+      "status": "pass",
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 115,
+          "received_after": 270,
+          "first_delivery_after_fault_seconds": 1.4507410840000148,
+          "delivery_gap_seconds": 1.4929543340000464,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 115,
+          "received_after": 248,
+          "first_delivery_after_fault_seconds": 1.1721654589999844,
+          "delivery_gap_seconds": 1.2144912090000162,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 116,
+          "received_after": 270,
+          "first_delivery_after_fault_seconds": 1.5171979169999759,
+          "delivery_gap_seconds": 1.550102833999972,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 116,
+          "received_after": 248,
+          "first_delivery_after_fault_seconds": 1.2226190839999163,
+          "delivery_gap_seconds": 1.2547712919999867,
+          "passed": true
+        }
+      ],
+      "target_seconds": 2
+    },
+    "relay_stop": {
+      "status": "pass",
+      "streams": [
+        {
+          "name": "source-tcp",
+          "received_before": 118,
+          "received_after": 275,
+          "first_delivery_after_fault_seconds": 0.03923629100006565,
+          "delivery_gap_seconds": 0.10128262499995344,
+          "passed": true
+        },
+        {
+          "name": "source-udp",
+          "received_before": 118,
+          "received_after": 274,
+          "first_delivery_after_fault_seconds": 0.040872041000056925,
+          "delivery_gap_seconds": 0.10027033400001528,
+          "passed": true
+        },
+        {
+          "name": "destination-tcp",
+          "received_before": 118,
+          "received_after": 275,
+          "first_delivery_after_fault_seconds": 0.04151033300001927,
+          "delivery_gap_seconds": 0.10153566700000738,
+          "passed": true
+        },
+        {
+          "name": "destination-udp",
+          "received_before": 118,
+          "received_after": 274,
+          "first_delivery_after_fault_seconds": 0.03897062500004722,
+          "delivery_gap_seconds": 0.09979395799996382,
+          "passed": true
+        }
+      ],
+      "target_seconds": 2
+    }
+  },
+  "topology_unit_tests": [
+    {
+      "name": "peers::route_trait::policy_default_tests::avian_topology_provider_without_policy_support_fails_closed",
+      "status": "ok"
+    },
+    {
+      "name": "peers::traffic_policy::control_port_tests::avian_topology_control_ports_are_explicit_and_bidirectional",
+      "status": "ok"
+    },
+    {
+      "name": "peers::topology_policy::parallel_link_tests::avian_topology_parallel_connection_cost_matches_class_eligibility",
+      "status": "ok"
+    },
+    {
+      "name": "peers::topology_policy::tests::avian_topology_unknown_metrics_and_cycles",
+      "status": "ok"
+    },
+    {
+      "name": "peers::topology_policy::tests::avian_topology_remote_restrictions_and_direct_bypass",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_ospf_route::avian_topology_freshness_tests::avian_topology_connection_policy_published_in_same_update",
+      "status": "ok"
+    },
+    {
+      "name": "peers::peer_ospf_route::avian_topology_freshness_tests::avian_topology_duplicate_advertisement_does_not_refresh_expired_policy",
+      "status": "ok"
+    }
+  ],
+  "service_binary_sha256": {
+    "avianctl": "e39a817d6d726865b2381d099742157fc08c14debb05abd42800cad74a764f5d",
+    "avian-revocationd": "ca63710650b3843d9964ebc009abe035fbddde9fd203f38e85fd0175568552e0"
+  }
+}

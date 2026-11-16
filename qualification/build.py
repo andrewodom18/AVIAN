@@ -19,19 +19,22 @@ def main():
     parser.add_argument("--traffic-policy", action="store_true")
     parser.add_argument("--live-revocation", action="store_true")
     parser.add_argument("--failover", action="store_true")
+    parser.add_argument("--topology-policy", action="store_true")
     arguments = parser.parse_args()
     lock = json.loads((DIRECTORY / "engine.lock.json").read_text())
     patch = DIRECTORY / "patches" / "verified-membership.patch"
     patches = [patch]
-    authenticated_forwarding = arguments.authenticated_forwarding or arguments.traffic_policy or arguments.live_revocation or arguments.failover
+    authenticated_forwarding = arguments.authenticated_forwarding or arguments.traffic_policy or arguments.live_revocation or arguments.failover or arguments.topology_policy
     if authenticated_forwarding:
         patches.append(DIRECTORY / "patches" / "authenticated-forwarding.patch")
-    if arguments.traffic_policy:
+    if arguments.traffic_policy or arguments.topology_policy:
         patches.append(DIRECTORY / "patches" / "traffic-policy.patch")
-    if arguments.live_revocation:
+    if arguments.live_revocation or arguments.topology_policy:
         patches.append(DIRECTORY / "patches" / "live-revocation.patch")
-    if arguments.failover:
+    if arguments.failover or arguments.topology_policy:
         patches.append(DIRECTORY / "patches" / "failover.patch")
+    if arguments.topology_policy:
+        patches.append(DIRECTORY / "patches" / "topology-policy.patch")
     patch_contents = [(candidate_patch.name, candidate_patch.read_bytes()) for candidate_patch in patches]
     output = arguments.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -78,9 +81,10 @@ def main():
             "patches": [{"name": name, "sha256": hashlib.sha256(contents).hexdigest()}
                         for name, contents in patch_contents],
             "authenticated_forwarding": authenticated_forwarding,
-            "traffic_policy": arguments.traffic_policy,
-            "live_revocation": arguments.live_revocation,
-            "failover": arguments.failover,
+            "traffic_policy": arguments.traffic_policy or arguments.topology_policy,
+            "live_revocation": arguments.live_revocation or arguments.topology_policy,
+            "failover": arguments.failover or arguments.topology_policy,
+            "topology_policy": arguments.topology_policy,
             "qualified_for_cutover": False,
             "binary_sha256": hashes,
         }, indent=2) + "\n")
