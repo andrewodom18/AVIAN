@@ -80,6 +80,7 @@ dependencies = [
  "anyhow",
  "avian-engine",
  "avian-membership",
+ "avian-revocations",
  "avian-routing",
  "axum",
  "clap",
@@ -130,6 +131,22 @@ dependencies = [
  "tempfile",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "avian-revocations"
+version = "0.1.0"
+dependencies = [
+ "avian-engine",
+ "avian-membership",
+ "ed25519-dalek",
+ "fs2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

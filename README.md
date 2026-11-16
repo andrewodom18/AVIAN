@@ -48,3 +48,25 @@ Plain HTTP is accepted only for a loopback CHUD instance.
 See [qualification commands](qualification/README.md) for isolated EasyTier tests.
 The experimental engine is separate from the daemon and is not deployed to hardware.
 Local budgets bound work and response sizes without imposing a membership ceiling.
+
+## Signed revocation exchange
+
+`avian-revocationd` exchanges administrator-signed updates over an explicitly
+bound private-network address. It verifies and saves updates before publishing
+the engine trust cache. Use a separate enrolled state directory on each peer.
+
+```sh
+target/debug/avian-revocationd \
+  --trust-root .local/ground/trust-root.json \
+  --membership .local/ground/membership.json \
+  --engine-trust .local/ground/engine-trust.json \
+  --listen 10.201.0.1:9180 \
+  --peer http://10.201.0.2:9180
+```
+
+Bind the service to the overlay address. Its read-only endpoint serves public
+signed records; it does not expose administration or private keys. Configure
+`control_tcp_ports: [9180]` in the experimental engine's startup traffic policy
+when signed updates must cross metered links. Ordinary HTTP remains bulk traffic.
+The service renews engine leases from verified durable membership independently
+of peer availability. Unreachable peers leave the last accepted revision intact.
