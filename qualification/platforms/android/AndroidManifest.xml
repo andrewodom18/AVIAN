@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.bespin.avian.probe">
+  <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="32" />
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <application android:label="AVIAN isolated platform probe" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+    <activity android:name=".ProbeActivity" android:exported="true" />
+    <service android:name=".ProbeService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false">
+      <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
+    </service>
+  </application>
+</manifest>
