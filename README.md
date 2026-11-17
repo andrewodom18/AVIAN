@@ -23,21 +23,28 @@ target/debug/avianctl --config .local/ground/avian.toml status
 target/debug/avianctl --help
 ```
 
-The daemon is observation-only and does not change host networking. Its loopback
-API requires the generated bearer token. Keep the state directory private and
+The daemon defaults to observation-only operation. An explicit `[runtime]`
+configuration enables start/stop control inside an existing disposable Linux
+network namespace; it cannot use the manager's namespace. Its loopback API requires
+the generated bearer token. Keep the state directory private and
 out of version control. Membership changes reload automatically; rejected reloads
 retain the last verified state and appear in `/v1/status`.
 
 ## Local API
 
-- `/v1/status`, `/v1/qualification`: runtime status and network-control availability.
+- `/v1/status`, `/v1/qualification`, `/v1/runtime`: status and qualification scope.
+- `POST /v1/network-control`: authenticated `{"action":"start"}` or `{"action":"stop"}`
+  for the configured isolated runtime; no arbitrary arguments are accepted.
+  CLI equivalents are `avianctl --config <path> runtime start`, `runtime stop`,
+  and `runtime status`.
 - `/v1/nodes`: paginated verified membership; unmeasured reachability is unknown.
 - `/v1/route-preview`: evaluates supplied observations without applying routes.
 - `/v1/events`: change notifications; slow readers receive a resync indication.
 - `/v1/radios`: read-only CHUD inventory when configured.
 
-`/v1/services` and `/v1/paths` report unavailable runtime integration. Enrollment
-does not grant aircraft-control permission.
+`/v1/services` reports unavailable service integration. `/v1/paths` reports live
+generic engine routes only while the isolated runtime is ready; it does not claim
+per-class route observation. Enrollment does not grant aircraft-control permission.
 
 CHUD credentials come from an owner-only file. HTTPS certificate verification is
 enabled; a configured certificate file supports private certificate authorities.
@@ -68,8 +75,16 @@ of peer availability. Unreachable peers leave the last accepted revision intact.
 ## Engine tests
 
 See [qualification commands](qualification/README.md) for isolated EasyTier tests.
-The experimental engine is separate from the daemon and is not deployed to hardware.
-Local budgets bound work and response sizes without imposing a membership ceiling.
+The [runtime-control harness](qualification/runtime-control/README.md) exercises
+real supervised engines without changing host networking. The supervisor checks
+pinned patch and binary hashes, signed membership, transport identity, and private
+file permissions before startup. Stop and graceful daemon shutdown reap owned processes.
+
+[Load tests](qualification/load/README.md) use resource and time budgets without a
+node ceiling. [Platform checks](qualification/platforms/README.md) distinguish API
+probes and compiler checks from native forwarding. Android physical multi-network
+operation, Windows native runtime/storage, and native macOS tunnel operation remain
+unqualified. The experimental engine is not deployed to hardware.
 
 ## Releases and licensing
 

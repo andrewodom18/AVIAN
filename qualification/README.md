@@ -68,3 +68,27 @@ trusted members.
 
 [Traffic policy](traffic-policy/README.md), [revocation](revocation/README.md), and
 [failover](failover/README.md) describe configuration and test scope.
+
+## Runtime, load, and platform checks
+
+```sh
+python3 qualification/build.py --priority-forwarding --output .local/priority-engine
+```
+
+This build includes topology policy and the opt-in `ET_PRIORITY_FORWARDING=1`
+profile: bounded per-class forwarding queues with weighted service and an 8 KiB
+TCP send buffer. Every class has reserved queue capacity; a full queue returns a
+buffer-full error instead of blocking shared dispatch. Overload can drop packets
+in any class. This bounds admission work rather than guaranteeing lossless control.
+It does not reserve physical-link bandwidth or eliminate TCP
+head-of-line blocking.
+
+Run the exact patched engine unit checks with:
+
+```sh
+python3 qualification/authenticated-forwarding/check.py --priority-forwarding \
+  --source /path/to/easytier-v2.6.4 --output qualification/results/priority-unit/runtime.json
+```
+
+See [runtime control](runtime-control/README.md), [load tests](load/README.md), and
+[platform checks](platforms/README.md) for commands, prerequisites, and measured scope.
