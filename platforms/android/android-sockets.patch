@@ -1,0 +1,416 @@
+--- a/easytier/src/common/mod.rs
++++ b/easytier/src/common/mod.rs
+@@ -146,3 +146,6 @@
+         assert_eq!(weak_js.strong_count(), 0);
+     }
+ }
++
++#[cfg(target_os = "android")]
++pub mod android_socket;
+--- a/easytier/src/tunnel/tcp.rs
++++ b/easytier/src/tunnel/tcp.rs
+@@ -79,8 +79,17 @@
+         } else {
+             bind::<TcpListener>().addr(addr).only_v6(true).call()?
+         };
+-        #[cfg(not(target_os = "linux"))]
++        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+         let listener = bind::<TcpListener>().addr(addr).only_v6(true).call()?;
++        #[cfg(target_os = "android")]
++        let listener = {
++            let binding = crate::connector::parse_underlay_binding(&self.addr).map_err(anyhow::Error::from)?
++                .ok_or_else(|| TunnelError::InvalidAddr("Android listener needs an assigned source and interface".into()))?;
++            if binding.source != addr.ip() {
++                return Err(TunnelError::InvalidAddr("Android listener source mismatch".into()));
++            }
++            bind::<TcpListener>().addr(addr).dev(binding.interface_name).only_v6(true).call()?
++        };
+ 
+         self.addr
+             .set_port(Some(listener.local_addr()?.port()))
+@@ -173,7 +182,18 @@
+         addr: SocketAddr,
+     ) -> Result<Box<dyn Tunnel>, super::TunnelError> {
+         tracing::info!(url = ?self.addr, ?addr, "connect tcp start, bind addrs: {:?}", self.bind_addrs);
++        #[cfg(not(target_os = "android"))]
+         let stream = TcpStream::connect(addr).await?;
++        #[cfg(target_os = "android")]
++        let stream = {
++            let socket = if addr.is_ipv4() {
++                TcpSocket::new_v4()?
++            } else {
++                TcpSocket::new_v6()?
++            };
++            crate::common::android_socket::prepare(&socket, addr, None, None)?;
++            socket.connect(addr).await?
++        };
+         tracing::info!(url = ?self.addr, ?addr, "connect tcp succ");
+         get_tunnel_with_tcp_stream(stream, self.addr.clone())
+     }
+@@ -211,12 +231,17 @@
+                             "explicit source binding failed".into(),
+                         ));
+                     }
++                    #[cfg(not(target_os = "android"))]
+                     if let Some(interface) = &self.underlay_interface {
+                         crate::connector::bind_socket_to_underlay(
+                             socket2::SockRef::from(&socket),
+                             interface,
+                         )?;
+                     }
++                    #[cfg(target_os = "android")]
++                    crate::common::android_socket::prepare(
++                        &socket, addr, Some(bind_addr.ip()), self.underlay_interface.as_deref(),
++                    )?;
+                     futures.push(socket.connect(addr));
+                 }
+                 Err(error) => {
+--- a/easytier/src/tunnel/udp.rs
++++ b/easytier/src/tunnel/udp.rs
+@@ -619,13 +619,32 @@
+                     .maybe_dev(tunnel_url.bind_dev())
+                     .call()?
+             };
+-            #[cfg(not(target_os = "linux"))]
++            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+             let socket = bind()
+                 .addr(addr)
+                 .only_v6(true)
+                 .maybe_dev(tunnel_url.bind_dev())
+                 .call()?;
++            #[cfg(target_os = "android")]
++            let socket = {
++                let binding = crate::connector::parse_underlay_binding(&self.addr).map_err(anyhow::Error::from)?
++                    .ok_or_else(|| TunnelError::InvalidAddr("Android listener needs an assigned source and interface".into()))?;
++                if binding.source != addr.ip() {
++                    return Err(TunnelError::InvalidAddr("Android listener source mismatch".into()));
++                }
++                bind::<UdpSocket>().addr(addr).dev(binding.interface_name).only_v6(true).call()?
++            };
+             self.socket = Some(Arc::new(socket));
++        }
++        #[cfg(target_os = "android")]
++        {
++            let binding = crate::connector::parse_underlay_binding(&self.addr).map_err(anyhow::Error::from)?
++                .ok_or_else(|| TunnelError::InvalidAddr("Android listener needs an assigned source and interface".into()))?;
++            let socket = self.socket.as_ref().ok_or_else(|| TunnelError::InvalidAddr("Android listener has no socket".into()))?;
++            if socket.local_addr()?.ip() != binding.source {
++                return Err(TunnelError::InvalidAddr("Android returned listener socket source mismatch".into()));
++            }
++            crate::common::android_socket::prepare(socket.as_ref(), socket.local_addr()?, Some(binding.source), Some(&binding.interface_name))?;
+         }
+         self.data.socket = self.socket.clone();
+ 
+@@ -876,6 +895,14 @@
+         #[cfg(target_os = "windows")]
+         crate::arch::windows::disable_connection_reset(socket.as_ref())?;
+ 
++        #[cfg(target_os = "android")]
++        {
++            let source = socket.local_addr()?.ip();
++            crate::common::android_socket::prepare(
++                socket.as_ref(), addr, (!source.is_unspecified()).then_some(source),
++                self.underlay_interface.as_deref(),
++            )?;
++        }
+         // send syn
+         let conn_id = rand::random();
+         let magic = rand::random();
+@@ -943,6 +970,7 @@
+                             "explicit source binding failed".into(),
+                         ));
+                     }
++                    #[cfg(not(target_os = "android"))]
+                     if let Some(interface) = &self.underlay_interface {
+                         crate::connector::bind_socket_to_underlay(
+                             socket2::SockRef::from(&socket),
+--- a/easytier/src/connector/mod.rs
++++ b/easytier/src/connector/mod.rs
+@@ -283,7 +283,7 @@
+     binding: &UnderlayBinding,
+     global_ctx: &ArcGlobalCtx,
+ ) -> Result<(), Error> {
+-    if !cfg!(target_os = "linux") {
++    if !cfg!(any(target_os = "linux", target_os = "android")) {
+         return Err(Error::InvalidUrl(
+             "native interface binding is unavailable on this platform".into(),
+         ));
+--- a/easytier-contrib/easytier-ffi/src/lib.rs
++++ b/easytier-contrib/easytier-ffi/src/lib.rs
+@@ -265,3 +265,142 @@
+         }
+     }
+ }
++
++#[cfg(target_os = "android")]
++mod avian_verified_host;
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub extern "C" fn avian_android_set_socket_callback(
++    callback: Option<easytier::common::android_socket::SocketCallback>,
++) {
++    easytier::common::android_socket::set_callback(callback);
++}
++
++/// # Safety
++/// Configuration is NUL-terminated; credential points to exactly length initialized bytes.
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn avian_android_start_verified(
++    configuration: *const std::ffi::c_char,
++    credential: *const u8,
++    length: usize,
++) -> i32 {
++    if configuration.is_null() || credential.is_null() || length == 0 || length > 65 {
++        return -1;
++    }
++    let Ok(configuration) = (unsafe { std::ffi::CStr::from_ptr(configuration) }).to_str() else {
++        return -1;
++    };
++    let credential = unsafe { std::slice::from_raw_parts(credential, length) };
++    avian_verified_host::start(configuration, credential).map_or(-1, |_| 0)
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub extern "C" fn avian_android_wait_instance_ready() -> i32 {
++    avian_verified_host::wait_instance_ready().map_or(-1, |_| 0)
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub extern "C" fn avian_android_refresh_trust() -> i32 {
++    avian_verified_host::refresh().map_or(-1, |_| 0)
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub extern "C" fn avian_android_stop_verified() {
++    avian_verified_host::stop();
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn avian_android_set_policy(document: *const std::ffi::c_char) -> i32 {
++    if document.is_null() {
++        return -1;
++    }
++    let Ok(document) = (unsafe { std::ffi::CStr::from_ptr(document) }).to_str() else {
++        return -1;
++    };
++    avian_verified_host::set_policy(document).map_or(-1, |_| 0)
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn avian_android_update_underlays(document: *const std::ffi::c_char) -> *const std::ffi::c_char {
++    if document.is_null() { return std::ptr::null(); }
++    let Ok(document) = (unsafe { std::ffi::CStr::from_ptr(document) }).to_str() else { return std::ptr::null(); };
++    avian_verified_host::update_underlays(document).ok()
++        .and_then(|path| std::ffi::CString::new(path).ok())
++        .map_or(std::ptr::null(), |path| path.into_raw())
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn avian_android_reconcile_underlays(document: *const std::ffi::c_char) -> i32 {
++    if document.is_null() { return -1; }
++    let Ok(document) = (unsafe { std::ffi::CStr::from_ptr(document) }).to_str() else { return -1; };
++    avian_verified_host::reconcile_underlays(document).map_or(-1, |complete| i32::from(!complete))
++}
++
++/// # Safety
++/// Both input strings are borrowed for this call; identity covers length initialized bytes.
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn avian_android_publish_services(
++    document: *const std::ffi::c_char,
++    identity: *const u8,
++    length: usize,
++) -> *const std::ffi::c_char {
++    if document.is_null() || identity.is_null() || length == 0 || length > 65 {
++        return std::ptr::null();
++    }
++    let Ok(document) = (unsafe { std::ffi::CStr::from_ptr(document) }).to_str() else {
++        return std::ptr::null();
++    };
++    let identity = unsafe { std::slice::from_raw_parts(identity, length) };
++    avian_verified_host::publish_services(document, identity)
++        .ok()
++        .and_then(|result| std::ffi::CString::new(result).ok())
++        .map_or(std::ptr::null(), |result| result.into_raw())
++}
++
++/// # Safety
++/// after is a borrowed NUL-terminated string or null for the initial page.
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn avian_android_service_page(
++    after: *const std::ffi::c_char,
++    limit: usize,
++) -> *const std::ffi::c_char {
++    let after = if after.is_null() {
++        None
++    } else {
++        let Ok(after) = (unsafe { std::ffi::CStr::from_ptr(after) }).to_str() else {
++            return std::ptr::null();
++        };
++        Some(after)
++    };
++    avian_verified_host::service_page(after, limit)
++        .ok()
++        .and_then(|result| std::ffi::CString::new(result).ok())
++        .map_or(std::ptr::null(), |result| result.into_raw())
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub extern "C" fn avian_android_status() -> *const std::ffi::c_char {
++    avian_verified_host::status().ok()
++        .and_then(|document| std::ffi::CString::new(document).ok())
++        .map_or(std::ptr::null(), |document| document.into_raw())
++}
++
++#[cfg(target_os = "android")]
++#[unsafe(no_mangle)]
++pub extern "C" fn avian_android_event_page(after: u64, limit: usize) -> *const std::ffi::c_char {
++    avian_verified_host::event_page(after, limit)
++        .ok()
++        .and_then(|result| std::ffi::CString::new(result).ok())
++        .map_or(std::ptr::null(), |result| result.into_raw())
++}
+--- /dev/null
++++ b/easytier/src/common/android_socket.rs
+@@ -0,0 +1,64 @@
++//! Android underlay binding is delegated to the owning VpnService before traffic leaves a socket.
++use std::{
++    ffi::CString,
++    io,
++    net::{IpAddr, SocketAddr},
++    os::fd::AsRawFd,
++    sync::RwLock,
++};
++
++pub type SocketCallback = unsafe extern "C" fn(
++    i32,
++    *const std::ffi::c_char,
++    *const std::ffi::c_char,
++    *const std::ffi::c_char,
++) -> i32;
++static CALLBACK: RwLock<Option<SocketCallback>> = RwLock::new(None);
++
++pub fn set_callback(callback: Option<SocketCallback>) {
++    if let Ok(mut current) = CALLBACK.write() {
++        *current = callback;
++    }
++}
++
++pub fn prepare(
++    socket: &impl AsRawFd,
++    destination: SocketAddr,
++    source: Option<IpAddr>,
++    interface: Option<&str>,
++) -> io::Result<()> {
++    let callback = CALLBACK
++        .read()
++        .map_err(|_| io::Error::other("Android socket callback lock failed"))?
++        .ok_or_else(|| {
++            io::Error::new(
++                io::ErrorKind::PermissionDenied,
++                "Android socket host is unavailable",
++            )
++        })?;
++    let destination = CString::new(destination.to_string()).map_err(io::Error::other)?;
++    let source = CString::new(
++        source
++            .map(|address| address.to_string())
++            .unwrap_or_default(),
++    )
++    .map_err(io::Error::other)?;
++    let interface = CString::new(interface.unwrap_or_default()).map_err(io::Error::other)?;
++    // The host borrows the descriptor and strings only for this synchronous call.
++    // Java duplicates the descriptor before adopting it, so it cannot close the engine socket.
++    if unsafe {
++        callback(
++            socket.as_raw_fd(),
++            destination.as_ptr(),
++            source.as_ptr(),
++            interface.as_ptr(),
++        )
++    } != 0
++    {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "Android rejected socket protection or Network binding",
++        ));
++    }
++    Ok(())
++}
+--- a/easytier/src/tunnel/common.rs
++++ b/easytier/src/tunnel/common.rs
+@@ -462,8 +462,8 @@
+         }
+     }
+ 
++    // Android uses the owning VpnService's protect + Network.bindSocket callback.
+     #[cfg(any(
+-        target_os = "android",
+         target_os = "fuchsia",
+         target_os = "linux",
+         target_env = "ohos"
+@@ -537,7 +537,19 @@
+         BindDev::Custom(s) => Some(s),
+     };
+     let socket = socket2::Socket::new(socket2::Domain::for_address(addr), B::TYPE, B::PROTOCOL)?;
++    #[cfg(target_os = "android")]
++    let android_interface = dev.clone();
+     setup_socket2_ext(&socket, &addr, dev, only_v6)?;
++    #[cfg(target_os = "android")]
++    {
++        let source = (!addr.ip().is_unspecified()).then_some(addr.ip());
++        if let Some(source) = source
++            && socket.local_addr()?.as_socket().is_none_or(|actual| actual.ip() != source)
++        {
++            return Err(TunnelError::InvalidAddr("Android source binding failed".into()));
++        }
++        crate::common::android_socket::prepare(&socket, addr, source, android_interface.as_deref())?;
++    }
+     B::finalize(socket)
+ }
+ 
+--- a/easytier/src/instance/instance.rs
++++ b/easytier/src/instance/instance.rs
+@@ -1627,12 +1627,17 @@
+             .await
+             .with_context(|| "add ip failed")?;
+ 
++        #[cfg(feature = "magic-dns")]
+         let magic_dns_runner = if let Some(ipv4) = global_ctx.get_ipv4() {
+             Self::create_magic_dns_runner(peer_manager.clone(), None, ipv4)
+         } else {
+             None
+         };
+-        Self::use_new_nic_ctx(nic_ctx.clone(), new_nic_ctx, magic_dns_runner).await;
++        Self::use_new_nic_ctx(
++            nic_ctx.clone(), new_nic_ctx,
++            #[cfg(feature = "magic-dns")]
++            magic_dns_runner,
++        ).await;
+         Ok(())
+     }
+ 
+--- a/easytier/src/launcher.rs
++++ b/easytier/src/launcher.rs
+@@ -236,6 +236,11 @@
+             }
+             instance_alive.store(false, std::sync::atomic::Ordering::Relaxed);
+             notifier.notify_one();
++            // The mobile host owns a borrowed TUN descriptor. Finish worker
++            // destruction before its launcher join permits the host to close it.
++            #[cfg(target_os = "android")]
++            drop(rt);
++            #[cfg(not(target_os = "android"))]
+             rt.shutdown_background();
+         }));
+     }
