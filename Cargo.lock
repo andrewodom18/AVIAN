@@ -211,11 +211,17 @@ dependencies = [
 name = "avian-runtime"
 version = "0.1.0"
 dependencies = [
+ "avian-connectivity",
  "avian-engine",
  "avian-membership",
+ "avian-network-helper",
+ "avian-routing",
+ "avian-storage",
  "base64 0.22.1",
  "ed25519-dalek",
+ "getrandom 0.3.4",
  "hex",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

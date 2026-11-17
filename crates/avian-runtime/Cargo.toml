@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+avian-routing = { path = "../avian-routing" }
+avian-network-helper = { path = "../avian-network-helper", default-features = false }
+getrandom = "0.3"
+avian-connectivity = { path = "../avian-connectivity" }
+avian-storage = { path = "../avian-storage" }
 avian-membership = { path = "../avian-membership" }
 avian-engine = { path = "../avian-engine" }
 base64 = "0.22"
@@ -25,3 +30,6 @@ ed25519-dalek = "2.2"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["process"] }

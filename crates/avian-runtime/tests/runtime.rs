@@ -8,6 +8,19 @@ use tempfile::TempDir;
 
 fn configuration(root: &Path) -> RuntimeConfiguration {
     RuntimeConfiguration {
+        execution: Default::default(),
+        network_helper_socket: None,
+        interface_name: "avian0".into(),
+        overlay_prefix_length: 24,
+        bootstrap: Default::default(),
+        measured_routing: false,
+        private_rpc: false,
+        underlay_binding: false,
+        connection_budget: 1024,
+        discovery_hint_budget: 4096,
+        automatic_capacity_probes: true,
+        probe_payload_budget_bytes: 512 * 1024,
+        probe_window_ms: 30_000,
         isolation_required: true,
         namespace_name: "avian-missing-test-namespace".into(),
         engine_directory: root.join("engine"),
@@ -173,4 +186,33 @@ fn optional_priority_build_requires_the_exact_reviewed_patch_and_feature() {
     manifest["patches"].as_array_mut().unwrap().pop();
     save(&manifest);
     assert!(verify_engine_directory(directory.path()).is_err());
+}
+
+#[test]
+fn native_scope_requires_helper_and_an_entirely_private_network() {
+    let directory = TempDir::new().unwrap();
+    let mut native = configuration(directory.path());
+    native.execution = avian_runtime::ExecutionMode::Native;
+    native.isolation_required = false;
+    native.namespace_name.clear();
+    native.measured_routing = true;
+    native.underlay_binding = true;
+    native.priority_forwarding = true;
+    native.private_rpc = true;
+    assert!(native.validate().is_err());
+    native.network_helper_socket = Some(directory.path().join("network.sock"));
+    if cfg!(target_os = "linux") {
+        native.validate().unwrap();
+    }
+    native.overlay_address = "192.168.1.2".parse().unwrap();
+    native.overlay_prefix_length = 8;
+    assert!(native.validate().is_err());
+    native.overlay_prefix_length = 24;
+    native.overlay_address = "192.168.1.0".parse().unwrap();
+    assert!(native.validate().is_err());
+    native.overlay_address = "192.168.1.255".parse().unwrap();
+    assert!(native.validate().is_err());
+    native.overlay_address = "192.168.1.2".parse().unwrap();
+    native.network_helper_socket = Some("relative.sock".into());
+    assert!(native.validate().is_err());
 }

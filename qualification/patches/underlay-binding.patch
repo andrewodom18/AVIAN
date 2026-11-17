@@ -1,0 +1,487 @@
+diff --git a/easytier/src/connector/mod.rs b/easytier/src/connector/mod.rs
+index bfc6c7f..cda54f0 100644
+--- a/easytier/src/connector/mod.rs
++++ b/easytier/src/connector/mod.rs
+@@ -228,6 +228,108 @@ async fn resolve_connector_socket_addr(
+     })
+ }
+ 
++#[derive(Clone, Debug)]
++struct UnderlayBinding {
++    source: IpAddr,
++    interface_name: String,
++}
++
++fn parse_underlay_binding(url: &url::Url) -> Result<Option<UnderlayBinding>, Error> {
++    let Some(query) = url.query() else {
++        return Ok(None);
++    };
++    if !matches!(url.scheme(), "tcp" | "udp") || query.len() > 512 || query.split('&').count() != 2
++    {
++        return Err(Error::InvalidUrl("invalid underlay binding options".into()));
++    }
++    let pairs = url.query_pairs().collect::<Vec<_>>();
++    let source = pairs
++        .iter()
++        .filter(|(name, _)| name == "avian_bind")
++        .collect::<Vec<_>>();
++    let interface = pairs
++        .iter()
++        .filter(|(name, _)| name == "avian_interface")
++        .collect::<Vec<_>>();
++    if pairs.len() != 2 || source.len() != 1 || interface.len() != 1 {
++        return Err(Error::InvalidUrl("invalid underlay binding options".into()));
++    }
++    let source = source[0]
++        .1
++        .parse::<IpAddr>()
++        .map_err(|_| Error::InvalidUrl("invalid underlay source".into()))?;
++    let interface_name = interface[0].1.to_string();
++    if source.is_unspecified()
++        || source.is_loopback()
++        || source.is_multicast()
++        || matches!(source, IpAddr::V6(address) if address.is_unicast_link_local())
++        || interface_name.is_empty()
++        || interface_name.len() > 15
++        || !interface_name
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
++    {
++        return Err(Error::InvalidUrl(
++            "invalid underlay source or interface".into(),
++        ));
++    }
++    Ok(Some(UnderlayBinding {
++        source,
++        interface_name,
++    }))
++}
++
++async fn validate_underlay_binding(
++    binding: &UnderlayBinding,
++    global_ctx: &ArcGlobalCtx,
++) -> Result<(), Error> {
++    if !cfg!(target_os = "linux") {
++        return Err(Error::InvalidUrl(
++            "native interface binding is unavailable on this platform".into(),
++        ));
++    }
++    if global_ctx.is_ip_local_virtual_ip(&binding.source)
++        || matches!(binding.source, IpAddr::V6(address) if global_ctx.is_ip_easytier_managed_ipv6(&address))
++    {
++        return Err(Error::InvalidUrl(
++            "overlay addresses cannot bind an underlay".into(),
++        ));
++    }
++    // Enumerate current interfaces rather than using the engine's 60-second address cache.
++    let interfaces =
++        crate::common::network::IPCollector::collect_interfaces(global_ctx.net_ns.clone(), false)
++            .await;
++    if !interfaces.iter().any(|interface| {
++        interface.name == binding.interface_name
++            && interface
++                .ips
++                .iter()
++                .any(|address| address.ip() == binding.source)
++    }) {
++        return Err(Error::InvalidUrl(
++            "underlay source is not assigned to the requested interface".into(),
++        ));
++    }
++    Ok(())
++}
++
++pub(crate) fn bind_socket_to_underlay(
++    socket: socket2::SockRef<'_>,
++    interface: &str,
++) -> std::io::Result<()> {
++    #[cfg(target_os = "linux")]
++    {
++        socket.bind_device(Some(interface.as_bytes()))
++    }
++    #[cfg(not(target_os = "linux"))]
++    {
++        let _ = (socket, interface);
++        Err(std::io::Error::other(
++            "native interface binding is unavailable",
++        ))
++    }
++}
++
+ pub async fn create_connector_by_url(
+     url: &str,
+     global_ctx: &ArcGlobalCtx,
+@@ -235,6 +337,22 @@ pub async fn create_connector_by_url(
+ ) -> Result<Box<dyn TunnelConnector + 'static>, Error> {
+     let url = url::Url::parse(url).map_err(|_| Error::InvalidUrl(url.to_owned()))?;
+     let url = idn::convert_idn_to_ascii(url)?;
++    let binding = parse_underlay_binding(&url)?;
++    let ip_version = if let Some(binding) = &binding {
++        validate_underlay_binding(binding, global_ctx).await?;
++        if !addr_matches_ip_version(&SocketAddr::new(binding.source, 0), ip_version) {
++            return Err(Error::InvalidUrl(
++                "underlay source family differs from requested family".into(),
++            ));
++        }
++        if binding.source.is_ipv4() {
++            IpVersion::V4
++        } else {
++            IpVersion::V6
++        }
++    } else {
++        ip_version
++    };
+     let scheme = (&url)
+         .try_into()
+         .map_err(|_| TunnelError::InvalidProtocol(url.scheme().to_owned()))?;
+@@ -244,8 +362,20 @@ pub async fn create_connector_by_url(
+             let resolved_addr = resolve_connector_socket_addr(&url, global_ctx, ip_version).await?;
+             effective_connector_ip_version = resolved_addr.ip_version;
+             let mut connector: Box<dyn TunnelConnector> = match scheme {
+-                IpScheme::Tcp => TcpTunnelConnector::new(url).boxed(),
+-                IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
++                IpScheme::Tcp => {
++                    let mut connector = TcpTunnelConnector::new(url);
++                    if let Some(binding) = &binding {
++                        connector.set_underlay_interface(binding.interface_name.clone());
++                    }
++                    connector.boxed()
++                }
++                IpScheme::Udp => {
++                    let mut connector = UdpTunnelConnector::new(url);
++                    if let Some(binding) = &binding {
++                        connector.set_underlay_interface(binding.interface_name.clone());
++                    }
++                    connector.boxed()
++                }
+                 #[cfg(feature = "quic")]
+                 IpScheme::Quic => {
+                     tunnel::quic::QuicTunnelConnector::new(url, global_ctx.clone()).boxed()
+@@ -268,7 +398,14 @@ pub async fn create_connector_by_url(
+                 IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
+             };
+             connector.set_resolved_addr(resolved_addr.addr);
+-            if global_ctx.config.get_flags().bind_device {
++            if let Some(binding) = &binding {
++                if binding.source.is_ipv4() != resolved_addr.addr.is_ipv4() {
++                    return Err(Error::InvalidUrl(
++                        "underlay source family differs from destination".into(),
++                    ));
++                }
++                connector.set_bind_addrs(vec![SocketAddr::new(binding.source, 0)]);
++            } else if global_ctx.config.get_flags().bind_device {
+                 set_bind_addr_for_peer_connector(
+                     &mut connector,
+                     resolved_addr.addr.is_ipv4(),
+@@ -459,3 +596,63 @@ mod tests {
+         ));
+     }
+ }
++
++#[cfg(test)]
++mod avian_underlay_tests {
++    use super::*;
++    #[test]
++    fn avian_underlay_binding_rejects_ambiguous_or_unsupported_options() {
++        for query in [
++            "avian_bind=192.0.2.2",
++            "avian_bind=192.0.2.2&avian_bind=192.0.2.3",
++            "avian_bind=192.0.2.2&avian_interface=eth0&other=1",
++            "avian_bind=0.0.0.0&avian_interface=eth0",
++            "avian_bind=127.0.0.1&avian_interface=lo",
++            "avian_bind=%FF&avian_interface=eth0",
++            "avian_bind=192.0.2.2&avian_interface=bad/interface",
++            "avian_bind=192.0.2.2&other=eth0",
++        ] {
++            assert!(
++                parse_underlay_binding(
++                    &url::Url::parse(&format!("tcp://192.0.2.4:11010?{query}")).unwrap()
++                )
++                .is_err()
++            );
++        }
++        let binding = parse_underlay_binding(
++            &url::Url::parse(
++                "udp://[2001:db8::4]:11010?avian_bind=2001%3Adb8%3A%3A2&avian_interface=eth0",
++            )
++            .unwrap(),
++        )
++        .unwrap()
++        .unwrap();
++        assert_eq!(binding.source, "2001:db8::2".parse::<IpAddr>().unwrap());
++        assert_eq!(binding.interface_name, "eth0");
++    }
++    #[tokio::test]
++    async fn avian_underlay_binding_rejects_nonlocal_sources_before_connecting() {
++        let context = crate::common::global_ctx::tests::get_mock_global_ctx();
++        let result = create_connector_by_url(
++            "tcp://192.0.2.4:11010?avian_bind=192.0.2.2&avian_interface=doesnotexist",
++            &context,
++            IpVersion::Both,
++        )
++        .await;
++        assert!(matches!(result, Err(Error::InvalidUrl(_))));
++    }
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    async fn avian_underlay_socket_device_is_pinned_and_unknown_devices_fail_closed() {
++        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
++        let reference = socket2::SockRef::from(&socket);
++        bind_socket_to_underlay(reference, "lo").unwrap();
++        assert_eq!(
++            socket2::SockRef::from(&socket).device().unwrap(),
++            Some(b"lo".to_vec())
++        );
++        assert!(
++            bind_socket_to_underlay(socket2::SockRef::from(&socket), "no-such-device").is_err()
++        );
++    }
++}
+diff --git a/easytier/src/tunnel/tcp.rs b/easytier/src/tunnel/tcp.rs
+index aea455f..050ca92 100644
+--- a/easytier/src/tunnel/tcp.rs
++++ b/easytier/src/tunnel/tcp.rs
+@@ -132,6 +132,7 @@ pub struct TcpTunnelConnector {
+     addr: url::Url,
+ 
+     bind_addrs: Vec<SocketAddr>,
++    underlay_interface: Option<String>,
+     ip_version: IpVersion,
+     resolved_addr: Option<SocketAddr>,
+ }
+@@ -141,11 +142,16 @@ impl TcpTunnelConnector {
+         TcpTunnelConnector {
+             addr,
+             bind_addrs: vec![],
++            underlay_interface: None,
+             ip_version: IpVersion::Both,
+             resolved_addr: None,
+         }
+     }
+ 
++    pub(crate) fn set_underlay_interface(&mut self, interface_name: String) {
++        self.underlay_interface = Some(interface_name);
++    }
++
+     async fn connect_with_default_bind(
+         &self,
+         addr: SocketAddr,
+@@ -165,7 +171,20 @@ impl TcpTunnelConnector {
+         for bind_addr in self.bind_addrs.iter() {
+             tracing::info!(?bind_addr, ?addr, "bind addr");
+             match bind::<TcpSocket>().addr(*bind_addr).only_v6(true).call() {
+-                Ok(socket) => futures.push(socket.connect(addr)),
++                Ok(socket) => {
++                    if socket.local_addr()?.ip() != bind_addr.ip() {
++                        return Err(TunnelError::InvalidAddr(
++                            "explicit source binding failed".into(),
++                        ));
++                    }
++                    if let Some(interface) = &self.underlay_interface {
++                        crate::connector::bind_socket_to_underlay(
++                            socket2::SockRef::from(&socket),
++                            interface,
++                        )?;
++                    }
++                    futures.push(socket.connect(addr));
++                }
+                 Err(error) => {
+                     tracing::error!(?bind_addr, ?addr, ?error, "bind addr fail");
+                     continue;
+@@ -186,6 +205,11 @@ impl super::TunnelConnector for TcpTunnelConnector {
+             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
+         };
+         if self.bind_addrs.is_empty() {
++            if self.underlay_interface.is_some() {
++                return Err(TunnelError::InvalidAddr(
++                    "interface binding requires an explicit source".into(),
++                ));
++            }
+             self.connect_with_default_bind(addr).await
+         } else {
+             self.connect_with_custom_bind(addr).await
+@@ -355,3 +379,56 @@ fn configure_priority_buffer(stream: &TcpStream) -> std::io::Result<()> {
+     }
+     Ok(())
+ }
++
++#[cfg(test)]
++mod avian_underlay_tcp_tests {
++    use super::*;
++    use crate::tunnel::TunnelConnector;
++
++    #[tokio::test]
++    async fn avian_underlay_tcp_missing_source_never_uses_default_route() {
++        let mut connector = TcpTunnelConnector::new("tcp://127.0.0.1:9".parse().unwrap());
++        connector.set_underlay_interface("doesnotexist".into());
++        assert!(matches!(
++            connector.connect().await,
++            Err(TunnelError::InvalidAddr(_))
++        ));
++    }
++    #[cfg(target_os = "linux")]
++    #[tokio::test]
++    async fn avian_underlay_tcp_device_pinning_preserves_return_path() {
++        use crate::tunnel::{TunnelListener, packet_def::ZCPacket};
++        use futures::{SinkExt, StreamExt};
++        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
++        listener.listen().await.unwrap();
++        let mut connector = TcpTunnelConnector::new(listener.local_url());
++        connector.set_bind_addrs(vec!["127.0.0.1:0".parse().unwrap()]);
++        connector.set_underlay_interface("lo".into());
++        let (connected, accepted) =
++            tokio::time::timeout(std::time::Duration::from_secs(2), async {
++                tokio::join!(connector.connect(), listener.accept())
++            })
++            .await
++            .unwrap();
++        let connected = connected.unwrap();
++        let accepted = accepted.unwrap();
++        let (mut client_receive, mut client_send) = connected.split();
++        let (mut server_receive, mut server_send) = accepted.split();
++        client_send
++            .send(ZCPacket::new_with_payload(b"pinned TCP return path"))
++            .await
++            .unwrap();
++        let packet = tokio::time::timeout(std::time::Duration::from_secs(1), server_receive.next())
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap();
++        server_send.send(packet).await.unwrap();
++        let echoed = tokio::time::timeout(std::time::Duration::from_secs(1), client_receive.next())
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap();
++        assert_eq!(echoed.payload(), b"pinned TCP return path");
++    }
++}
+diff --git a/easytier/src/tunnel/udp.rs b/easytier/src/tunnel/udp.rs
+index 714dd10..9e0f9d7 100644
+--- a/easytier/src/tunnel/udp.rs
++++ b/easytier/src/tunnel/udp.rs
+@@ -681,6 +681,7 @@ impl TunnelListener for UdpTunnelListener {
+ pub struct UdpTunnelConnector {
+     addr: url::Url,
+     bind_addrs: Vec<SocketAddr>,
++    underlay_interface: Option<String>,
+     ip_version: IpVersion,
+     resolved_addr: Option<SocketAddr>,
+ }
+@@ -690,11 +691,16 @@ impl UdpTunnelConnector {
+         Self {
+             addr,
+             bind_addrs: vec![],
++            underlay_interface: None,
+             ip_version: IpVersion::Both,
+             resolved_addr: None,
+         }
+     }
+ 
++    pub(crate) fn set_underlay_interface(&mut self, interface_name: String) {
++        self.underlay_interface = Some(interface_name);
++    }
++
+     async fn wait_sack(
+         socket: &UdpSocket,
+         addr: SocketAddr,
+@@ -893,8 +899,21 @@ impl UdpTunnelConnector {
+ 
+         for bind_addr in self.bind_addrs.iter() {
+             tracing::info!(?bind_addr, ?addr, "bind addr");
+-            match bind().addr(*bind_addr).only_v6(true).call() {
+-                Ok(socket) => futures.push(self.try_connect_with_socket(Arc::new(socket), addr)),
++            match bind::<UdpSocket>().addr(*bind_addr).only_v6(true).call() {
++                Ok(socket) => {
++                    if socket.local_addr()?.ip() != bind_addr.ip() {
++                        return Err(TunnelError::InvalidAddr(
++                            "explicit source binding failed".into(),
++                        ));
++                    }
++                    if let Some(interface) = &self.underlay_interface {
++                        crate::connector::bind_socket_to_underlay(
++                            socket2::SockRef::from(&socket),
++                            interface,
++                        )?;
++                    }
++                    futures.push(self.try_connect_with_socket(Arc::new(socket), addr));
++                }
+                 Err(error) => {
+                     tracing::error!(?error, ?bind_addr, ?addr, "bind addr fail");
+                     continue;
+@@ -912,7 +931,12 @@ impl super::TunnelConnector for UdpTunnelConnector {
+             Some(addr) => addr,
+             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
+         };
+-        if self.bind_addrs.is_empty() || addr.is_ipv6() {
++        if self.bind_addrs.is_empty() {
++            if self.underlay_interface.is_some() {
++                return Err(TunnelError::InvalidAddr(
++                    "interface binding requires an explicit source".into(),
++                ));
++            }
+             self.connect_with_default_bind(addr).await
+         } else {
+             self.connect_with_custom_bind(addr).await
+@@ -1252,3 +1276,60 @@ mod tests {
+             .unwrap();
+     }
+ }
++
++#[cfg(test)]
++mod avian_underlay_udp_tests {
++    use super::*;
++    use crate::tunnel::{TunnelConnector, TunnelListener, packet_def::ZCPacket};
++    use futures::{SinkExt, StreamExt};
++
++    #[tokio::test]
++    async fn avian_underlay_udp_ipv6_source_failure_never_falls_back() {
++        let mut connector = UdpTunnelConnector::new("udp://[::1]:9".parse().unwrap());
++        connector.set_bind_addrs(vec!["[2001:db8::dead]:0".parse().unwrap()]);
++        let result =
++            tokio::time::timeout(std::time::Duration::from_secs(1), connector.connect()).await;
++        assert!(
++            matches!(result, Ok(Err(_))),
++            "an unassigned source must fail before any handshake"
++        );
++    }
++
++    #[tokio::test]
++    async fn avian_underlay_udp_ipv6_explicit_source_preserves_return_path() {
++        let mut listener = UdpTunnelListener::new("udp://[::1]:0".parse().unwrap());
++        listener.listen().await.unwrap();
++        let mut connector = UdpTunnelConnector::new(listener.local_url());
++        connector.set_bind_addrs(vec!["[::1]:0".parse().unwrap()]);
++        #[cfg(target_os = "linux")]
++        connector.set_underlay_interface("lo".into());
++        let (connected, accepted) =
++            tokio::time::timeout(std::time::Duration::from_secs(5), async {
++                tokio::join!(connector.connect(), listener.accept())
++            })
++            .await
++            .unwrap();
++        let connected = connected.unwrap();
++        let accepted = accepted.unwrap();
++        let info = connected.info().unwrap();
++        assert!(info.local_addr.unwrap().url.contains("[::1]"));
++        let (mut client_receive, mut client_send) = connected.split();
++        let (mut server_receive, mut server_send) = accepted.split();
++        client_send
++            .send(ZCPacket::new_with_payload(b"bound return path"))
++            .await
++            .unwrap();
++        let packet = tokio::time::timeout(std::time::Duration::from_secs(1), server_receive.next())
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap();
++        server_send.send(packet).await.unwrap();
++        let echoed = tokio::time::timeout(std::time::Duration::from_secs(1), client_receive.next())
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap();
++        assert_eq!(echoed.payload(), b"bound return path");
++    }
++}

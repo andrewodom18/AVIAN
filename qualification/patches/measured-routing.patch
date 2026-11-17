@@ -1,0 +1,2238 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 6db0df1..78304a9 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -505,6 +505,14 @@ version = "1.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0c4b4d0bd25bd0b74681c0ad21497610ce1b7c91b1022cd21c80c6fbdd9476b0"
+ 
++[[package]]
++name = "avian-routing"
++version = "0.1.0"
++dependencies = [
++ "serde",
++ "thiserror 2.0.11",
++]
++
+ [[package]]
+ name = "axum"
+ version = "0.7.7"
+@@ -2241,6 +2249,7 @@ dependencies = [
+  "atomic-shim",
+  "atomic_refcell",
+  "auto_impl",
++ "avian-routing",
+  "base64 0.22.1",
+  "bitflags 2.8.0",
+  "bon",
+diff --git a/easytier/Cargo.toml b/easytier/Cargo.toml
+index 4b64554..af79dfd 100644
+--- a/easytier/Cargo.toml
++++ b/easytier/Cargo.toml
+@@ -28,6 +28,7 @@ name = "easytier"
+ path = "src/lib.rs"
+ 
+ [dependencies]
++avian-routing = { path = "../avian-routing" }
+ git-version = "0.3.9"
+ 
+ tracing = { version = "0.1", features = ["log"] }
+diff --git a/easytier/src/easytier-cli.rs b/easytier/src/easytier-cli.rs
+index 462e8cd..c3754ac 100644
+--- a/easytier/src/easytier-cli.rs
++++ b/easytier/src/easytier-cli.rs
+@@ -218,6 +218,35 @@ struct RouteArgs {
+ 
+ #[derive(Subcommand, Debug)]
+ enum RouteSubCommand {
++    /// Show the class routes currently used by packet dispatch.
++    Measured {
++        #[arg(long, default_value = "")]
++        after: String,
++        #[arg(long, default_value_t = 100)]
++        limit: u32,
++        #[arg(long, default_value = "")]
++        class: String,
++    },
++    /// Show all authenticated direct links, including unused parallel connections.
++    Links {
++        #[arg(long, default_value = "")]
++        after: String,
++        #[arg(long, default_value_t = 100)]
++        limit: u32,
++    },
++    /// Run a bounded direct-neighbor capacity probe.
++    Probe {
++        #[arg(long)]
++        peer_id: u32,
++        #[arg(long, default_value_t = 500)]
++        duration_ms: u32,
++        #[arg(long, default_value_t = 8_000_000)]
++        offered_bps: u64,
++        #[arg(long)]
++        allow_metered: bool,
++        #[arg(long, default_value = "")]
++        connection_id: String,
++    },
+     /// List routes propagated by peers
+     List,
+     /// Dump routes in CIDR format
+@@ -925,6 +954,74 @@ impl<'a> CommandHandler<'a> {
+             .with_context(|| "failed to get credential client")?)
+     }
+ 
++    async fn handle_measured_routes(
++        &self,
++        after: String,
++        limit: u32,
++        traffic_class: String,
++    ) -> Result<(), Error> {
++        let client = self.get_peer_manager_client().await?;
++        let response = client
++            .list_class_route(
++                BaseController::default(),
++                easytier::proto::api::instance::ListClassRouteRequest {
++                    instance: Some(self.instance_selector.clone()),
++                    after,
++                    limit,
++                    traffic_class,
++                    links: false,
++                },
++            )
++            .await?;
++        let value: serde_json::Value = serde_json::from_str(&response.decisions_json)?;
++        println!("{}", serde_json::to_string_pretty(&value)?);
++        Ok(())
++    }
++    async fn handle_measured_links(&self, after: String, limit: u32) -> Result<(), Error> {
++        let client = self.get_peer_manager_client().await?;
++        let response = client
++            .list_class_route(
++                BaseController::default(),
++                easytier::proto::api::instance::ListClassRouteRequest {
++                    instance: Some(self.instance_selector.clone()),
++                    after,
++                    limit,
++                    traffic_class: String::new(),
++                    links: true,
++                },
++            )
++            .await?;
++        let value: serde_json::Value = serde_json::from_str(&response.links_json)?;
++        println!("{}", serde_json::to_string_pretty(&value)?);
++        Ok(())
++    }
++    async fn handle_capacity_probe(
++        &self,
++        peer_id: u32,
++        duration_ms: u32,
++        offered_bps: u64,
++        allow_metered: bool,
++        connection_id: String,
++    ) -> Result<(), Error> {
++        let client = self.get_peer_manager_client().await?;
++        let response = client
++            .probe_link(
++                BaseController::default(),
++                easytier::proto::api::instance::ProbeLinkRequest {
++                    instance: Some(self.instance_selector.clone()),
++                    peer_id,
++                    duration_ms,
++                    offered_bps,
++                    allow_metered,
++                    connection_id,
++                },
++            )
++            .await?;
++        let value: serde_json::Value = serde_json::from_str(&response.result_json)?;
++        println!("{}", serde_json::to_string_pretty(&value)?);
++        Ok(())
++    }
++
+     async fn list_peers(&self) -> Result<ListPeerResponse, Error> {
+         let client = self.get_peer_manager_client().await?;
+         let request = ListPeerRequest {
+@@ -2938,6 +3035,31 @@ async fn main() -> Result<(), Error> {
+         SubCommand::Route(route_args) => match route_args.sub_command {
+             Some(RouteSubCommand::List) | None => handler.handle_route_list().await?,
+             Some(RouteSubCommand::Dump) => handler.handle_route_dump().await?,
++            Some(RouteSubCommand::Measured {
++                after,
++                limit,
++                class,
++            }) => handler.handle_measured_routes(after, limit, class).await?,
++            Some(RouteSubCommand::Links { after, limit }) => {
++                handler.handle_measured_links(after, limit).await?
++            }
++            Some(RouteSubCommand::Probe {
++                peer_id,
++                duration_ms,
++                offered_bps,
++                allow_metered,
++                connection_id,
++            }) => {
++                handler
++                    .handle_capacity_probe(
++                        peer_id,
++                        duration_ms,
++                        offered_bps,
++                        allow_metered,
++                        connection_id,
++                    )
++                    .await?
++            }
+         },
+         SubCommand::Stun => {
+             timeout(Duration::from_secs(25), async move {
+diff --git a/easytier/src/peers/credential_manager.rs b/easytier/src/peers/credential_manager.rs
+index e5d6efa..90a2295 100644
+--- a/easytier/src/peers/credential_manager.rs
++++ b/easytier/src/peers/credential_manager.rs
+@@ -248,6 +248,40 @@ impl CredentialManager {
+             .collect()
+     }
+ 
++    /// Stable identity comes only from the local verifier's active, unambiguous cache entries.
++    pub(crate) fn verified_transport_identities(
++        &self,
++    ) -> std::collections::BTreeMap<Vec<u8>, String> {
++        self.reload_verified_membership();
++        if !self.uses_verified_membership() {
++            return Default::default();
++        }
++        let now = current_unix_timestamp();
++        let mut identities = std::collections::BTreeMap::new();
++        let mut ambiguous = std::collections::BTreeSet::new();
++        for (identifier, entry) in self.credentials.lock().unwrap().iter() {
++            if identifier.len() != 64
++                || !identifier
++                    .bytes()
++                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++                || !entry.is_active_at(now)
++            {
++                continue;
++            }
++            let Some(key) = Self::decode_pubkey_b64(&entry.pubkey).filter(|key| key.len() == 32)
++            else {
++                continue;
++            };
++            if identities.insert(key.clone(), identifier.clone()).is_some() {
++                ambiguous.insert(key);
++            }
++        }
++        for key in ambiguous {
++            identities.remove(&key);
++        }
++        identities
++    }
++
+     pub fn requires_overlay_binding(&self, pubkey: &[u8]) -> bool {
+         let encoded = BASE64_STANDARD.encode(pubkey);
+         self.credentials
+diff --git a/easytier/src/peers/measured_routing.rs b/easytier/src/peers/measured_routing.rs
+new file mode 100644
+index 0000000..51ccb4c
+--- /dev/null
++++ b/easytier/src/peers/measured_routing.rs
+@@ -0,0 +1,360 @@
++//! Collector-local quality windows and bounded capacity evidence for direct sessions.
++use serde::Serialize;
++use std::{
++    collections::VecDeque,
++    sync::Mutex,
++    time::{Duration, Instant},
++};
++
++pub const QUALITY_LIFETIME: Duration = Duration::from_secs(3);
++pub const CAPACITY_LIFETIME: Duration = Duration::from_secs(30);
++pub const PROBE_MARKER: &[u8] = b"AVCP";
++pub const MAX_PROBE_BYTES: usize = 512 * 1024;
++
++pub fn enabled() -> bool {
++    std::env::var("ET_MEASURED_ROUTING").as_deref() == Ok("1")
++}
++pub fn is_probe(payload: &[u8]) -> bool {
++    payload.len() >= 24 && &payload[4..8] == PROBE_MARKER
++}
++
++pub fn probe_payload_digest(payload: &[u8]) -> [u8; 32] {
++    use sha2::Digest;
++    sha2::Sha256::digest(payload).into()
++}
++
++/// Only a complete, previously admitted random packet can contribute once to delivery evidence.
++pub fn verified_probe_reply(
++    payload: &[u8],
++    pending: &mut std::collections::BTreeMap<u32, [u8; 32]>,
++) -> Option<u32> {
++    if !(64..=1000).contains(&payload.len()) || !is_probe(payload) {
++        return None;
++    }
++    let sequence = u32::from_le_bytes(payload[..4].try_into().ok()?);
++    if *pending.get(&sequence)? != probe_payload_digest(payload) {
++        return None;
++    }
++    pending.remove(&sequence);
++    Some(sequence)
++}
++
++pub fn packet_is_probe(packet: &crate::tunnel::packet_def::ZCPacket) -> bool {
++    use crate::tunnel::packet_def::PacketType;
++    packet.peer_manager_header().is_some_and(|header| {
++        (header.packet_type == PacketType::Ping as u8
++            || header.packet_type == PacketType::Pong as u8)
++            && is_probe(packet.payload())
++    })
++}
++
++/// Ten-percent buckets keep measured threshold searches bounded independently of membership.
++/// Rounding down preserves the delivered-rate lower-bound meaning, including low-rate radios.
++fn quantized_capacity(rate: u64) -> u64 {
++    if rate == 0 {
++        return 0;
++    }
++    let mut bucket = 1u64;
++    while let Some(next) = bucket.checked_add(bucket.div_ceil(10)) {
++        if next > rate {
++            break;
++        }
++        bucket = next;
++    }
++    bucket
++}
++
++#[derive(Debug, Clone, Serialize)]
++pub struct ProbeEvidence {
++    pub peer_id: u32,
++    pub connection_id: String,
++    pub method: &'static str,
++    pub delivered_rate_lower_bound_bps: u64,
++    pub offered_payload_bytes: u64,
++    pub accepted_payload_bytes: u64,
++    pub delivered_payload_bytes: u64,
++    pub measurement_duration_ms: u64,
++    pub received_datagrams: u64,
++    #[serde(skip)]
++    pub collected_at: Instant,
++}
++
++#[derive(Default)]
++struct State {
++    samples: VecDeque<(Instant, Option<u64>)>,
++    sequence: u64,
++    probe: Option<ProbeEvidence>,
++    next_probe: Option<Instant>,
++    echo_window: Option<Instant>,
++    echo_bytes: usize,
++    echo_packets: usize,
++}
++
++#[derive(Default)]
++pub struct Measurements {
++    state: Mutex<State>,
++}
++
++impl Measurements {
++    pub fn record_quality(&self, latency_us: Option<u64>) {
++        let mut state = self.state.lock().unwrap();
++        state.sequence = state.sequence.wrapping_add(1);
++        state.samples.push_back((Instant::now(), latency_us));
++        while state.samples.len() > 15 {
++            state.samples.pop_front();
++        }
++    }
++
++    pub fn edge(
++        &self,
++        destination: u32,
++        allowed_classes: u32,
++        connection_id: String,
++        metered: bool,
++    ) -> crate::proto::peer_rpc::AvianPolicyEdge {
++        let state = self.state.lock().unwrap();
++        let now = Instant::now();
++        let samples: Vec<_> = state
++            .samples
++            .iter()
++            .filter(|(at, _)| now.duration_since(*at) <= QUALITY_LIFETIME)
++            .collect();
++        let latencies: Vec<_> = samples.iter().filter_map(|(_, latency)| *latency).collect();
++        let latency = if latencies.is_empty() {
++            0
++        } else {
++            latencies.iter().sum::<u64>() / latencies.len() as u64
++        };
++        let jitter = if latencies.len() < 2 {
++            0
++        } else {
++            latencies
++                .windows(2)
++                .map(|pair| pair[0].abs_diff(pair[1]))
++                .sum::<u64>()
++                / (latencies.len() - 1) as u64
++        };
++        let loss_ppm = if samples.is_empty() {
++            0
++        } else {
++            ((samples.len() - latencies.len()) * 1_000_000 / samples.len()) as u32
++        };
++        let probe = state
++            .probe
++            .as_ref()
++            .filter(|probe| now.duration_since(probe.collected_at) <= CAPACITY_LIFETIME);
++        crate::proto::peer_rpc::AvianPolicyEdge {
++            destination,
++            allowed_classes,
++            latency_us: latency / 1000 * 1000,
++            connection_id,
++            metered,
++            has_quality: !samples.is_empty(),
++            quality_age_ms: state
++                .samples
++                .back()
++                .map(|(at, _)| now.duration_since(*at).as_millis() as u64)
++                .unwrap_or(u64::MAX),
++            jitter_us: jitter / 1000 * 1000,
++            loss_ppm,
++            measurement_sequence: state.sequence,
++            capacity_bps: probe
++                .map(|value| quantized_capacity(value.delivered_rate_lower_bound_bps))
++                .unwrap_or(0),
++            capacity_age_ms: probe
++                .map(|value| now.duration_since(value.collected_at).as_millis() as u64)
++                .unwrap_or(u64::MAX),
++            ..Default::default()
++        }
++    }
++
++    pub fn reserve_probe(&self, duration_ms: u32, offered_bps: u64) -> anyhow::Result<()> {
++        anyhow::ensure!(enabled(), "measured routing is disabled");
++        anyhow::ensure!(
++            std::env::var("ET_PRIORITY_FORWARDING").as_deref() == Ok("1"),
++            "capacity probes require priority forwarding"
++        );
++        anyhow::ensure!(
++            (50..=500).contains(&duration_ms),
++            "probe duration must be 50..500 ms"
++        );
++        anyhow::ensure!(
++            (64_000..=8_000_000).contains(&offered_bps),
++            "probe rate must be 64000..8000000 bps"
++        );
++        anyhow::ensure!(
++            u64::from(duration_ms) * offered_bps / 8000 <= MAX_PROBE_BYTES as u64,
++            "probe byte budget exceeded"
++        );
++        let mut state = self.state.lock().unwrap();
++        let now = Instant::now();
++        anyhow::ensure!(
++            state.next_probe.is_none_or(|deadline| now >= deadline),
++            "probe cooldown is active"
++        );
++        let samples: Vec<_> = state
++            .samples
++            .iter()
++            .filter(|(at, _)| now.duration_since(*at) <= QUALITY_LIFETIME)
++            .collect();
++        anyhow::ensure!(
++            samples.len() >= 2,
++            "fresh link quality is required before probing"
++        );
++        let losses = samples
++            .iter()
++            .filter(|(_, latency)| latency.is_none())
++            .count();
++        anyhow::ensure!(
++            losses * 20 <= samples.len(),
++            "link loss indicates congestion; probe refused"
++        );
++        let latencies: Vec<_> = samples.iter().filter_map(|(_, latency)| *latency).collect();
++        if latencies.len() >= 2 {
++            let jitter = latencies
++                .windows(2)
++                .map(|pair| pair[0].abs_diff(pair[1]))
++                .sum::<u64>()
++                / (latencies.len() - 1) as u64;
++            anyhow::ensure!(
++                jitter <= 100_000,
++                "link jitter indicates congestion; probe refused"
++            );
++        }
++        state.next_probe = Some(now + CAPACITY_LIFETIME);
++        Ok(())
++    }
++
++    pub fn record_probe(&self, evidence: ProbeEvidence) {
++        let mut state = self.state.lock().unwrap();
++        state.sequence = state.sequence.wrapping_add(1);
++        state.probe = Some(evidence);
++    }
++
++    pub fn permit_echo(&self, bytes: usize) -> bool {
++        if !enabled()
++            || std::env::var("ET_PRIORITY_FORWARDING").as_deref() != Ok("1")
++            || !(64..=1000).contains(&bytes)
++        {
++            return false;
++        }
++        let mut state = self.state.lock().unwrap();
++        let now = Instant::now();
++        if state
++            .echo_window
++            .is_none_or(|at| now.duration_since(at) >= CAPACITY_LIFETIME)
++        {
++            state.echo_window = Some(now);
++            state.echo_bytes = 0;
++            state.echo_packets = 0;
++        }
++        if state.echo_bytes + bytes > MAX_PROBE_BYTES || state.echo_packets >= 512 {
++            return false;
++        }
++        state.echo_bytes += bytes;
++        state.echo_packets += 1;
++        true
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::tunnel::packet_def::{PacketType, ZCPacket};
++
++    #[test]
++    fn avian_measured_quality_reports_loss_without_inventing_capacity() {
++        let measurements = Measurements::default();
++        measurements.record_quality(Some(2_000));
++        measurements.record_quality(None);
++        let edge = measurements.edge(2, 30, "connection".into(), false);
++        assert!(edge.has_quality);
++        assert_eq!(edge.loss_ppm, 500_000);
++        assert_eq!(edge.latency_us, 2_000);
++        assert_eq!(edge.capacity_bps, 0);
++    }
++
++    #[test]
++    fn avian_measured_header_reinitialization_clears_previous_class() {
++        let mut packet = ZCPacket::new_with_payload(b"application");
++        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
++        packet
++            .mut_peer_manager_header()
++            .unwrap()
++            .set_avian_traffic_class(255);
++        packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
++        assert_eq!(
++            packet.peer_manager_header().unwrap().avian_traffic_class(),
++            0
++        );
++        assert!(!packet_is_probe(&packet));
++    }
++}
++
++pub fn probe_packet_dimensions(duration_ms: u32, offered_bps: u64) -> (usize, u64) {
++    let byte_budget = u64::from(duration_ms) * offered_bps / 8_000;
++    let payload_bytes = (byte_budget / 8).clamp(64, 1000) as usize;
++    (payload_bytes, byte_budget / payload_bytes as u64)
++}
++
++pub const PAGE_BYTE_BUDGET: usize = 256 * 1024;
++pub fn page_limit(requested: u32) -> anyhow::Result<usize> {
++    let limit = if requested == 0 { 100 } else { requested };
++    anyhow::ensure!(limit <= 1000, "page limit must be 1..1000");
++    Ok(limit as usize)
++}
++
++#[cfg(test)]
++mod bounded_measurement_tests {
++    use super::*;
++    #[test]
++    fn avian_measured_capacity_buckets_remain_conservative_at_low_and_high_rates() {
++        assert_eq!(quantized_capacity(0), 0);
++        for rate in [1, 9, 10, 64_000, 8_000_000, u64::MAX] {
++            let quantized = quantized_capacity(rate);
++            assert!(quantized > 0 && quantized <= rate);
++        }
++        assert_eq!(page_limit(0).unwrap(), 100);
++        assert_eq!(page_limit(1000).unwrap(), 1000);
++        assert!(page_limit(1001).is_err());
++    }
++}
++
++#[cfg(test)]
++mod probe_challenge_tests {
++    use super::*;
++    #[test]
++    fn avian_measured_probe_requires_complete_admitted_packets_and_consumes_them_once() {
++        let mut packet = vec![17u8; 1000];
++        packet[..4].copy_from_slice(&2u32.to_le_bytes());
++        packet[4..8].copy_from_slice(PROBE_MARKER);
++        packet[984..1000].copy_from_slice(&200u128.to_le_bytes());
++        let mut pending = std::collections::BTreeMap::from([(2, probe_payload_digest(&packet))]);
++        let mut prefix_only = packet.clone();
++        prefix_only[500] ^= 1;
++        assert_eq!(verified_probe_reply(&prefix_only, &mut pending), None);
++        let mut unadmitted = packet.clone();
++        unadmitted[..4].copy_from_slice(&3u32.to_le_bytes());
++        assert_eq!(verified_probe_reply(&unadmitted, &mut pending), None);
++        assert_eq!(verified_probe_reply(&packet, &mut pending), Some(2));
++        assert_eq!(verified_probe_reply(&packet, &mut pending), None);
++    }
++}
++
++#[cfg(test)]
++mod probe_budget_tests {
++    use super::*;
++    #[test]
++    fn avian_measured_probe_packet_budget_does_not_overshoot_small_or_large_requests() {
++        assert_eq!(probe_packet_dimensions(50, 64_000), (64, 6));
++        assert_eq!(probe_packet_dimensions(500, 8_000_000), (1000, 500));
++        for duration in [50, 125, 500] {
++            for rate in [64_000, 128_000, 8_000_000] {
++                let (bytes, packets) = probe_packet_dimensions(duration, rate);
++                assert!((64..=1000).contains(&bytes));
++                assert!(bytes as u64 * packets <= u64::from(duration) * rate / 8_000);
++                assert!(bytes as u64 * packets <= MAX_PROBE_BYTES as u64);
++            }
++        }
++    }
++}
+diff --git a/easytier/src/peers/measured_topology.rs b/easytier/src/peers/measured_topology.rs
+new file mode 100644
+index 0000000..af2b7dc
+--- /dev/null
++++ b/easytier/src/peers/measured_topology.rs
+@@ -0,0 +1,272 @@
++//! Use the shared planner for the routes that packet dispatch actually selects.
++use crate::{common::PeerId, proto::peer_rpc::RoutePeerInfo};
++use avian_routing::{
++    CapacitySource, FlowPolicy, FlowRequest, FlowRouter, LinkObservation, NetworkNode,
++    NetworkSnapshot, Route, RouteChangeReason, RoutePlanner, RoutingPolicy, TrafficClass,
++};
++use serde::Serialize;
++use std::{
++    collections::BTreeMap,
++    time::{Duration, Instant},
++};
++
++#[derive(Clone, Serialize)]
++pub struct ClassDecision {
++    pub destination_peer_id: PeerId,
++    pub traffic_class: TrafficClass,
++    pub next_hop_peer_id: PeerId,
++    pub connection_id: String,
++    pub route: Route,
++    pub reason: RouteChangeReason,
++    pub improvement_hold_ms: Option<u64>,
++    pub destination_transport_key: Vec<u8>,
++}
++
++pub struct MeasuredTopology {
++    origin: Instant,
++    router: FlowRouter,
++    pub decisions: BTreeMap<(PeerId, u8), ClassDecision>,
++    pub revision: u64,
++}
++impl Default for MeasuredTopology {
++    fn default() -> Self {
++        Self {
++            origin: Instant::now(),
++            router: FlowRouter::new(
++                RoutePlanner::new(RoutingPolicy {
++                    allow_metered_video: true,
++                    allow_metered_bulk: true,
++                    ..Default::default()
++                }),
++                FlowPolicy {
++                    maximum_active_flows: usize::MAX,
++                    idle_timeout_ms: u64::MAX,
++                    improvement_hold_ms: 5_000,
++                },
++            )
++            .unwrap(),
++            decisions: BTreeMap::new(),
++            revision: 0,
++        }
++    }
++}
++impl MeasuredTopology {
++    pub fn calculate(&mut self, source: PeerId, records: &[(RoutePeerInfo, Duration)]) -> Duration {
++        let now_ms = self.origin.elapsed().as_millis() as u64;
++        let source_id = source.to_string();
++        let nodes: Vec<_> = records
++            .iter()
++            .map(|(record, _)| NetworkNode {
++                node_id: record.peer_id.to_string(),
++                relay_allowed: !record
++                    .feature_flag
++                    .is_some_and(|flags| flags.avoid_relay_data),
++            })
++            .collect();
++        let node_ids: std::collections::BTreeSet<_> =
++            nodes.iter().map(|node| node.node_id.as_str()).collect();
++        let transport_keys: BTreeMap<_, _> = records
++            .iter()
++            .map(|(record, _)| (record.peer_id, record.noise_static_pubkey.clone()))
++            .collect();
++        let mut next_expiry_ms = 1_000;
++        let mut decisions = BTreeMap::new();
++        for (class_id, traffic_class) in [
++            (1, TrafficClass::Control),
++            (2, TrafficClass::Telemetry),
++            (3, TrafficClass::Video),
++            (4, TrafficClass::Bulk),
++        ] {
++            let mut links = Vec::new();
++            for (record, received_age) in records {
++                let received_age_ms = received_age.as_millis() as u64;
++                for (index, edge) in record.avian_policy_edges.iter().enumerate() {
++                    let quality_age = edge.quality_age_ms.saturating_add(received_age_ms);
++                    let capacity_age = edge.capacity_age_ms.saturating_add(received_age_ms);
++                    let quality_fresh = edge.has_quality && quality_age <= 3_000;
++                    let capacity_fresh = edge.capacity_bps > 0 && capacity_age <= 30_000;
++                    if quality_fresh {
++                        next_expiry_ms = next_expiry_ms.min(3_001 - quality_age);
++                    }
++                    if capacity_fresh {
++                        next_expiry_ms = next_expiry_ms.min(30_001 - capacity_age);
++                    }
++                    let connection_id = if edge.connection_id.is_empty() {
++                        format!("legacy-{index}")
++                    } else {
++                        edge.connection_id.clone()
++                    };
++                    links.push(LinkObservation {
++                        link_id: format!("{}:{connection_id}", record.peer_id),
++                        source: record.peer_id.to_string(),
++                        destination: edge.destination.to_string(),
++                        interface_name: connection_id,
++                        available: edge.allowed_classes & (1 << class_id) != 0,
++                        metered: edge.metered,
++                        observed_at_ms: if quality_fresh {
++                            now_ms.saturating_sub(quality_age)
++                        } else {
++                            now_ms
++                        },
++                        round_trip_time_ms: quality_fresh
++                            .then_some(edge.latency_us as f64 / 1000.0),
++                        loss_fraction: quality_fresh
++                            .then_some((edge.loss_ppm.min(1_000_000) as f64) / 1_000_000.0),
++                        jitter_ms: quality_fresh.then_some(edge.jitter_us as f64 / 1000.0),
++                        available_capacity_bps: capacity_fresh.then_some(edge.capacity_bps),
++                        topology_valid_until_ms: Some(
++                            now_ms.saturating_add(20_000u64.saturating_sub(received_age_ms)),
++                        ),
++                        capacity_valid_until_ms: capacity_fresh
++                            .then(|| now_ms.saturating_add(30_000 - capacity_age)),
++                        capacity_source: capacity_fresh.then_some(CapacitySource::BoundedProbe),
++                    });
++                }
++            }
++            // An advertisement can reference a neighbor whose authenticated record has expired.
++            links.retain(|link| node_ids.contains(link.destination.as_str()));
++            let snapshot = NetworkSnapshot {
++                nodes: nodes.clone(),
++                links,
++            };
++            let destinations: Vec<_> = records
++                .iter()
++                .filter(|(record, _)| record.peer_id != source)
++                .map(|(record, _)| record.peer_id)
++                .collect();
++            let requests = destinations
++                .iter()
++                .map(|destination| FlowRequest {
++                    flow_id: format!("{class_id}:{destination}"),
++                    source: source_id.clone(),
++                    destination: destination.to_string(),
++                    traffic_class,
++                })
++                .collect();
++            let batch = self
++                .router
++                .route_batch(&snapshot, requests, now_ms)
++                .unwrap_or_default();
++            for (destination, decision) in destinations.into_iter().zip(batch) {
++                if let Ok(decision) = decision {
++                    let next_hop = decision
++                        .route
++                        .node_ids
++                        .get(1)
++                        .and_then(|id| id.parse().ok());
++                    let connection = decision
++                        .route
++                        .link_ids
++                        .first()
++                        .and_then(|id| id.split_once(':'))
++                        .map(|(_, id)| id.to_owned());
++                    if let (Some(next_hop_peer_id), Some(connection_id)) = (next_hop, connection) {
++                        decisions.insert(
++                            (destination, class_id),
++                            ClassDecision {
++                                destination_peer_id: destination,
++                                traffic_class,
++                                next_hop_peer_id,
++                                connection_id,
++                                route: decision.route,
++                                reason: decision.reason,
++                                improvement_hold_ms: decision.improvement_hold_ms,
++                                destination_transport_key: transport_keys
++                                    .get(&destination)
++                                    .cloned()
++                                    .unwrap_or_default(),
++                            },
++                        );
++                    }
++                }
++            }
++        }
++        self.router.retain_flows(
++            &decisions
++                .keys()
++                .map(|(destination, class)| format!("{class}:{destination}"))
++                .collect(),
++        );
++        let changed = self.decisions.len() != decisions.len()
++            || decisions.iter().any(|(key, next)| {
++                self.decisions.get(key).is_none_or(|previous| {
++                    previous.next_hop_peer_id != next.next_hop_peer_id
++                        || previous.connection_id != next.connection_id
++                        || previous.route.link_ids != next.route.link_ids
++                        || previous.route.degraded != next.route.degraded
++                        || previous.route.degraded_reasons != next.route.degraded_reasons
++                        || previous.route.uses_metered_link != next.route.uses_metered_link
++                })
++            });
++        if changed {
++            self.revision = self.revision.saturating_add(1);
++        }
++        self.decisions = decisions;
++        Duration::from_millis(next_expiry_ms.max(1))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn avian_measured_initial_unknown_metrics_are_usable_without_deadline_overflow() {
++        let mut source = RoutePeerInfo::new();
++        source.peer_id = 1;
++        source
++            .avian_policy_edges
++            .push(crate::proto::peer_rpc::AvianPolicyEdge {
++                destination: 2,
++                allowed_classes: 30,
++                connection_id: "connection".into(),
++                quality_age_ms: u64::MAX,
++                capacity_age_ms: u64::MAX,
++                ..Default::default()
++            });
++        let mut destination = RoutePeerInfo::new();
++        destination.peer_id = 2;
++        let mut topology = MeasuredTopology::default();
++        topology.calculate(
++            1,
++            &[(source, Duration::ZERO), (destination, Duration::ZERO)],
++        );
++        assert!(topology.decisions[&(2, 3)].route.degraded);
++        assert_eq!(
++            topology.decisions[&(2, 3)].route.bottleneck_capacity_bps,
++            None
++        );
++    }
++}
++
++#[cfg(test)]
++mod graph_growth_tests {
++    use super::*;
++    #[test]
++    fn avian_measured_destination_state_has_no_default_flow_count_membership_ceiling() {
++        let destinations = FlowPolicy::default().maximum_active_flows / 4 + 2;
++        let mut source = RoutePeerInfo::new();
++        source.peer_id = 1;
++        let mut records = Vec::new();
++        for index in 0..destinations {
++            let destination = index as u32 + 2;
++            source
++                .avian_policy_edges
++                .push(crate::proto::peer_rpc::AvianPolicyEdge {
++                    destination,
++                    allowed_classes: 30,
++                    connection_id: format!("connection-{index}"),
++                    quality_age_ms: u64::MAX,
++                    capacity_age_ms: u64::MAX,
++                    ..Default::default()
++                });
++            let mut record = RoutePeerInfo::new();
++            record.peer_id = destination;
++            records.push((record, Duration::ZERO));
++        }
++        records.push((source, Duration::ZERO));
++        let mut topology = MeasuredTopology::default();
++        topology.calculate(1, &records);
++        assert_eq!(topology.decisions.len(), destinations * 4);
++        assert!(topology.decisions.len() > FlowPolicy::default().maximum_active_flows);
++    }
++}
+diff --git a/easytier/src/peers/mod.rs b/easytier/src/peers/mod.rs
+index 9653acc..5cfa9fb 100644
+--- a/easytier/src/peers/mod.rs
++++ b/easytier/src/peers/mod.rs
+@@ -74,3 +74,7 @@ pub async fn recv_packet_from_chan(
+ }
+ 
+ pub const PUBLIC_SERVER_HOSTNAME_PREFIX: &str = "PublicServer_";
++
++pub(crate) mod measured_routing;
++
++pub(crate) mod measured_topology;
+diff --git a/easytier/src/peers/peer.rs b/easytier/src/peers/peer.rs
+index 2ceebdc..7ab00d0 100644
+--- a/easytier/src/peers/peer.rs
++++ b/easytier/src/peers/peer.rs
+@@ -226,6 +226,94 @@ impl Peer {
+         Ok(())
+     }
+ 
++    pub(crate) async fn send_on_connection(
++        &self,
++        message: ZCPacket,
++        connection_id: &str,
++    ) -> Result<(), Error> {
++        let id = connection_id
++            .parse::<PeerConnId>()
++            .map_err(|_| Error::RouteError(Some("invalid selected connection".into())))?;
++        let connection = self
++            .conns
++            .get(&id)
++            .map(|value| value.clone())
++            .ok_or(Error::PeerNoConnectionError(self.peer_node_id))?;
++        if !super::traffic_policy::permits_connection(
++            &message,
++            connection.get_conn_info().tunnel.as_ref(),
++        ) {
++            return Err(Error::RouteError(Some(
++                "selected connection no longer permits this class".into(),
++            )));
++        }
++        connection.send_msg(message).await
++    }
++
++    pub(crate) fn measured_links_after(
++        &self,
++        after: Option<PeerConnId>,
++        limit: usize,
++        identities: &std::collections::BTreeMap<Vec<u8>, String>,
++    ) -> Vec<serde_json::Value> {
++        use base64::Engine as _;
++        let mut selected = std::collections::BTreeMap::new();
++        for connection in self.conns.iter() {
++            let identifier = connection.get_conn_id();
++            if connection.is_closed() || after.is_some_and(|cursor| identifier <= cursor) {
++                continue;
++            }
++            selected.insert(identifier, connection.value().clone());
++            if selected.len() > limit {
++                selected.pop_last();
++            }
++        }
++        selected.values().map(|connection| {
++            let info = connection.get_conn_info();
++            let metered = super::traffic_policy::connection_metered(info.tunnel.as_ref());
++            let edge = connection.measurements.edge(self.peer_node_id, 0, info.conn_id.clone(), metered);
++            serde_json::json!({
++                "peer_id": self.peer_node_id, "connection_id": info.conn_id,
++                "peer_node_id": identities.get(&info.noise_remote_static_pubkey),
++                "public_transport_key": (info.noise_remote_static_pubkey.len() == 32).then(|| base64::prelude::BASE64_STANDARD.encode(&info.noise_remote_static_pubkey)),
++                "local_address": info.tunnel.as_ref().and_then(|tunnel| tunnel.local_addr.as_ref()).map(|url| &url.url),
++                "remote_address": info.tunnel.as_ref().and_then(|tunnel| tunnel.remote_addr.as_ref()).map(|url| &url.url),
++                "metered": metered, "policy_valid": super::traffic_policy::policy().is_ok(),
++                "queued_packets": connection.has_queued_packets(),
++                "tx_bytes": info.stats.as_ref().map(|stats| stats.tx_bytes).unwrap_or(0),
++                "rx_bytes": info.stats.as_ref().map(|stats| stats.rx_bytes).unwrap_or(0),
++                "quality_fresh": edge.has_quality && edge.quality_age_ms <= 3_000,
++                "quality_age_ms": edge.has_quality.then_some(edge.quality_age_ms),
++                "round_trip_time_ms": edge.has_quality.then_some(edge.latency_us as f64 / 1000.0),
++                "loss_fraction": edge.has_quality.then_some(edge.loss_ppm as f64 / 1_000_000.0),
++                "jitter_ms": edge.has_quality.then_some(edge.jitter_us as f64 / 1000.0),
++                "capacity_delivered_rate_lower_bound_bps": (edge.capacity_bps > 0).then_some(edge.capacity_bps),
++                "capacity_age_ms": (edge.capacity_bps > 0).then_some(edge.capacity_age_ms),
++            })
++        }).collect()
++    }
++
++    pub(crate) async fn probe_capacity(
++        &self,
++        duration_ms: u32,
++        offered_bps: u64,
++        allow_metered: bool,
++        connection_id: &str,
++    ) -> anyhow::Result<super::measured_routing::ProbeEvidence> {
++        let connection = if connection_id.is_empty() {
++            self.select_conn().await
++        } else {
++            let identifier = connection_id.parse::<PeerConnId>()?;
++            self.conns
++                .get(&identifier)
++                .map(|connection| connection.clone())
++        }
++        .ok_or_else(|| anyhow::anyhow!("peer has no matching direct connection"))?;
++        connection
++            .probe_capacity(duration_ms, offered_bps, allow_metered)
++            .await
++    }
++
+     pub(crate) fn policy_edges(&self) -> Vec<crate::proto::peer_rpc::AvianPolicyEdge> {
+         let mut edges = Vec::new();
+         for connection in self.conns.iter() {
+@@ -255,11 +343,21 @@ impl Peer {
+                     allowed_classes |= 1 << class;
+                 }
+             }
+-            edges.push(crate::proto::peer_rpc::AvianPolicyEdge {
+-                destination: self.peer_node_id,
+-                allowed_classes,
+-                latency_us,
+-            });
++            if super::measured_routing::enabled() {
++                edges.push(connection.measurements.edge(
++                    self.peer_node_id,
++                    allowed_classes,
++                    info.conn_id.clone(),
++                    super::traffic_policy::connection_metered(info.tunnel.as_ref()),
++                ));
++            } else {
++                edges.push(crate::proto::peer_rpc::AvianPolicyEdge {
++                    destination: self.peer_node_id,
++                    allowed_classes,
++                    latency_us,
++                    ..Default::default()
++                });
++            }
+         }
+         edges.sort_by_key(|edge| (edge.allowed_classes, edge.latency_us));
+         edges
+diff --git a/easytier/src/peers/peer_conn.rs b/easytier/src/peers/peer_conn.rs
+index 8989424..9838643 100644
+--- a/easytier/src/peers/peer_conn.rs
++++ b/easytier/src/peers/peer_conn.rs
+@@ -98,6 +98,7 @@ struct NoiseHandshakeResult {
+ #[derive(Clone)]
+ struct PeerSessionTunnelFilter {
+     enabled: bool,
++    physical_tunnel: Option<TunnelInfo>,
+     my_peer_id: Arc<AtomicCell<PeerId>>,
+     peer_id: Arc<AtomicCell<Option<PeerId>>>,
+     session: Arc<std::sync::Mutex<Option<Arc<PeerSession>>>>,
+@@ -110,6 +111,7 @@ impl PeerSessionTunnelFilter {
+     fn new(enabled: bool) -> Self {
+         Self {
+             enabled,
++            physical_tunnel: None,
+             my_peer_id: Arc::new(AtomicCell::new(PeerId::default())),
+             peer_id: Arc::new(AtomicCell::new(None)),
+             session: Arc::new(std::sync::Mutex::new(None)),
+@@ -122,6 +124,7 @@ impl PeerSessionTunnelFilter {
+     fn new_with_peer(my_peer_id: PeerId, enabled: bool) -> Self {
+         Self {
+             enabled,
++            physical_tunnel: None,
+             my_peer_id: Arc::new(AtomicCell::new(my_peer_id)),
+             peer_id: Arc::new(AtomicCell::new(None)),
+             session: Arc::new(std::sync::Mutex::new(None)),
+@@ -270,6 +273,14 @@ impl TunnelFilter for PeerSessionTunnelFilter {
+         if self.admission_revoked.load(Ordering::Acquire) {
+             return None;
+         }
++        if !super::traffic_policy::permits_connection(&data, self.physical_tunnel.as_ref()) {
++            return None;
++        }
++        if super::measured_routing::packet_is_probe(&data)
++            && !super::traffic_policy::probe_permitted(self.physical_tunnel.as_ref(), true)
++        {
++            return None;
++        }
+         // The terminal Noise message may still be in the asynchronous send queue when
+         // the handshake installs transport keys. Exempt that exact locally queued frame once.
+         {
+@@ -370,6 +381,7 @@ pub struct PeerConn {
+     ctrl_resp_sender: broadcast::Sender<ZCPacket>,
+ 
+     latency_stats: Arc<WindowLatency>,
++    pub(crate) measurements: Arc<super::measured_routing::Measurements>,
+     throughput: Arc<Throughput>,
+     loss_rate_stats: Arc<AtomicU32>,
+ 
+@@ -409,7 +421,7 @@ impl PeerConn {
+         let (ctrl_sender, _ctrl_receiver) = broadcast::channel(8);
+ 
+         let secure_mode_cfg = global_ctx.config.get_secure_mode();
+-        let session_filter = PeerSessionTunnelFilter::new_with_peer(
++        let mut session_filter = PeerSessionTunnelFilter::new_with_peer(
+             my_peer_id,
+             secure_mode_cfg
+                 .as_ref()
+@@ -417,6 +429,7 @@ impl PeerConn {
+                 .unwrap_or(false),
+         );
+ 
++        session_filter.physical_tunnel = tunnel_info.clone();
+         let peer_conn_tunnel_filter = StatsRecorderTunnelFilter::new();
+         let throughput = peer_conn_tunnel_filter.filter_output();
+         let filter_chain = TunnelFilterChain::new(session_filter.clone(), peer_conn_tunnel_filter);
+@@ -462,6 +475,7 @@ impl PeerConn {
+             ctrl_resp_sender: ctrl_sender,
+ 
+             latency_stats: Arc::new(WindowLatency::new(15)),
++            measurements: Arc::new(super::measured_routing::Measurements::default()),
+             throughput,
+             loss_rate_stats: Arc::new(AtomicU32::new(0)),
+ 
+@@ -888,7 +902,7 @@ impl PeerConn {
+     }
+ 
+     async fn do_noise_handshake_as_client(&self) -> Result<NoiseHandshakeResult, Error> {
+-        let prologue = b"avian-peerconn-noise-hop-topology-v1".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-measured-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+@@ -1154,7 +1168,7 @@ impl PeerConn {
+     where
+         Fn: FnMut(&mut PeerConn, &str) -> Result<(), Error> + Send,
+     {
+-        let prologue = b"avian-peerconn-noise-hop-topology-v1".to_vec();
++        let prologue = b"avian-peerconn-noise-hop-measured-v1".to_vec();
+ 
+         let params: NoiseParams = "Noise_XX_25519_ChaChaPoly_SHA256"
+             .parse()
+@@ -1512,6 +1526,8 @@ impl PeerConn {
+         let ctrl_sender = self.ctrl_resp_sender.clone();
+         let conn_info_for_instrument = self.get_conn_info();
+         let control_metrics = self.control_metrics(&conn_info_for_instrument.network_name);
++        let measurements = self.measurements.clone();
++        let probe_tunnel = conn_info_for_instrument.tunnel.clone();
+ 
+         let is_foreign_network = conn_info_for_instrument.network_name
+             != self.global_ctx.get_network_identity().network_name;
+@@ -1565,6 +1581,15 @@ impl PeerConn {
+                     };
+ 
+                     if peer_mgr_hdr.packet_type == PacketType::Ping as u8 {
++                        if super::measured_routing::is_probe(zc_packet.payload())
++                            && (!super::traffic_policy::probe_permitted(
++                                probe_tunnel.as_ref(),
++                                true,
++                            ) || !measurements.permit_echo(zc_packet.payload().len()))
++                        {
++                            continue;
++                        }
++                        let peer_mgr_hdr = zc_packet.mut_peer_manager_header().unwrap();
+                         control_metrics.record_rx(buf_len);
+                         peer_mgr_hdr.packet_type = PacketType::Pong as u8;
+                         if let Err(e) = sink.send(zc_packet).await {
+@@ -1606,6 +1631,7 @@ impl PeerConn {
+             self.sink.clone(),
+             self.ctrl_resp_sender.clone(),
+             self.latency_stats.clone(),
++            self.measurements.clone(),
+             self.loss_rate_stats.clone(),
+             self.throughput.clone(),
+             self.control_metrics(&self.get_conn_info().network_name),
+@@ -2822,3 +2848,113 @@ pub mod tests {
+         let _ = c_ret;
+     }
+ }
++
++impl PeerConn {
++    pub(crate) fn has_queued_packets(&self) -> bool {
++        self.sink.has_queued_packets()
++    }
++
++    pub(crate) async fn probe_capacity(
++        &self,
++        duration_ms: u32,
++        offered_bps: u64,
++        allow_metered: bool,
++    ) -> anyhow::Result<super::measured_routing::ProbeEvidence> {
++        use rand::RngCore;
++        use std::time::{Duration, Instant};
++        static PROBES: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
++        let _probe_slot = PROBES
++            .get_or_init(|| tokio::sync::Semaphore::new(1))
++            .try_acquire()
++            .map_err(|_| anyhow::anyhow!("another capacity probe is active"))?;
++        anyhow::ensure!(!self.is_closed(), "connection is closed");
++        anyhow::ensure!(
++            super::traffic_policy::probe_permitted(
++                self.get_conn_info().tunnel.as_ref(),
++                allow_metered
++            ),
++            "capacity probe is prohibited on this metered connection"
++        );
++        anyhow::ensure!(
++            !self.sink.has_queued_packets(),
++            "connection has queued traffic; probe refused"
++        );
++        self.measurements.reserve_probe(duration_ms, offered_bps)?;
++        let mut responses = self.ctrl_resp_sender.subscribe();
++        let started = Instant::now();
++        let sending_deadline = started + Duration::from_millis(u64::from(duration_ms));
++        let deadline = sending_deadline + Duration::from_secs(2);
++        let (payload_bytes, packet_budget) =
++            super::measured_routing::probe_packet_dimensions(duration_ms, offered_bps);
++        let mut interval = tokio::time::interval(Duration::from_nanos(
++            payload_bytes as u64 * 8_000_000_000 / offered_bps,
++        ));
++        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
++        let mut attempted = 0u64;
++        let mut accepted = std::collections::BTreeMap::new();
++        let mut admitted_count = 0u64;
++        let mut delivered_count = 0u64;
++        let mut last_received = None;
++        loop {
++            if Instant::now() >= deadline {
++                break;
++            }
++            if (Instant::now() >= sending_deadline || attempted >= packet_budget)
++                && delivered_count >= admitted_count
++            {
++                break;
++            }
++            tokio::select! {
++                _ = interval.tick(), if Instant::now() < sending_deadline && attempted < packet_budget => {
++                    let sequence = 0x8000_0000 | attempted as u32;
++                    let mut payload = vec![0u8; payload_bytes];
++                    rand::thread_rng().fill_bytes(&mut payload);
++                    payload[..4].copy_from_slice(&sequence.to_le_bytes());
++                    payload[4..8].copy_from_slice(super::measured_routing::PROBE_MARKER);
++                    let challenge: u128 = rand::random();
++                    payload[payload_bytes - 16..].copy_from_slice(&challenge.to_le_bytes());
++                    let commitment = super::measured_routing::probe_payload_digest(&payload);
++                    let mut packet = ZCPacket::new_with_payload(&payload);
++                    packet.fill_peer_manager_hdr(self.my_peer_id, self.get_peer_id(), PacketType::Ping as u8);
++                    attempted += 1;
++                    if self.sink.try_send(packet).is_ok() {
++                        accepted.insert(sequence, commitment); admitted_count += 1;
++                    }
++                }
++                response = responses.recv() => {
++                    if let Ok(packet) = response {
++                        let payload = packet.payload();
++                        if super::measured_routing::verified_probe_reply(payload, &mut accepted).is_some() {
++                            delivered_count += 1; last_received = Some(Instant::now());
++                        }
++                    }
++                }
++                _ = tokio::time::sleep_until(deadline.into()) => break,
++            }
++        }
++        anyhow::ensure!(
++            delivered_count > 0,
++            "capacity probe received no authenticated replies"
++        );
++        let elapsed = last_received
++            .unwrap()
++            .duration_since(started)
++            .max(Duration::from_millis(u64::from(duration_ms)));
++        let delivered_bytes = delivered_count * payload_bytes as u64;
++        let evidence = super::measured_routing::ProbeEvidence {
++            peer_id: self.get_peer_id(),
++            connection_id: self.conn_id.to_string(),
++            method: "bounded_probe_delivered_rate_lower_bound",
++            delivered_rate_lower_bound_bps: (delivered_bytes as f64 * 8.0 / elapsed.as_secs_f64())
++                as u64,
++            offered_payload_bytes: attempted * payload_bytes as u64,
++            accepted_payload_bytes: admitted_count * payload_bytes as u64,
++            delivered_payload_bytes: delivered_bytes,
++            measurement_duration_ms: elapsed.as_millis() as u64,
++            received_datagrams: delivered_count,
++            collected_at: last_received.unwrap(),
++        };
++        self.measurements.record_probe(evidence.clone());
++        Ok(evidence)
++    }
++}
+diff --git a/easytier/src/peers/peer_conn_ping.rs b/easytier/src/peers/peer_conn_ping.rs
+index dd5ca8f..57d900c 100644
+--- a/easytier/src/peers/peer_conn_ping.rs
++++ b/easytier/src/peers/peer_conn_ping.rs
+@@ -61,7 +61,11 @@ impl PingIntervalController {
+         Self {
+             throughput,
+             loss_counter,
+-            interval: tokio::time::interval(if fast_failover_enabled() { Duration::from_millis(200) } else { Duration::from_secs(1) }),
++            interval: tokio::time::interval(if fast_failover_enabled() {
++                Duration::from_millis(200)
++            } else {
++                Duration::from_secs(1)
++            }),
+             logic_time: 0,
+             last_send_logic_time: 0,
+ 
+@@ -86,7 +90,9 @@ impl PingIntervalController {
+     }
+ 
+     fn should_send_ping(&mut self) -> bool {
+-        if fast_failover_enabled() { return true; }
++        if fast_failover_enabled() || super::measured_routing::enabled() {
++            return true;
++        }
+         if self.loss_counter.load(Ordering::Relaxed) > 0 {
+             self.backoff_idx = 0;
+         } else if self.tx_increase() && !self.rx_increase() {
+@@ -118,6 +124,7 @@ pub struct PeerConnPinger {
+     sink: MpscTunnelSender,
+     ctrl_sender: broadcast::Sender<ZCPacket>,
+     latency_stats: Arc<WindowLatency>,
++    measurements: Arc<super::measured_routing::Measurements>,
+     loss_rate_stats: Arc<AtomicU32>,
+     throughput_stats: Arc<Throughput>,
+     control_metrics: AggregateTrafficMetrics,
+@@ -141,6 +148,7 @@ impl PeerConnPinger {
+         sink: MpscTunnelSender,
+         ctrl_sender: broadcast::Sender<ZCPacket>,
+         latency_stats: Arc<WindowLatency>,
++        measurements: Arc<super::measured_routing::Measurements>,
+         loss_rate_stats: Arc<AtomicU32>,
+         throughput_stats: Arc<Throughput>,
+         control_metrics: AggregateTrafficMetrics,
+@@ -151,6 +159,7 @@ impl PeerConnPinger {
+             sink,
+             tasks: JoinSet::new(),
+             latency_stats,
++            measurements,
+             ctrl_sender,
+             loss_rate_stats,
+             throughput_stats,
+@@ -180,30 +189,37 @@ impl PeerConnPinger {
+ 
+         let now = std::time::Instant::now();
+         // wait until we get a pong packet in ctrl_resp_receiver
+-        let resp = timeout(if fast_failover_enabled() { Duration::from_millis(500) } else { Duration::from_secs(2) }, async {
+-            loop {
+-                match receiver.recv().await {
+-                    Ok(p) => {
+-                        let payload = p.payload();
+-                        let Ok(seq_buf) = payload[0..4].try_into() else {
+-                            tracing::debug!("pingpong recv invalid packet, continue");
+-                            continue;
+-                        };
+-                        let resp_seq = u32::from_le_bytes(seq_buf);
+-                        if resp_seq == seq {
+-                            break;
++        let resp = timeout(
++            if fast_failover_enabled() {
++                Duration::from_millis(500)
++            } else {
++                Duration::from_secs(2)
++            },
++            async {
++                loop {
++                    match receiver.recv().await {
++                        Ok(p) => {
++                            let payload = p.payload();
++                            let Ok(seq_buf) = payload[0..4].try_into() else {
++                                tracing::debug!("pingpong recv invalid packet, continue");
++                                continue;
++                            };
++                            let resp_seq = u32::from_le_bytes(seq_buf);
++                            if resp_seq == seq {
++                                break;
++                            }
++                        }
++                        Err(e) => {
++                            return Err(Error::WaitRespError(format!(
++                                "wait ping response error: {:?}",
++                                e
++                            )));
+                         }
+-                    }
+-                    Err(e) => {
+-                        return Err(Error::WaitRespError(format!(
+-                            "wait ping response error: {:?}",
+-                            e
+-                        )));
+                     }
+                 }
+-            }
+-            Ok(())
+-        })
++                Ok(())
++            },
++        )
+         .await;
+ 
+         tracing::trace!(?resp, "wait ping response done");
+@@ -303,6 +319,8 @@ impl PeerConnPinger {
+         let mut last_rx_packets = throughput.rx_packets();
+ 
+         while let Some(ret) = ping_res_receiver.recv().await {
++            self.measurements
++                .record_quality(ret.as_ref().ok().map(|latency| *latency as u64));
+             if let Ok(lat) = ret {
+                 latency_stats.record_latency(lat as u32);
+ 
+diff --git a/easytier/src/peers/peer_map.rs b/easytier/src/peers/peer_map.rs
+index 3780ab6..a3a7a02 100644
+--- a/easytier/src/peers/peer_map.rs
++++ b/easytier/src/peers/peer_map.rs
+@@ -149,7 +149,34 @@ impl PeerMap {
+ 
+         match self.get_peer_by_id(dst_peer_id) {
+             Some(peer) => {
+-                peer.send_msg(msg).await?;
++                let selection = if super::measured_routing::enabled() {
++                    if let Some(header) = msg.peer_manager_header().filter(|header| {
++                        header.packet_type == crate::tunnel::packet_def::PacketType::Data as u8
++                    }) {
++                        let mut connection = None;
++                        for route in self.routes.read().await.iter() {
++                            connection = route
++                                .class_connection(
++                                    header.avian_traffic_class(),
++                                    header.to_peer_id.get(),
++                                )
++                                .await;
++                            if connection.is_some() {
++                                break;
++                            }
++                        }
++                        connection
++                    } else {
++                        None
++                    }
++                } else {
++                    None
++                };
++                if let Some(connection) = selection {
++                    peer.send_on_connection(msg, &connection).await?;
++                } else {
++                    peer.send_msg(msg).await?;
++                }
+             }
+             None => {
+                 tracing::error!("no peer for dst_peer_id: {}", dst_peer_id);
+diff --git a/easytier/src/peers/peer_ospf_route.rs b/easytier/src/peers/peer_ospf_route.rs
+index 7e9a5f4..fb48aa4 100644
+--- a/easytier/src/peers/peer_ospf_route.rs
++++ b/easytier/src/peers/peer_ospf_route.rs
+@@ -314,7 +314,11 @@ impl RoutePeerInfo {
+         let need_update_periodically = if let Ok(Ok(d)) =
+             SystemTime::try_from(old.last_update.unwrap_or_default()).map(|x| x.elapsed())
+         {
+-            d > UPDATE_PEER_INFO_PERIOD
++            d > if super::measured_routing::enabled() {
++                Duration::from_secs(1)
++            } else {
++                UPDATE_PEER_INFO_PERIOD
++            }
+         } else {
+             true
+         };
+@@ -2109,6 +2113,7 @@ struct PeerRouteServiceImpl {
+     cost_calculator: std::sync::RwLock<Option<RouteCostCalculator>>,
+     route_table: RouteTable,
+     route_table_with_cost: RouteTable,
++    measured_topology: std::sync::Mutex<super::measured_topology::MeasuredTopology>,
+     policy_tables: std::sync::RwLock<std::collections::BTreeMap<(u8, PeerId), PeerId>>,
+     local_policy_edges: std::sync::RwLock<Vec<crate::proto::peer_rpc::AvianPolicyEdge>>,
+     policy_expires: std::sync::Mutex<Instant>,
+@@ -2165,6 +2170,7 @@ impl PeerRouteServiceImpl {
+ 
+             route_table: RouteTable::new(),
+             route_table_with_cost: RouteTable::new(),
++            measured_topology: Default::default(),
+             policy_tables: Default::default(),
+             local_policy_edges: Default::default(),
+             policy_expires: std::sync::Mutex::new(Instant::now()),
+@@ -2440,19 +2446,26 @@ impl PeerRouteServiceImpl {
+ 
+         drop(calc_locked);
+ 
+-        let relay_keys: BTreeSet<Vec<u8>> = self
+-            .synced_route_info
+-            .local_credentials
+-            .local_trusted_credentials()
++        let manager = self.synced_route_info.local_credentials.clone();
++        let credentials = manager.local_trusted_credentials();
++        let verified_only = manager.uses_verified_membership();
++        let active_keys: BTreeSet<Vec<u8>> = credentials
++            .iter()
++            .map(|credential| credential.pubkey.clone())
++            .collect();
++        let relay_keys: BTreeSet<Vec<u8>> = credentials
+             .into_iter()
+             .filter(|credential| credential.allow_relay)
+             .map(|credential| credential.pubkey)
+             .collect();
+         let infos = self.synced_route_info.peer_infos.read();
+         let mut minimum_lifetime = Duration::from_secs(20);
+-        let fresh = infos
++        let fresh: Vec<_> = infos
+             .values()
+             .filter(|record| {
++                if verified_only && !active_keys.contains(&record.noise_static_pubkey) {
++                    return false;
++                }
+                 let age = self
+                     .synced_route_info
+                     .policy_received
+@@ -2476,10 +2489,34 @@ impl PeerRouteServiceImpl {
+                 record
+             })
+             .collect();
+-        *self.policy_tables.write().unwrap() =
+-            super::topology_policy::calculate(self.my_peer_id, fresh);
++        if super::measured_routing::enabled() {
++            let records: Vec<_> = fresh
++                .into_iter()
++                .map(|record| {
++                    let age = self
++                        .synced_route_info
++                        .policy_received
++                        .get(&record.peer_id)
++                        .and_then(|at| Instant::now().checked_duration_since(*at))
++                        .unwrap_or(Duration::from_secs(20));
++                    (record, age)
++                })
++                .collect();
++            let mut measured = self.measured_topology.lock().unwrap();
++            minimum_lifetime = minimum_lifetime.min(measured.calculate(self.my_peer_id, &records));
++            *self.policy_tables.write().unwrap() = measured
++                .decisions
++                .iter()
++                .map(|((destination, class), decision)| {
++                    ((*class, *destination), decision.next_hop_peer_id)
++                })
++                .collect();
++        } else {
++            *self.policy_tables.write().unwrap() =
++                super::topology_policy::calculate(self.my_peer_id, fresh);
++        }
+         *self.policy_expires.lock().unwrap() =
+-            Instant::now() + minimum_lifetime.max(Duration::from_millis(100));
++            Instant::now() + minimum_lifetime.max(Duration::from_millis(1));
+         self.cost_calculator
+             .write()
+             .unwrap()
+@@ -3149,7 +3186,9 @@ impl PeerRouteServiceImpl {
+                 }
+             }
+         }
+-        false
++        // A successful exchange is not a retry: continuous measured updates must
++        // not drive the failure backoff to five seconds and expire fresh evidence.
++        ret.as_ref().is_ok_and(|response| response.error.is_none())
+     }
+ 
+     fn update_peer_info_last_update(&self) {
+@@ -4071,6 +4110,114 @@ impl Route for PeerRoute {
+             .map(|x| x.next_hop_peer_id)
+     }
+ 
++    async fn class_decisions(
++        &self,
++        after: &str,
++        limit: u32,
++        traffic_class: &str,
++    ) -> anyhow::Result<String> {
++        use base64::Engine as _;
++        if Instant::now() >= *self.service_impl.policy_expires.lock().unwrap() {
++            self.service_impl.update_route_table();
++        }
++        let limit = super::measured_routing::page_limit(limit)?;
++        let cursor = if after.is_empty() {
++            (0, 0)
++        } else {
++            let (destination, class) = after
++                .split_once(':')
++                .ok_or_else(|| anyhow::anyhow!("invalid route cursor"))?;
++            let parsed = (destination.parse::<u32>()?, class.parse::<u8>()?);
++            anyhow::ensure!((1..=4).contains(&parsed.1), "invalid route cursor class");
++            parsed
++        };
++        let class_filter = match traffic_class {
++            "" => None,
++            "control" => Some(1),
++            "telemetry" => Some(2),
++            "video" => Some(3),
++            "bulk" => Some(4),
++            _ => anyhow::bail!("invalid traffic class filter"),
++        };
++        let identities = self
++            .global_ctx
++            .get_credential_manager()
++            .verified_transport_identities();
++        let measured = self.service_impl.measured_topology.lock().unwrap();
++        let mut items = Vec::new();
++        let mut used_bytes = 512;
++        let mut next_cursor = None;
++        for (key, decision) in measured.decisions.range((
++            std::ops::Bound::Excluded(cursor),
++            std::ops::Bound::Unbounded,
++        )) {
++            if class_filter.is_some_and(|class| class != key.1) {
++                continue;
++            }
++            let route = &decision.route;
++            let item = serde_json::json!({
++                "destination_peer_id": decision.destination_peer_id,
++                "destination_node_id": identities.get(&decision.destination_transport_key),
++                "public_transport_key": (decision.destination_transport_key.len() == 32).then(|| base64::prelude::BASE64_STANDARD.encode(&decision.destination_transport_key)),
++                "traffic_class": decision.traffic_class, "next_hop_peer_id": decision.next_hop_peer_id,
++                "connection_id": decision.connection_id, "reason": decision.reason,
++                "improvement_hold_ms": decision.improvement_hold_ms,
++                "route": { "traffic_class": route.traffic_class, "hop_count": route.link_ids.len(),
++                    "estimated_round_trip_time_ms": route.estimated_round_trip_time_ms,
++                    "estimated_loss_fraction": route.estimated_loss_fraction,
++                    "estimated_jitter_ms": route.estimated_jitter_ms,
++                    "bottleneck_capacity_bps": route.bottleneck_capacity_bps,
++                    "uses_metered_link": route.uses_metered_link, "degraded": route.degraded,
++                    "degraded_reasons": route.degraded_reasons, "capacity_source": route.capacity_source }
++            });
++            let item_bytes = serde_json::to_vec(&item)?.len() + 1;
++            if items.len() >= limit
++                || used_bytes + item_bytes > super::measured_routing::PAGE_BYTE_BUDGET
++            {
++                anyhow::ensure!(!items.is_empty(), "route summary exceeds page byte budget");
++                next_cursor = items.last().and_then(|item: &serde_json::Value| {
++                    let destination = item["destination_peer_id"].as_u64()?;
++                    let class = match item["traffic_class"].as_str()? {
++                        "control" => 1,
++                        "telemetry" => 2,
++                        "video" => 3,
++                        _ => 4,
++                    };
++                    Some(format!("{destination}:{class}"))
++                });
++                break;
++            }
++            used_bytes += item_bytes;
++            items.push(item);
++        }
++        Ok(serde_json::to_string(
++            &serde_json::json!({"items": items, "next_cursor": next_cursor, "revision": measured.revision}),
++        )?)
++    }
++
++    async fn class_revision(&self) -> u64 {
++        if Instant::now() >= *self.service_impl.policy_expires.lock().unwrap() {
++            self.service_impl.update_route_table();
++        }
++        self.service_impl.measured_topology.lock().unwrap().revision
++    }
++
++    async fn class_connection(&self, class: u8, destination: PeerId) -> Option<String> {
++        if !super::measured_routing::enabled() {
++            return None;
++        }
++        if Instant::now() >= *self.service_impl.policy_expires.lock().unwrap() {
++            self.service_impl.update_route_table();
++        }
++        self.service_impl
++            .measured_topology
++            .lock()
++            .unwrap()
++            .decisions
++            .get(&(destination, class))
++            .map(|decision| decision.connection_id.clone())
++    }
++
+     async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route> {
+         let route_table = &self.service_impl.route_table;
+         let route_table_with_cost = &self.service_impl.route_table_with_cost;
+@@ -5378,6 +5525,79 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn avian_measured_successful_data_sync_does_not_enter_failure_backoff() {
++        let source_manager = create_mock_pmgr().await;
++        let receiver_manager = create_mock_pmgr().await;
++        connect_peer_manager(source_manager.clone(), receiver_manager.clone()).await;
++        let source = create_mock_route(source_manager.clone()).await;
++        let receiver = create_mock_route(receiver_manager.clone()).await;
++        wait_for_condition(
++            || async { source.list_routes().await.len() == 1 },
++            Duration::from_secs(5),
++        )
++        .await;
++        source.tasks.lock().unwrap().abort_all();
++        let session = source
++            .service_impl
++            .get_or_create_session(receiver.my_peer_id);
++        if let Some(task) = session.task.task.lock().unwrap().take() {
++            task.abort();
++        }
++        session.dst_saved_peer_info_versions.clear();
++        session.last_sync_succ_timestamp.store(None);
++        let mut update = source
++            .service_impl
++            .synced_route_info
++            .peer_infos
++            .read()
++            .get(&source.my_peer_id)
++            .unwrap()
++            .clone();
++        update.version += 1;
++        update.hostname = Some("fresh-sync-marker".into());
++        update.last_update = Some(SystemTime::now().into());
++        source
++            .service_impl
++            .synced_route_info
++            .peer_infos
++            .write()
++            .insert(source.my_peer_id, update.clone());
++        assert!(
++            source
++                .service_impl
++                .build_route_info(&session)
++                .unwrap()
++                .iter()
++                .any(|record| record.peer_id == source.my_peer_id
++                    && record.version == update.version)
++        );
++        let previous_transmissions = session.rpc_tx_count.load(Ordering::Relaxed);
++        assert!(
++            source
++                .service_impl
++                .sync_route_with_peer(
++                    receiver.my_peer_id,
++                    source_manager.get_peer_rpc_mgr(),
++                    false
++                )
++                .await
++        );
++        assert_eq!(
++            receiver
++                .service_impl
++                .synced_route_info
++                .peer_infos
++                .read()
++                .get(&source.my_peer_id)
++                .unwrap()
++                .hostname
++                .as_deref(),
++            Some("fresh-sync-marker")
++        );
++        assert!(session.rpc_tx_count.load(Ordering::Relaxed) > previous_transmissions);
++    }
++
+     #[tokio::test]
+     async fn sync_route_info_marks_credential_sender_and_filters_entries() {
+         let peer_mgr = create_mock_pmgr().await;
+@@ -6845,6 +7065,7 @@ mod avian_topology_freshness_tests {
+                 destination: 2,
+                 allowed_classes: 6,
+                 latency_us: 1000,
++                ..Default::default()
+             }]
+         }
+     }
+@@ -6876,6 +7097,7 @@ mod avian_topology_freshness_tests {
+                 destination: 2,
+                 allowed_classes: 30,
+                 latency_us: 1000,
++                ..Default::default()
+             });
+         service
+             .synced_route_info
+diff --git a/easytier/src/peers/route_trait.rs b/easytier/src/peers/route_trait.rs
+index 5d241a3..66673a3 100644
+--- a/easytier/src/peers/route_trait.rs
++++ b/easytier/src/peers/route_trait.rs
+@@ -97,6 +97,20 @@ pub trait Route {
+     }
+ 
+     async fn list_routes(&self) -> Vec<crate::proto::api::instance::Route>;
++    async fn class_decisions(
++        &self,
++        _after: &str,
++        _limit: u32,
++        _traffic_class: &str,
++    ) -> anyhow::Result<String> {
++        Ok("{\"items\":[],\"next_cursor\":null,\"revision\":0}".into())
++    }
++    async fn class_revision(&self) -> u64 {
++        0
++    }
++    async fn class_connection(&self, _class: u8, _destination: PeerId) -> Option<String> {
++        None
++    }
+ 
+     // TODO: rewrite route management, remove this
+     async fn list_proxy_cidrs(&self) -> BTreeSet<Ipv4Cidr>;
+diff --git a/easytier/src/peers/rpc_service.rs b/easytier/src/peers/rpc_service.rs
+index 941d03f..9d10ab6 100644
+--- a/easytier/src/peers/rpc_service.rs
++++ b/easytier/src/peers/rpc_service.rs
+@@ -83,6 +83,113 @@ impl PeerManagerRpcService {
+ #[async_trait::async_trait]
+ impl PeerManageRpc for PeerManagerRpcService {
+     type Controller = BaseController;
++    async fn list_class_route(
++        &self,
++        _: BaseController,
++        request: crate::proto::api::instance::ListClassRouteRequest,
++    ) -> Result<crate::proto::api::instance::ListClassRouteResponse, rpc_types::error::Error> {
++        let manager = weak_upgrade(&self.peer_manager)?;
++        let route = manager.get_route();
++        if !request.links {
++            return Ok(crate::proto::api::instance::ListClassRouteResponse {
++                decisions_json: route
++                    .class_decisions(&request.after, request.limit, &request.traffic_class)
++                    .await?,
++                links_json: String::new(),
++            });
++        }
++        let limit = super::measured_routing::page_limit(request.limit)?;
++        let cursor = if request.after.is_empty() {
++            (0, None)
++        } else {
++            let (peer, connection) = request
++                .after
++                .split_once(':')
++                .ok_or_else(|| anyhow::anyhow!("invalid link cursor"))?;
++            (
++                peer.parse::<u32>().map_err(anyhow::Error::from)?,
++                Some(
++                    connection
++                        .parse::<uuid::Uuid>()
++                        .map_err(anyhow::Error::from)?,
++                ),
++            )
++        };
++        let revision = route.class_revision().await;
++        let map = manager.get_peer_map();
++        let identities = map
++            .get_global_ctx()
++            .get_credential_manager()
++            .verified_transport_identities();
++        let mut peers = map.list_peers();
++        peers.sort_unstable();
++        let mut items = Vec::new();
++        let mut used_bytes = 512;
++        let mut more = false;
++        'peers: for peer_id in peers.into_iter().filter(|peer| *peer >= cursor.0) {
++            let Some(peer) = map.get_peer_by_id(peer_id) else {
++                continue;
++            };
++            let after = if peer_id == cursor.0 { cursor.1 } else { None };
++            for item in peer.measured_links_after(after, limit + 1 - items.len(), &identities) {
++                let item_bytes = serde_json::to_vec(&item)
++                    .map_err(anyhow::Error::from)?
++                    .len()
++                    + 1;
++                if items.len() >= limit
++                    || used_bytes + item_bytes > super::measured_routing::PAGE_BYTE_BUDGET
++                {
++                    if items.is_empty() {
++                        return Err(anyhow::anyhow!("link summary exceeds page byte budget").into());
++                    }
++                    more = true;
++                    break 'peers;
++                }
++                used_bytes += item_bytes;
++                items.push(item);
++            }
++        }
++        let next_cursor = if more {
++            items.last().and_then(|item: &serde_json::Value| {
++                Some(format!(
++                    "{}:{}",
++                    item["peer_id"].as_u64()?,
++                    item["connection_id"].as_str()?
++                ))
++            })
++        } else {
++            None
++        };
++        Ok(crate::proto::api::instance::ListClassRouteResponse {
++            decisions_json: String::new(),
++            links_json: serde_json::to_string(&serde_json::json!({
++                "items": items, "next_cursor": next_cursor, "revision": revision }))
++            .map_err(anyhow::Error::from)?,
++        })
++    }
++    async fn probe_link(
++        &self,
++        _: BaseController,
++        request: crate::proto::api::instance::ProbeLinkRequest,
++    ) -> Result<crate::proto::api::instance::ProbeLinkResponse, rpc_types::error::Error> {
++        let manager = weak_upgrade(&self.peer_manager)?;
++        let peer = manager
++            .get_peer_map()
++            .get_peer_by_id(request.peer_id)
++            .ok_or_else(|| anyhow::anyhow!("probe requires a directly authenticated neighbor"))?;
++        let evidence = peer
++            .probe_capacity(
++                request.duration_ms,
++                request.offered_bps,
++                request.allow_metered,
++                &request.connection_id,
++            )
++            .await?;
++        Ok(crate::proto::api::instance::ProbeLinkResponse {
++            result_json: serde_json::to_string(&evidence).map_err(anyhow::Error::from)?,
++        })
++    }
++
+     async fn list_peer(
+         &self,
+         _: BaseController,
+diff --git a/easytier/src/peers/topology_policy.rs b/easytier/src/peers/topology_policy.rs
+index 0de95f1..a7847d5 100644
+--- a/easytier/src/peers/topology_policy.rs
++++ b/easytier/src/peers/topology_policy.rs
+@@ -82,6 +82,7 @@ mod tests {
+                     destination: *destination,
+                     allowed_classes: *allowed_classes,
+                     latency_us: *latency_us,
++                    ..Default::default()
+                 },
+             )
+             .collect();
+@@ -132,7 +133,8 @@ mod parallel_link_tests {
+             destination,
+             allowed_classes,
+             latency_us,
+-        };
++                    ..Default::default()
++                };
+         let records = vec![
+             record(1, vec![edge(2, 6, 1), edge(2, 30, 100), edge(3, 30, 20)]),
+             record(2, vec![edge(4, 30, 1)]),
+diff --git a/easytier/src/peers/traffic_policy.rs b/easytier/src/peers/traffic_policy.rs
+index ab69005..fa25710 100644
+--- a/easytier/src/peers/traffic_policy.rs
++++ b/easytier/src/peers/traffic_policy.rs
+@@ -3,7 +3,12 @@ use crate::{
+     proto::common::TunnelInfo,
+     tunnel::packet_def::{PacketType, ZCPacket},
+ };
+-use std::{collections::BTreeSet, net::IpAddr, sync::OnceLock};
++use std::{
++    collections::BTreeSet,
++    net::IpAddr,
++    sync::{Arc, Mutex, OnceLock},
++    time::{Duration, Instant},
++};
+ 
+ pub(crate) const CONTROL: u8 = 1;
+ pub(crate) const TELEMETRY: u8 = 2;
+@@ -23,26 +28,77 @@ pub(crate) struct LocalPolicy {
+     allow_metered_bulk: bool,
+ }
+ 
+-pub(crate) fn policy() -> &'static Result<LocalPolicy, String> {
+-    static POLICY: OnceLock<Result<LocalPolicy, String>> = OnceLock::new();
++fn parse_policy(encoded: &str) -> Result<Arc<LocalPolicy>, String> {
++    let policy: LocalPolicy = serde_json::from_str(encoded).map_err(|error| error.to_string())?;
++    if policy.control_tcp_ports.contains(&0) {
++        return Err("control TCP port must be nonzero".into());
++    }
++    Ok(Arc::new(policy))
++}
++
++fn configured_policy() -> &'static Result<Arc<LocalPolicy>, String> {
++    static POLICY: OnceLock<Result<Arc<LocalPolicy>, String>> = OnceLock::new();
+     POLICY.get_or_init(|| match std::env::var("AVIAN_TRAFFIC_POLICY") {
+-        Ok(encoded) => serde_json::from_str::<LocalPolicy>(&encoded)
+-            .map_err(|error| error.to_string())
+-            .and_then(|policy| {
+-                if policy.control_tcp_ports.contains(&0) {
+-                    Err("control TCP port must be nonzero".into())
+-                } else {
+-                    Ok(policy)
+-                }
+-            }),
+-        Err(std::env::VarError::NotPresent) => Ok(LocalPolicy::default()),
++        Ok(encoded) => parse_policy(&encoded),
++        Err(std::env::VarError::NotPresent) => Ok(Arc::new(LocalPolicy::default())),
+         Err(_) => Err("invalid traffic policy encoding".into()),
+     })
+ }
+ 
++fn read_policy_file(path: &str) -> Result<Arc<LocalPolicy>, String> {
++    use std::io::Read;
++    let mut options = std::fs::OpenOptions::new();
++    options.read(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::OpenOptionsExt;
++        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
++    }
++    let file = options.open(path).map_err(|error| error.to_string())?;
++    let metadata = file.metadata().map_err(|error| error.to_string())?;
++    if !metadata.is_file() || metadata.len() > 65536 {
++        return Err("invalid policy file size or type".into());
++    }
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::MetadataExt;
++        if metadata.uid() != unsafe { nix::libc::geteuid() } || metadata.mode() & 0o077 != 0 {
++            return Err("policy file must be owned by this user with private permissions".into());
++        }
++    }
++    let mut encoded = String::new();
++    file.take(65537)
++        .read_to_string(&mut encoded)
++        .map_err(|error| error.to_string())?;
++    if encoded.len() > 65536 {
++        return Err("policy file exceeds size limit".into());
++    }
++    parse_policy(&encoded)
++}
++
++pub(crate) fn policy() -> Result<Arc<LocalPolicy>, String> {
++    type CachedPolicy = Option<(String, Instant, Result<Arc<LocalPolicy>, String>)>;
++    static CACHE: OnceLock<Mutex<CachedPolicy>> = OnceLock::new();
++    let path = match std::env::var("AVIAN_TRAFFIC_POLICY_FILE") {
++        Ok(path) => path,
++        Err(std::env::VarError::NotPresent) => return configured_policy().clone(),
++        Err(_) => return Err("invalid policy file path".into()),
++    };
++    let mut cache = CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap();
++    if let Some((cached_path, at, result)) = &*cache {
++        if *cached_path == path && at.elapsed() < Duration::from_millis(100) {
++            return result.clone();
++        }
++    }
++    let result = read_policy_file(&path);
++    *cache = Some((path, Instant::now(), result.clone()));
++    result
++}
++
+ /// Classify only locally originated plaintext. Fragmented/unknown traffic is bulk.
+ pub(crate) fn classify_ip_packet(packet: &[u8]) -> u8 {
+-    let ports = policy()
++    let current_policy = policy().or_else(|_| configured_policy().clone());
++    let ports = current_policy
+         .as_ref()
+         .map(|policy| &policy.control_tcp_ports)
+         .ok();
+@@ -121,14 +177,14 @@ pub(crate) fn permits_connection(packet: &ZCPacket, tunnel: Option<&TunnelInfo>)
+     if header.packet_type != PacketType::Data as u8 {
+         return true;
+     }
+-    let Ok(policy) = policy() else {
+-        return false;
+-    };
+     let class = if header.avian_traffic_class() == 0 {
+         BULK
+     } else {
+         header.avian_traffic_class()
+     };
++    let Ok(policy) = policy() else {
++        return matches!(class, CONTROL | TELEMETRY);
++    };
+     let local_address = tunnel
+         .and_then(|info| info.local_addr.as_ref())
+         .and_then(|address| url::Url::parse(&address.url).ok())
+@@ -139,11 +195,15 @@ pub(crate) fn permits_connection(packet: &ZCPacket, tunnel: Option<&TunnelInfo>)
+         })
+         .and_then(|host| host.parse::<IpAddr>().ok())
+         .filter(|address| !address.is_unspecified());
+-    // In the default unmetered mode, non-IP internal tunnels remain usable.
++    // Managed runtime inventory cannot authorize an unresolved physical egress.
++    if local_address.is_none() && std::env::var_os("AVIAN_TRAFFIC_POLICY_FILE").is_some() {
++        return matches!(class, CONTROL | TELEMETRY);
++    }
++    // Standalone legacy mode keeps non-IP internal tunnels usable.
+     if local_address.is_none() && policy.metered_addresses.is_empty() {
+         return (CONTROL..=BULK).contains(&class);
+     }
+-    permitted(policy, class, local_address)
++    permitted(&policy, class, local_address)
+ }
+ 
+ #[cfg(test)]
+@@ -237,3 +297,55 @@ mod control_port_tests {
+         }
+     }
+ }
++
++/// Capacity probes need an explicit local policy decision independent of their wire type.
++pub(crate) fn probe_permitted(tunnel: Option<&TunnelInfo>, allow_metered: bool) -> bool {
++    let Ok(policy) = policy() else {
++        return false;
++    };
++    let address = tunnel
++        .and_then(|info| info.local_addr.as_ref())
++        .and_then(|address| url::Url::parse(&address.url).ok())
++        .and_then(|address| address.host_str().map(str::to_owned))
++        .and_then(|address| address.trim_matches(['[', ']']).parse::<IpAddr>().ok())
++        .filter(|address| !address.is_unspecified());
++    if address.is_none() && std::env::var_os("AVIAN_TRAFFIC_POLICY_FILE").is_some() {
++        return false;
++    }
++    let metered = address.is_some_and(|address| policy.metered_addresses.contains(&address));
++    !metered || allow_metered && policy.allow_metered_bulk
++}
++
++pub(crate) fn connection_metered(tunnel: Option<&TunnelInfo>) -> bool {
++    !probe_permitted(tunnel, false)
++}
++
++#[cfg(all(test, unix))]
++mod live_policy_file_tests {
++    use super::*;
++    use std::os::unix::fs::{PermissionsExt, symlink};
++
++    #[test]
++    fn avian_measured_policy_file_requires_private_complete_current_input() {
++        let directory = tempfile::tempdir().unwrap();
++        let path = directory.path().join("policy.json");
++        std::fs::write(&path, r#"{"metered_addresses":["192.0.2.1"]}"#).unwrap();
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
++        assert!(
++            read_policy_file(path.to_str().unwrap())
++                .unwrap()
++                .metered_addresses
++                .contains(&"192.0.2.1".parse().unwrap())
++        );
++        let alias = directory.path().join("alias.json");
++        symlink(&path, &alias).unwrap();
++        assert!(read_policy_file(alias.to_str().unwrap()).is_err());
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(read_policy_file(path.to_str().unwrap()).is_err());
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
++        std::fs::write(&path, "{").unwrap();
++        assert!(read_policy_file(path.to_str().unwrap()).is_err());
++        std::fs::remove_file(&path).unwrap();
++        assert!(read_policy_file(path.to_str().unwrap()).is_err());
++    }
++}
+diff --git a/easytier/src/proto/api_instance.proto b/easytier/src/proto/api_instance.proto
+index 12fe18f..e2d42cd 100644
+--- a/easytier/src/proto/api_instance.proto
++++ b/easytier/src/proto/api_instance.proto
+@@ -184,6 +184,24 @@ message GetForeignNetworkSummaryResponse {
+   peer_rpc.RouteForeignNetworkSummary summary = 1;
+ }
+ 
++message ListClassRouteRequest {
++  InstanceIdentifier instance = 1;
++  string after = 2;
++  uint32 limit = 3;
++  string traffic_class = 4;
++  bool links = 5;
++}
++message ListClassRouteResponse { string decisions_json = 1; string links_json = 2; }
++message ProbeLinkRequest {
++  InstanceIdentifier instance = 1;
++  uint32 peer_id = 2;
++  uint32 duration_ms = 3;
++  uint64 offered_bps = 4;
++  bool allow_metered = 5;
++  string connection_id = 6;
++}
++message ProbeLinkResponse { string result_json = 1; }
++
+ service PeerManageRpc {
+   rpc ListPeer(ListPeerRequest) returns (ListPeerResponse);
+   rpc ListPublicIpv6Info(ListPublicIpv6InfoRequest)
+@@ -197,6 +215,8 @@ service PeerManageRpc {
+   rpc ShowNodeInfo(ShowNodeInfoRequest) returns (ShowNodeInfoResponse);
+   rpc GetForeignNetworkSummary(GetForeignNetworkSummaryRequest)
+       returns (GetForeignNetworkSummaryResponse);
++  rpc ListClassRoute(ListClassRouteRequest) returns (ListClassRouteResponse);
++  rpc ProbeLink(ProbeLinkRequest) returns (ProbeLinkResponse);
+ }
+ 
+ enum ConnectorStatus {
+diff --git a/easytier/src/proto/peer_rpc.proto b/easytier/src/proto/peer_rpc.proto
+index e9af980..706a5e0 100644
+--- a/easytier/src/proto/peer_rpc.proto
++++ b/easytier/src/proto/peer_rpc.proto
+@@ -23,6 +23,15 @@ message AvianPolicyEdge {
+   uint32 destination = 1;
+   uint32 allowed_classes = 2;
+   uint64 latency_us = 3;
++  string connection_id = 4;
++  bool metered = 5;
++  bool has_quality = 6;
++  uint64 quality_age_ms = 7;
++  uint64 jitter_us = 8;
++  uint32 loss_ppm = 9;
++  uint64 capacity_bps = 10;
++  uint64 capacity_age_ms = 11;
++  uint64 measurement_sequence = 12;
+ }
+ 
+ message RoutePeerInfo {
+diff --git a/easytier/src/rpc_service/peer_manage.rs b/easytier/src/rpc_service/peer_manage.rs
+index 2e8369d..e389e9f 100644
+--- a/easytier/src/rpc_service/peer_manage.rs
++++ b/easytier/src/rpc_service/peer_manage.rs
+@@ -26,6 +26,27 @@ impl PeerManageRpcService {
+ impl PeerManageRpc for PeerManageRpcService {
+     type Controller = BaseController;
+ 
++    async fn list_class_route(
++        &self,
++        ctrl: Self::Controller,
++        req: instance::ListClassRouteRequest,
++    ) -> crate::proto::rpc_types::error::Result<instance::ListClassRouteResponse> {
++        super::get_instance_service(&self.instance_manager, &req.instance)?
++            .get_peer_manage_service()
++            .list_class_route(ctrl, req)
++            .await
++    }
++    async fn probe_link(
++        &self,
++        ctrl: Self::Controller,
++        req: instance::ProbeLinkRequest,
++    ) -> crate::proto::rpc_types::error::Result<instance::ProbeLinkResponse> {
++        super::get_instance_service(&self.instance_manager, &req.instance)?
++            .get_peer_manage_service()
++            .probe_link(ctrl, req)
++            .await
++    }
++
+     async fn list_peer(
+         &self,
+         ctrl: Self::Controller,
+diff --git a/easytier/src/tunnel/mpsc.rs b/easytier/src/tunnel/mpsc.rs
+index 1c409c4..1b0524b 100644
+--- a/easytier/src/tunnel/mpsc.rs
++++ b/easytier/src/tunnel/mpsc.rs
+@@ -36,6 +36,11 @@ fn priority_class(packet: &ZCPacket) -> usize {
+     let Some(header) = packet.peer_manager_header() else {
+         return 3;
+     };
++    if crate::peers::measured_routing::is_probe(packet.payload())
++        && matches!(header.packet_type, value if value == super::packet_def::PacketType::Ping as u8 || value == super::packet_def::PacketType::Pong as u8)
++    {
++        return 3;
++    }
+     if header.packet_type != super::packet_def::PacketType::Data as u8 {
+         return 0;
+     }
+@@ -72,6 +77,14 @@ impl PriorityReceiver {
+ }
+ 
+ impl MpscTunnelSender {
++    pub(crate) fn has_queued_packets(&self) -> bool {
++        self.priority.as_ref().is_some_and(|priority| {
++            priority
++                .channels
++                .iter()
++                .any(|channel| channel.capacity() < channel.max_capacity())
++        })
++    }
+     pub async fn send(&self, item: ZCPacket) -> Result<(), TunnelError> {
+         if let Some(priority) = &self.priority {
+             let class = priority_class(&item);
+diff --git a/easytier/src/tunnel/packet_def.rs b/easytier/src/tunnel/packet_def.rs
+index 265eb16..d19e470 100644
+--- a/easytier/src/tunnel/packet_def.rs
++++ b/easytier/src/tunnel/packet_def.rs
+@@ -645,6 +645,7 @@ impl ZCPacket {
+         hdr.to_peer_id.set(to_peer_id);
+         hdr.packet_type = packet_type;
+         hdr.flags = 0;
++        hdr.reserved = 0;
+         hdr.forward_counter = 1;
+         hdr.len.set(payload_len as u32);
+     }

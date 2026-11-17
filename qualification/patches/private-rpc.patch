@@ -1,0 +1,909 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 78304a9..dc8607e 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2386,6 +2386,7 @@ dependencies = [
+  "zerocopy 0.7.35",
+  "zip",
+  "zstd",
++ "zeroize",
+ ]
+ 
+ [[package]]
+diff --git a/easytier/Cargo.toml b/easytier/Cargo.toml
+index af79dfd..d571901 100644
+--- a/easytier/Cargo.toml
++++ b/easytier/Cargo.toml
+@@ -114,6 +114,7 @@ nix = { version = "0.29.0", features = [
+     "ioctl",
+     "net",
+     "fs",
++    "user",
+ ] }
+ 
+ uuid = { version = "1.5.0", features = [
+@@ -252,6 +253,7 @@ multimap = "0.10.1"
+ version-compare = "0.2.0"
+ hmac = "0.12.1"
+ sha2 = "0.10.8"
++zeroize = "1"
+ shellexpand = "3.1.1"
+ 
+ # for fake tcp
+diff --git a/easytier/src/rpc_service/api.rs b/easytier/src/rpc_service/api.rs
+index 4aedca3..754d09e 100644
+--- a/easytier/src/rpc_service/api.rs
++++ b/easytier/src/rpc_service/api.rs
+@@ -35,7 +35,7 @@ use crate::{
+ };
+ 
+ pub struct ApiRpcServer<T: TunnelListener + 'static> {
+-    rpc_server: StandAloneServer<T>,
++    rpc_server: StandAloneServer<super::private_rpc::PrivateRpcListener<T>>,
+     protected_tcp_port: Option<u16>,
+ }
+ 
+@@ -46,6 +46,9 @@ impl ApiRpcServer<TcpTunnelListener> {
+         instance_manager: Arc<NetworkInstanceManager>,
+     ) -> anyhow::Result<Self> {
+         let rpc_addr = parse_rpc_portal(rpc_portal)?;
++        if std::env::var_os("AVIAN_RPC_TOKEN_FILE").is_some() && !rpc_addr.ip().is_loopback() {
++            anyhow::bail!("private RPC requires a loopback listener");
++        }
+         let mut server = Self::from_tunnel(
+             TcpTunnelListener::new(
+                 format!("tcp://{}", rpc_addr)
+@@ -67,7 +70,7 @@ impl ApiRpcServer<TcpTunnelListener> {
+ 
+ impl<T: TunnelListener + 'static> ApiRpcServer<T> {
+     pub fn from_tunnel(tunnel: T, instance_manager: Arc<NetworkInstanceManager>) -> Self {
+-        let rpc_server = StandAloneServer::new(tunnel);
++        let rpc_server = StandAloneServer::new(super::private_rpc::PrivateRpcListener::new(tunnel));
+         register_api_rpc_service(&instance_manager, rpc_server.registry(), None);
+         Self {
+             rpc_server,
+diff --git a/easytier/src/rpc_service/mod.rs b/easytier/src/rpc_service/mod.rs
+index b9af828..b21fc4e 100644
+--- a/easytier/src/rpc_service/mod.rs
++++ b/easytier/src/rpc_service/mod.rs
+@@ -14,6 +14,7 @@ mod vpn_portal;
+ pub mod api;
+ pub mod instance_manage;
+ pub mod logger;
++pub mod private_rpc;
+ pub mod remote_client;
+ 
+ pub type ApiRpcServer<T> = self::api::ApiRpcServer<T>;
+diff --git a/easytier/src/easytier-cli.rs b/easytier/src/easytier-cli.rs
+index 9264fc1..256e7d0 100644
+--- a/easytier/src/easytier-cli.rs
++++ b/easytier/src/easytier-cli.rs
+@@ -545,7 +550,8 @@ struct CommandHandler<'a> {
+     resolved_target: Option<InstanceTarget>,
+ }
+ 
+-type RpcClient = StandAloneClient<TcpTunnelConnector>;
++type RpcClient =
++    StandAloneClient<easytier::rpc_service::private_rpc::PrivateRpcConnector<TcpTunnelConnector>>;
+ type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
+ type ForeignNetworkMap = BTreeMap<String, ForeignNetworkEntryPb>;
+ type GlobalForeignNetworkMap = BTreeMap<u32, list_global_foreign_network_response::ForeignNetworks>;
+@@ -2892,11 +2920,13 @@ async fn main() -> Result<(), Error> {
+     rust_i18n::set_locale(&locale);
+     let cli = Cli::parse();
+ 
+-    let client = RpcClient::new(TcpTunnelConnector::new(
+-        format!("tcp://{}:{}", cli.rpc_portal.ip(), cli.rpc_portal.port())
+-            .parse()
+-            .unwrap(),
+-    ));
++    let client = RpcClient::new(
++        easytier::rpc_service::private_rpc::PrivateRpcConnector::new(TcpTunnelConnector::new(
++            format!("tcp://{}:{}", cli.rpc_portal.ip(), cli.rpc_portal.port())
++                .parse()
++                .unwrap(),
++        )),
++    );
+     let handler = CommandHandler {
+         client: Arc::new(tokio::sync::Mutex::new(client)),
+         verbose: cli.verbose,
+diff --git a/easytier/src/peers/peer_manager.rs b/easytier/src/peers/peer_manager.rs
+index f9ded6b..d75a138 100644
+--- a/easytier/src/peers/peer_manager.rs
++++ b/easytier/src/peers/peer_manager.rs
+@@ -2024,7 +2024,9 @@ impl PeerManager {
+                 .iter()
+                 .map(|x| x.to_string())
+                 .collect(),
+-            config: self.global_ctx.config.dump(),
++            config: crate::rpc_service::private_rpc::redacted_node_config(
++                self.global_ctx.config.dump(),
++            ),
+             version: EASYTIER_VERSION.to_string(),
+             feature_flag: Some(self.global_ctx.get_feature_flags()),
+             ip_list: Some(self.global_ctx.get_ip_collector().collect_ip_addrs().await),
+diff --git a/easytier/src/rpc_service/private_rpc.rs b/easytier/src/rpc_service/private_rpc.rs
+new file mode 100644
+index 0000000..750e0f9
+--- /dev/null
++++ b/easytier/src/rpc_service/private_rpc.rs
+@@ -0,0 +1,749 @@
++//! Per-instance authenticated and encrypted local administration transport.
++use crate::{
++    proto::common::TunnelInfo,
++    tunnel::{
++        SplitTunnel, StreamItem, Tunnel, TunnelConnector, TunnelError, TunnelListener,
++        filter::{TunnelFilter, TunnelWithFilter},
++        packet_def::{PacketType, ZCPacket, ZCPacketType},
++    },
++};
++use bytes::BytesMut;
++use futures::{SinkExt, StreamExt};
++use snow::{Builder, TransportState, params::NoiseParams};
++use std::{
++    fs::OpenOptions,
++    io::Read,
++    path::Path,
++    sync::{Arc, Mutex},
++    time::Duration,
++};
++use tokio::task::JoinSet;
++use zeroize::{Zeroize, Zeroizing};
++
++const MAGIC: &[u8] = b"AVIAN_PRIVATE_RPC_V1:";
++const PROLOGUE: &[u8] = b"avian-private-admin-rpc-v1";
++const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_SHA256";
++const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
++const MAXIMUM_PENDING_HANDSHAKES: usize = 16;
++const MAXIMUM_PLAINTEXT_FRAME: usize = 65_519;
++type SharedKey = Arc<Zeroizing<[u8; 32]>>;
++
++fn authentication_failed() -> TunnelError {
++    TunnelError::InvalidPacket("private RPC authentication failed".into())
++}
++
++fn protected_token(path: &Path) -> Result<SharedKey, TunnelError> {
++    let metadata = std::fs::symlink_metadata(path).map_err(|_| authentication_failed())?;
++    let parent = path
++        .parent()
++        .filter(|parent| !parent.as_os_str().is_empty())
++        .unwrap_or(Path::new("."));
++    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|_| authentication_failed())?;
++    if !metadata.is_file()
++        || !parent_metadata.is_dir()
++        || metadata.file_type().is_symlink()
++        || parent_metadata.file_type().is_symlink()
++    {
++        return Err(authentication_failed());
++    }
++    let mut options = OpenOptions::new();
++    options.read(true);
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
++        let user = nix::unistd::geteuid().as_raw();
++        if metadata.uid() != user
++            || parent_metadata.uid() != user
++            || metadata.nlink() > 1
++            || metadata.permissions().mode() & 0o077 != 0
++            || parent_metadata.permissions().mode() & 0o022 != 0
++        {
++            return Err(authentication_failed());
++        }
++        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
++    }
++    #[cfg(windows)]
++    {
++        verify_windows_owner_acl(path)?;
++        use std::os::windows::fs::OpenOptionsExt;
++        options.custom_flags(0x0020_0000); // Open a reparse point itself rather than following it.
++    }
++    #[cfg(not(any(unix, windows)))]
++    return Err(authentication_failed());
++    let file = options.open(path).map_err(|_| authentication_failed())?;
++    let opened = file.metadata().map_err(|_| authentication_failed())?;
++    if !opened.is_file() {
++        return Err(authentication_failed());
++    }
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::{MetadataExt, PermissionsExt};
++        if opened.uid() != metadata.uid()
++            || opened.ino() != metadata.ino()
++            || opened.dev() != metadata.dev()
++            || opened.nlink() > 1
++            || opened.permissions().mode() & 0o077 != 0
++        {
++            return Err(authentication_failed());
++        }
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::MetadataExt;
++        if opened.file_attributes() & 0x400 != 0 {
++            return Err(authentication_failed());
++        }
++    }
++    let mut encoded = Zeroizing::new(String::new());
++    file.take(66)
++        .read_to_string(&mut encoded)
++        .map_err(|_| authentication_failed())?;
++    let text = encoded.strip_suffix('\n').unwrap_or(&encoded);
++    if text.len() != 64
++        || !text
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++    {
++        return Err(authentication_failed());
++    }
++    let mut key = Zeroizing::new([0u8; 32]);
++    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
++        let pair = std::str::from_utf8(pair).map_err(|_| authentication_failed())?;
++        key[index] = u8::from_str_radix(pair, 16).map_err(|_| authentication_failed())?;
++    }
++    if key.iter().all(|byte| *byte == 0) {
++        return Err(authentication_failed());
++    }
++    Ok(Arc::new(key))
++}
++
++#[cfg(windows)]
++fn verify_windows_owner_acl(path: &Path) -> Result<(), TunnelError> {
++    use std::{
++        io::Write,
++        process::{Command, Stdio},
++        time::Instant,
++    };
++    let root = std::env::var_os("SystemRoot").ok_or_else(authentication_failed)?;
++    let backend =
++        std::path::PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
++    if !backend.is_absolute() {
++        return Err(authentication_failed());
++    }
++    let mut child = Command::new(backend)
++        .args([
++            "-NoLogo",
++            "-NoProfile",
++            "-NonInteractive",
++            "-Command",
++            include_str!("private_rpc_acl.ps1"),
++        ])
++        .stdin(Stdio::piped())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .spawn()
++        .map_err(|_| authentication_failed())?;
++    let payload = serde_json::to_vec(
++        &serde_json::json!({"path": path.to_str().ok_or_else(authentication_failed)?}),
++    )
++    .map_err(|_| authentication_failed())?;
++    let mut input = child.stdin.take().ok_or_else(authentication_failed)?;
++    let writer = std::thread::spawn(move || input.write_all(&payload));
++    let started = Instant::now();
++    loop {
++        match child.try_wait() {
++            Ok(Some(status)) => {
++                let written = writer.join().is_ok_and(|result| result.is_ok());
++                return if status.success() && written {
++                    Ok(())
++                } else {
++                    Err(authentication_failed())
++                };
++            }
++            Ok(None) if started.elapsed() < Duration::from_secs(10) => {
++                std::thread::sleep(Duration::from_millis(20))
++            }
++            _ => {
++                let _ = child.kill();
++                let _ = child.wait();
++                let _ = writer.join();
++                return Err(authentication_failed());
++            }
++        }
++    }
++}
++
++enum Protection {
++    Disabled,
++    Enabled(SharedKey),
++    Invalid,
++}
++impl Protection {
++    fn from_environment() -> Self {
++        match std::env::var_os("AVIAN_RPC_TOKEN_FILE") {
++            None => Self::Disabled,
++            Some(path) => match protected_token(Path::new(&path)) {
++                Ok(key) => Self::Enabled(key),
++                Err(_) => Self::Invalid,
++            },
++        }
++    }
++}
++
++struct RawTunnel {
++    info: Option<TunnelInfo>,
++    split: Mutex<Option<SplitTunnel>>,
++}
++impl Tunnel for RawTunnel {
++    fn split(&self) -> SplitTunnel {
++        self.split
++            .lock()
++            .unwrap()
++            .take()
++            .expect("private RPC tunnel splits once")
++    }
++    fn info(&self) -> Option<TunnelInfo> {
++        self.info.clone()
++    }
++}
++struct EncryptedFrames {
++    state: Mutex<TransportState>,
++}
++impl TunnelFilter for EncryptedFrames {
++    type FilterOutput = ();
++    fn before_send(&self, packet: ZCPacket) -> Option<ZCPacket> {
++        let plaintext = packet.tunnel_payload();
++        if plaintext.len() > MAXIMUM_PLAINTEXT_FRAME {
++            return None;
++        }
++        let mut ciphertext = vec![0u8; plaintext.len() + 16];
++        let length = self
++            .state
++            .lock()
++            .ok()?
++            .write_message(plaintext, &mut ciphertext)
++            .ok()?;
++        Some(control_packet(&ciphertext[..length]))
++    }
++    fn after_received(&self, packet: StreamItem) -> Option<StreamItem> {
++        let packet = match packet {
++            Ok(packet) => packet,
++            Err(_) => return Some(Err(authentication_failed())),
++        };
++        if packet.peer_manager_header().is_none() || packet.payload().len() > 65_535 {
++            return Some(Err(authentication_failed()));
++        }
++        let mut plaintext = Zeroizing::new(vec![0u8; packet.payload().len()]);
++        let length = match self
++            .state
++            .lock()
++            .ok()?
++            .read_message(packet.payload(), &mut plaintext)
++        {
++            Ok(length) => length,
++            Err(_) => return Some(Err(authentication_failed())),
++        };
++        let packet = ZCPacket::new_from_buf(
++            BytesMut::from(&plaintext[..length]),
++            ZCPacketType::DummyTunnel,
++        );
++        if packet.peer_manager_header().is_none() {
++            return Some(Err(authentication_failed()));
++        }
++        Some(Ok(packet))
++    }
++    fn filter_output(&self) {}
++}
++fn control_packet(payload: &[u8]) -> ZCPacket {
++    let mut packet = ZCPacket::new_with_payload(payload);
++    packet.fill_peer_manager_hdr(0, 0, PacketType::Data as u8);
++    packet
++}
++async fn receive_handshake(
++    stream: &mut std::pin::Pin<Box<dyn crate::tunnel::ZCPacketStream>>,
++) -> Result<Vec<u8>, TunnelError> {
++    let packet = match stream.next().await {
++        Some(Ok(packet)) => packet,
++        _ => return Err(authentication_failed()),
++    };
++    if packet.peer_manager_header().is_none() || packet.payload().len() > 1024 {
++        return Err(authentication_failed());
++    }
++    packet
++        .payload()
++        .strip_prefix(MAGIC)
++        .map(|payload| payload.to_vec())
++        .ok_or_else(authentication_failed)
++}
++async fn upgrade(
++    tunnel: Box<dyn Tunnel>,
++    key: SharedKey,
++    initiator: bool,
++) -> Result<Box<dyn Tunnel>, TunnelError> {
++    tokio::time::timeout(HANDSHAKE_TIMEOUT, async move {
++        let params: NoiseParams = PATTERN.parse().map_err(|_| authentication_failed())?;
++        let builder = Builder::new(params)
++            .prologue(PROLOGUE)
++            .map_err(|_| authentication_failed())?
++            .psk(0, key.as_ref())
++            .map_err(|_| authentication_failed())?;
++        let mut state = if initiator {
++            builder.build_initiator()
++        } else {
++            builder.build_responder()
++        }
++        .map_err(|_| authentication_failed())?;
++        let info = tunnel.info();
++        let (mut stream, mut sink) = tunnel.split();
++        let mut message = [0u8; 1024];
++        let mut plaintext = [0u8; 1024];
++        if !initiator {
++            let incoming = receive_handshake(&mut stream).await?;
++            state
++                .read_message(&incoming, &mut plaintext)
++                .map_err(|_| authentication_failed())?;
++        }
++        let length = state
++            .write_message(&[], &mut message)
++            .map_err(|_| authentication_failed())?;
++        let mut outgoing = Vec::with_capacity(MAGIC.len() + length);
++        outgoing.extend_from_slice(MAGIC);
++        outgoing.extend_from_slice(&message[..length]);
++        sink.send(control_packet(&outgoing))
++            .await
++            .map_err(|_| authentication_failed())?;
++        if initiator {
++            let incoming = receive_handshake(&mut stream).await?;
++            state
++                .read_message(&incoming, &mut plaintext)
++                .map_err(|_| authentication_failed())?;
++        }
++        let state = state
++            .into_transport_mode()
++            .map_err(|_| authentication_failed())?;
++        Ok(Box::new(TunnelWithFilter::new(
++            RawTunnel {
++                info,
++                split: Mutex::new(Some((stream, sink))),
++            },
++            EncryptedFrames {
++                state: Mutex::new(state),
++            },
++        )) as Box<dyn Tunnel>)
++    })
++    .await
++    .map_err(|_| authentication_failed())?
++}
++
++pub struct PrivateRpcListener<L: TunnelListener> {
++    listener: L,
++    protection: Protection,
++    pending: JoinSet<Result<Box<dyn Tunnel>, TunnelError>>,
++}
++impl<L: TunnelListener> PrivateRpcListener<L> {
++    pub fn new(listener: L) -> Self {
++        Self {
++            listener,
++            protection: Protection::from_environment(),
++            pending: JoinSet::new(),
++        }
++    }
++}
++#[async_trait::async_trait]
++impl<L: TunnelListener + 'static> TunnelListener for PrivateRpcListener<L> {
++    async fn listen(&mut self) -> Result<(), TunnelError> {
++        if matches!(self.protection, Protection::Invalid) {
++            return Err(authentication_failed());
++        }
++        self.listener.listen().await
++    }
++    async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
++        let key = match &self.protection {
++            Protection::Disabled => return self.listener.accept().await,
++            Protection::Invalid => return Err(authentication_failed()),
++            Protection::Enabled(key) => Arc::clone(key),
++        };
++        loop {
++            tokio::select! {
++                result = self.pending.join_next(), if !self.pending.is_empty() => {
++                    if let Some(Ok(Ok(tunnel))) = result { return Ok(tunnel); }
++                }
++                accepted = self.listener.accept(), if self.pending.len() < MAXIMUM_PENDING_HANDSHAKES => {
++                    let tunnel = accepted?;
++                    let key = Arc::clone(&key);
++                    self.pending.spawn(async move { upgrade(tunnel, key, false).await });
++                }
++            }
++        }
++    }
++    fn local_url(&self) -> url::Url {
++        self.listener.local_url()
++    }
++}
++
++pub struct PrivateRpcConnector<C: TunnelConnector> {
++    connector: C,
++    protection: Protection,
++}
++impl<C: TunnelConnector> PrivateRpcConnector<C> {
++    pub fn new(connector: C) -> Self {
++        Self {
++            connector,
++            protection: Protection::from_environment(),
++        }
++    }
++}
++#[async_trait::async_trait]
++impl<C: TunnelConnector> TunnelConnector for PrivateRpcConnector<C> {
++    async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
++        match &self.protection {
++            Protection::Disabled => self.connector.connect().await,
++            Protection::Invalid => Err(authentication_failed()),
++            Protection::Enabled(key) => {
++                upgrade(self.connector.connect().await?, Arc::clone(key), true).await
++            }
++        }
++    }
++    fn remote_url(&self) -> url::Url {
++        self.connector.remote_url()
++    }
++}
++
++pub fn redacted_node_config(configuration: String) -> String {
++    let configuration = Zeroizing::new(configuration);
++    let Ok(mut document) = configuration.parse::<toml::Value>() else {
++        return String::new();
++    };
++    let mut safe = toml::map::Map::new();
++    for field in ["instance_name", "instance_id", "hostname", "ipv4", "ipv6"] {
++        if let Some(value) = document.get(field) {
++            safe.insert(field.into(), value.clone());
++        }
++    }
++    let mut secure = toml::map::Map::new();
++    for field in ["enabled", "local_public_key"] {
++        if let Some(value) = document
++            .get("secure_mode")
++            .and_then(|secure| secure.get(field))
++        {
++            secure.insert(field.into(), value.clone());
++        }
++    }
++    safe.insert("secure_mode".into(), toml::Value::Table(secure));
++    erase_strings(&mut document);
++    toml::to_string(&toml::Value::Table(safe)).unwrap_or_default()
++}
++fn erase_strings(document: &mut toml::Value) {
++    match document {
++        toml::Value::String(value) => value.zeroize(),
++        toml::Value::Array(values) => values.iter_mut().for_each(erase_strings),
++        toml::Value::Table(values) => values
++            .iter_mut()
++            .for_each(|(_, value)| erase_strings(value)),
++        _ => (),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::tunnel::ring::create_ring_tunnel_pair;
++
++    fn key(value: u8) -> SharedKey {
++        Arc::new(Zeroizing::new([value; 32]))
++    }
++    async fn pair() -> (Box<dyn Tunnel>, Box<dyn Tunnel>) {
++        let (client, server) = create_ring_tunnel_pair();
++        let (client, server) = tokio::join!(
++            upgrade(client, key(7), true),
++            upgrade(server, key(7), false)
++        );
++        (client.unwrap(), server.unwrap())
++    }
++
++    #[tokio::test]
++    async fn avian_private_rpc_authenticated_tunnel_transports_management_frames() {
++        let (client, server) = pair().await;
++        let (mut client_receive, mut client_send) = client.split();
++        let (mut server_receive, mut server_send) = server.split();
++        client_send
++            .send(control_packet(b"authenticated connector mutation"))
++            .await
++            .unwrap();
++        let request = server_receive.next().await.unwrap().unwrap();
++        assert_eq!(request.payload(), b"authenticated connector mutation");
++        server_send
++            .send(control_packet(b"operation applied"))
++            .await
++            .unwrap();
++        assert_eq!(
++            client_receive.next().await.unwrap().unwrap().payload(),
++            b"operation applied"
++        );
++    }
++
++    #[tokio::test]
++    async fn avian_private_rpc_wrong_key_and_legacy_packets_never_authenticate() {
++        let (client, server) = create_ring_tunnel_pair();
++        let (client, server) = tokio::join!(
++            upgrade(client, key(8), true),
++            upgrade(server, key(7), false)
++        );
++        assert!(client.is_err());
++        assert!(server.is_err());
++        let (client, server) = create_ring_tunnel_pair();
++        let (_, mut sender) = client.split();
++        sender
++            .send(control_packet(b"unauthenticated management request"))
++            .await
++            .unwrap();
++        assert!(upgrade(server, key(7), false).await.is_err());
++    }
++
++    fn transport_states() -> (EncryptedFrames, EncryptedFrames) {
++        let secret = [7u8; 32];
++        let params: NoiseParams = PATTERN.parse().unwrap();
++        let mut client = Builder::new(params.clone())
++            .prologue(PROLOGUE)
++            .unwrap()
++            .psk(0, &secret)
++            .unwrap()
++            .build_initiator()
++            .unwrap();
++        let mut server = Builder::new(params)
++            .prologue(PROLOGUE)
++            .unwrap()
++            .psk(0, &secret)
++            .unwrap()
++            .build_responder()
++            .unwrap();
++        let mut message = [0u8; 1024];
++        let mut plaintext = [0u8; 1024];
++        let length = client.write_message(&[], &mut message).unwrap();
++        assert!(
++            !message[..length]
++                .windows(secret.len())
++                .any(|window| window == secret)
++        );
++        server
++            .read_message(&message[..length], &mut plaintext)
++            .unwrap();
++        let length = server.write_message(&[], &mut message).unwrap();
++        client
++            .read_message(&message[..length], &mut plaintext)
++            .unwrap();
++        (
++            EncryptedFrames {
++                state: Mutex::new(client.into_transport_mode().unwrap()),
++            },
++            EncryptedFrames {
++                state: Mutex::new(server.into_transport_mode().unwrap()),
++            },
++        )
++    }
++
++    #[test]
++    fn avian_private_rpc_replay_tampering_and_cross_connection_frames_are_rejected() {
++        let (client, server) = transport_states();
++        let packet = client
++            .before_send(control_packet(b"private operation contents"))
++            .unwrap();
++        assert!(
++            !packet
++                .payload()
++                .windows(b"private operation contents".len())
++                .any(|window| window == b"private operation contents")
++        );
++        assert!(server.after_received(Ok(packet.clone())).unwrap().is_ok());
++        assert!(server.after_received(Ok(packet.clone())).unwrap().is_err());
++        let (_, other_server) = transport_states();
++        assert!(other_server.after_received(Ok(packet)).unwrap().is_err());
++        let mut tampered = client
++            .before_send(control_packet(b"next operation"))
++            .unwrap();
++        tampered.mut_payload()[0] ^= 1;
++        assert!(server.after_received(Ok(tampered)).unwrap().is_err());
++    }
++
++    #[test]
++    fn avian_private_rpc_node_info_retains_public_identity_without_secret_configuration() {
++        let redacted = redacted_node_config("instance_name = 'complete-node-identity'\nipv4 = '10.64.0.2'\ncredential_file = '/private/credential'\n[secure_mode]\nenabled = true\nlocal_public_key = 'public-transport-key'\nlocal_private_key = 'private-transport-key'\n[network_identity]\nnetwork_secret = 'administrator-secret'\n".into());
++        let document: toml::Value = redacted.parse().unwrap();
++        assert_eq!(
++            document["instance_name"].as_str(),
++            Some("complete-node-identity")
++        );
++        assert_eq!(
++            document["secure_mode"]["local_public_key"].as_str(),
++            Some("public-transport-key")
++        );
++        for secret in [
++            "private-transport-key",
++            "administrator-secret",
++            "/private/credential",
++            "local_private_key",
++            "network_secret",
++        ] {
++            assert!(!redacted.contains(secret));
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn avian_private_rpc_token_requires_owner_only_files_and_rejects_links() {
++        use std::os::unix::fs::{PermissionsExt, symlink};
++        let directory = tempfile::tempdir().unwrap();
++        let token = directory.path().join("rpc-token");
++        std::fs::write(&token, "07".repeat(32)).unwrap();
++        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
++        assert!(protected_token(&token).is_ok());
++        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
++        assert!(protected_token(&token).is_err());
++        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
++        let link = directory.path().join("link");
++        symlink(&token, &link).unwrap();
++        assert!(protected_token(&link).is_err());
++        std::fs::write(&token, "0".repeat(64)).unwrap();
++        assert!(protected_token(&token).is_err());
++    }
++    #[test]
++    fn avian_private_rpc_handshake_domain_cannot_be_substituted() {
++        let secret = [7u8; 32];
++        let params: NoiseParams = PATTERN.parse().unwrap();
++        let mut client = Builder::new(params.clone())
++            .prologue(PROLOGUE)
++            .unwrap()
++            .psk(0, &secret)
++            .unwrap()
++            .build_initiator()
++            .unwrap();
++        let mut other_protocol = Builder::new(params)
++            .prologue(b"unrelated-engine-protocol")
++            .unwrap()
++            .psk(0, &secret)
++            .unwrap()
++            .build_responder()
++            .unwrap();
++        let mut message = [0u8; 1024];
++        let length = client.write_message(&[], &mut message).unwrap();
++        let mut plaintext = [0u8; 1024];
++        assert!(
++            other_protocol
++                .read_message(&message[..length], &mut plaintext)
++                .is_err()
++        );
++    }
++}
++
++#[cfg(test)]
++mod management_tests {
++    use super::*;
++    use crate::{
++        proto::{
++            rpc_impl::{
++                RpcController,
++                standalone::{StandAloneClient, StandAloneServer},
++            },
++            tests::{
++                Greeting, GreetingClientFactory, GreetingServer, SayGoodbyeRequest,
++                SayGoodbyeResponse, SayHelloRequest, SayHelloResponse,
++            },
++        },
++        tunnel::tcp::{TcpTunnelConnector, TcpTunnelListener},
++    };
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    #[derive(Clone)]
++    struct ManagementService(Arc<AtomicUsize>);
++    #[async_trait::async_trait]
++    impl Greeting for ManagementService {
++        type Controller = RpcController;
++        async fn say_hello(
++            &self,
++            _: RpcController,
++            input: SayHelloRequest,
++        ) -> crate::proto::rpc_types::error::Result<SayHelloResponse> {
++            self.0.fetch_add(1, Ordering::SeqCst);
++            Ok(SayHelloResponse {
++                greeting: input.name,
++            })
++        }
++        async fn say_goodbye(
++            &self,
++            _: RpcController,
++            input: SayGoodbyeRequest,
++        ) -> crate::proto::rpc_types::error::Result<SayGoodbyeResponse> {
++            self.0.fetch_add(1, Ordering::SeqCst);
++            Ok(SayGoodbyeResponse {
++                greeting: input.name,
++            })
++        }
++    }
++    fn connector(url: url::Url, value: u8) -> PrivateRpcConnector<TcpTunnelConnector> {
++        PrivateRpcConnector {
++            connector: TcpTunnelConnector::new(url),
++            protection: Protection::Enabled(Arc::new(Zeroizing::new([value; 32]))),
++        }
++    }
++    #[tokio::test]
++    async fn avian_private_rpc_rejects_unauthorized_management_before_side_effects() {
++        let mutations = Arc::new(AtomicUsize::new(0));
++        let mut listener = TcpTunnelListener::new("tcp://127.0.0.1:0".parse().unwrap());
++        listener.listen().await.unwrap();
++        let address = listener.local_url();
++        let listener = PrivateRpcListener {
++            listener,
++            protection: Protection::Enabled(Arc::new(Zeroizing::new([7; 32]))),
++            pending: JoinSet::new(),
++        };
++        let mut server = StandAloneServer::new(listener);
++        server.registry().register(
++            GreetingServer::new(ManagementService(Arc::clone(&mutations))),
++            "",
++        );
++        server.serve().await.unwrap();
++        let mut wrong = StandAloneClient::new(connector(address.clone(), 8));
++        assert!(
++            wrong
++                .scoped_client::<GreetingClientFactory<RpcController>>(String::new())
++                .await
++                .is_err()
++        );
++        assert_eq!(mutations.load(Ordering::SeqCst), 0);
++        let mut legacy = StandAloneClient::new(TcpTunnelConnector::new(address.clone()));
++        let remote = legacy
++            .scoped_client::<GreetingClientFactory<RpcController>>(String::new())
++            .await
++            .unwrap();
++        let result = tokio::time::timeout(
++            Duration::from_millis(300),
++            remote.say_hello(
++                RpcController::default(),
++                SayHelloRequest {
++                    name: "unauthorized operation".into(),
++                },
++            ),
++        )
++        .await;
++        assert!(!matches!(result, Ok(Ok(_))));
++        assert_eq!(mutations.load(Ordering::SeqCst), 0);
++        let mut authorized = StandAloneClient::new(connector(address, 7));
++        let remote = authorized
++            .scoped_client::<GreetingClientFactory<RpcController>>(String::new())
++            .await
++            .unwrap();
++        let result = tokio::time::timeout(
++            Duration::from_secs(2),
++            remote.say_hello(
++                RpcController::default(),
++                SayHelloRequest {
++                    name: "authorized operation".into(),
++                },
++            ),
++        )
++        .await
++        .unwrap()
++        .unwrap();
++        assert_eq!(result.greeting, "authorized operation");
++        assert_eq!(mutations.load(Ordering::SeqCst), 1);
++    }
++}
+diff --git a/easytier/src/rpc_service/private_rpc_acl.ps1 b/easytier/src/rpc_service/private_rpc_acl.ps1
+new file mode 100644
+index 0000000..c177470
+--- /dev/null
++++ b/easytier/src/rpc_service/private_rpc_acl.ps1
+@@ -0,0 +1,24 @@
++$ErrorActionPreference = 'Stop'
++[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
++try {
++    $path = ([Console]::In.ReadToEnd() | ConvertFrom-Json).path
++    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
++    foreach ($candidate in @($path, [System.IO.Path]::GetDirectoryName($path))) {
++        $current = [System.IO.Path]::GetFullPath($candidate)
++        while ($current) {
++            if (([System.IO.File]::GetAttributes($current) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse point' }
++            $current = [System.IO.Path]::GetDirectoryName($current)
++        }
++        $acl = Get-Acl -LiteralPath $candidate
++        if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $identity -or -not $acl.AreAccessRulesProtected) { throw 'Unprotected owner' }
++        $allowed = $false
++        foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
++            if ($rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) {
++                if ($rule.IdentityReference.Value -ne $identity) { throw 'Foreign access' }
++                $allowed = $true
++            }
++        }
++        if (-not $allowed) { throw 'Missing owner access' }
++    }
++    exit 0
++} catch { exit 1 }

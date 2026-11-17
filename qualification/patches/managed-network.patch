@@ -1,0 +1,1020 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -506,6 +506,18 @@
+ checksum = "0c4b4d0bd25bd0b74681c0ad21497610ce1b7c91b1022cd21c80c6fbdd9476b0"
+ 
+ [[package]]
++name = "avian-network-helper"
++version = "0.1.0"
++dependencies = [
++ "ipnet",
++ "rustix 1.0.7",
++ "serde",
++ "serde_json",
++ "socket2 0.6.3",
++ "thiserror 2.0.11",
++]
++
++[[package]]
+ name = "avian-routing"
+ version = "0.1.0"
+ dependencies = [
+@@ -2249,6 +2261,7 @@
+  "atomic-shim",
+  "atomic_refcell",
+  "auto_impl",
++ "avian-network-helper",
+  "avian-routing",
+  "base64 0.22.1",
+  "bitflags 2.8.0",
+@@ -2384,9 +2397,9 @@
+  "winreg 0.52.0",
+  "x25519-dalek",
+  "zerocopy 0.7.35",
++ "zeroize",
+  "zip",
+  "zstd",
+- "zeroize",
+ ]
+ 
+ [[package]]
+diff --git a/easytier/Cargo.toml b/easytier/Cargo.toml
+--- a/easytier/Cargo.toml
++++ b/easytier/Cargo.toml
+@@ -265,6 +265,7 @@
+ machine-uid = "0.5.3"
+ 
+ [target.'cfg(any(target_os = "linux"))'.dependencies]
++avian-network-helper = { path = "../avian-network-helper", default-features = false }
+ netlink-sys = "0.8.7"
+ netlink-packet-route = "0.21.0"
+ netlink-packet-core = { version = "0.7.0" }
+diff --git a/easytier/src/common/global_ctx.rs b/easytier/src/common/global_ctx.rs
+--- a/easytier/src/common/global_ctx.rs
++++ b/easytier/src/common/global_ctx.rs
+@@ -286,20 +286,23 @@
+         let hostname = config_fs.get_hostname();
+ 
+         let (event_bus, _) = tokio::sync::broadcast::channel(16);
+-
+-        let stun_info_collector = StunInfoCollector::new_with_default_servers();
+-
+-        if let Some(stun_servers) = config_fs.get_stun_servers() {
+-            stun_info_collector.set_stun_servers(stun_servers);
+-        } else {
+-            stun_info_collector.set_stun_servers(StunInfoCollector::get_default_servers());
+-        }
+ 
+-        if let Some(stun_servers) = config_fs.get_stun_servers_v6() {
+-            stun_info_collector.set_stun_servers_v6(stun_servers);
++        let owned_connectivity = crate::managed_network::enabled()
++            || std::env::var("AVIAN_OWNED_CONNECTIVITY_ONLY").as_deref() == Ok("1");
++        let stun_info_collector = if owned_connectivity {
++            // Construct empty lists before any collector task can start. This
++            // includes TCP STUN, which has no operator TOML override upstream.
++            StunInfoCollector::new_owned_only()
+         } else {
+-            stun_info_collector.set_stun_servers_v6(StunInfoCollector::get_default_servers_v6());
+-        }
++            let collector = StunInfoCollector::new_with_default_servers();
++            if let Some(servers) = config_fs.get_stun_servers() {
++                collector.set_stun_servers(servers);
++            }
++            if let Some(servers) = config_fs.get_stun_servers_v6() {
++                collector.set_stun_servers_v6(servers);
++            }
++            collector
++        };
+ 
+         let stun_info_collector = Arc::new(stun_info_collector);
+ 
+@@ -524,6 +527,13 @@
+         }
+     }
+ 
++    pub fn remove_running_listener(&self, url: &url::Url) {
++        self.running_listeners
++            .lock()
++            .unwrap()
++            .retain(|running| running != url);
++    }
++
+     pub fn get_vpn_portal_cidr(&self) -> Option<cidr::Ipv4Cidr> {
+         self.config.get_vpn_portal_config().map(|x| x.client_cidr)
+     }
+diff --git a/easytier/src/common/stun.rs b/easytier/src/common/stun.rs
+--- a/easytier/src/common/stun.rs
++++ b/easytier/src/common/stun.rs
+@@ -1093,6 +1093,11 @@
+         }
+     }
+ 
++    /// Owned relay connectivity does not depend on public discovery services.
++    pub fn new_owned_only() -> Self {
++        Self::new(Vec::new(), Vec::new(), Vec::new())
++    }
++
+     pub fn new_with_default_servers() -> Self {
+         Self::new(
+             Self::get_default_servers(),
+@@ -1172,6 +1177,12 @@
+     }
+ 
+     fn start_stun_routine(&self) {
++        if self.stun_servers.read().unwrap().is_empty()
++            && self.tcp_stun_servers.read().unwrap().is_empty()
++            && self.stun_servers_v6.read().unwrap().is_empty()
++        {
++            return;
++        }
+         if self.started.load(std::sync::atomic::Ordering::Relaxed) {
+             return;
+         }
+@@ -1564,5 +1575,24 @@
+         let stun_servers = vec!["::1:55355".to_string()];
+         let ret = StunInfoCollector::get_public_ipv6(&stun_servers).await;
+         println!("{:#?}", ret);
++    }
++}
++
++#[cfg(test)]
++mod owned_connectivity_tests {
++    use super::StunInfoCollector;
++
++    #[tokio::test]
++    async fn owned_connectivity_has_no_udp_ipv4_udp_ipv6_or_tcp_stun_targets() {
++        let collector = StunInfoCollector::new_owned_only();
++        assert!(collector.stun_servers.read().unwrap().is_empty());
++        assert!(collector.stun_servers_v6.read().unwrap().is_empty());
++        assert!(collector.tcp_stun_servers.read().unwrap().is_empty());
++        collector.start_stun_routine();
++        assert!(collector.tasks.lock().unwrap().is_empty());
++        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
++        assert!(collector.stun_servers.read().unwrap().is_empty());
++        assert!(collector.stun_servers_v6.read().unwrap().is_empty());
++        assert!(collector.tcp_stun_servers.read().unwrap().is_empty());
+     }
+ }
+diff --git a/easytier/src/connector/mod.rs b/easytier/src/connector/mod.rs
+--- a/easytier/src/connector/mod.rs
++++ b/easytier/src/connector/mod.rs
+@@ -229,12 +229,12 @@
+ }
+ 
+ #[derive(Clone, Debug)]
+-struct UnderlayBinding {
+-    source: IpAddr,
+-    interface_name: String,
++pub(crate) struct UnderlayBinding {
++    pub(crate) source: IpAddr,
++    pub(crate) interface_name: String,
+ }
+ 
+-fn parse_underlay_binding(url: &url::Url) -> Result<Option<UnderlayBinding>, Error> {
++pub(crate) fn parse_underlay_binding(url: &url::Url) -> Result<Option<UnderlayBinding>, Error> {
+     let Some(query) = url.query() else {
+         return Ok(None);
+     };
+diff --git a/easytier/src/easytier-cli.rs b/easytier/src/easytier-cli.rs
+--- a/easytier/src/easytier-cli.rs
++++ b/easytier/src/easytier-cli.rs
+@@ -127,6 +127,7 @@
+     Connector(ConnectorArgs),
+     #[command(about = "manage mapped listeners")]
+     MappedListener(MappedListenerArgs),
++    Listener(LocalListenerArgs),
+     #[command(about = "do stun test")]
+     Stun,
+     #[command(about = "show route info")]
+@@ -154,7 +155,9 @@
+     #[command(about = "manage temporary credentials")]
+     Credential(CredentialArgs),
+     #[command(about = t!("core_clap.generate_completions").to_string())]
+-    GenAutocomplete { shell: ShellType },
++    GenAutocomplete {
++        shell: ShellType,
++    },
+ }
+ 
+ #[derive(clap::ValueEnum, Debug, Clone, PartialEq)]
+@@ -265,7 +268,19 @@
+     },
+     /// List connectors
+     List,
++}
++
++#[derive(Args, Debug)]
++struct LocalListenerArgs {
++    #[command(subcommand)]
++    sub_command: LocalListenerSubCommand,
+ }
++#[derive(Subcommand, Debug)]
++enum LocalListenerSubCommand {
++    LocalAdd { url: String },
++    LocalRemove { url: String },
++    LocalList,
++}
+ 
+ #[derive(Args, Debug)]
+ struct MappedListenerArgs {
+@@ -1963,6 +1978,59 @@
+         Ok(())
+     }
+ 
++    async fn apply_local_listener_modify(
++        &self,
++        url: &str,
++        action: ConfigPatchAction,
++    ) -> Result<(), Error> {
++        let url = url::Url::parse(url)?;
++        let client = self.get_config_client().await?;
++        client
++            .patch_config(
++                BaseController::default(),
++                PatchConfigRequest {
++                    instance: Some(self.instance_selector.clone()),
++                    patch: Some(InstanceConfigPatch {
++                        local_listeners: vec![UrlPatch {
++                            action: action.into(),
++                            url: Some(url.into()),
++                        }],
++                        ..Default::default()
++                    }),
++                },
++            )
++            .await?;
++        Ok(())
++    }
++    async fn handle_local_listener_modify(
++        &self,
++        url: &str,
++        action: ConfigPatchAction,
++    ) -> Result<(), Error> {
++        let url = url.to_string();
++        self.apply_to_instances(|handler| {
++            let url = url.clone();
++            Box::pin(async move { handler.apply_local_listener_modify(&url, action).await })
++        })
++        .await
++    }
++    async fn handle_local_listener_list(&self) -> Result<(), Error> {
++        let results = self
++            .collect_instance_results(|handler| {
++                Box::pin(async move {
++                    Ok(handler
++                        .fetch_node_info()
++                        .await?
++                        .listeners
++                        .into_iter()
++                        .filter(|url| url.contains("avian_interface="))
++                        .collect::<Vec<_>>())
++                })
++            })
++            .await?;
++        self.print_json_results(results)
++    }
++
+     async fn handle_mapped_listener_modify(
+         &self,
+         url: &str,
+@@ -2973,7 +3041,20 @@
+             }
+             None => {
+                 handler.handle_connector_list().await?;
++            }
++        },
++        SubCommand::Listener(arguments) => match arguments.sub_command {
++            LocalListenerSubCommand::LocalAdd { url } => {
++                handler
++                    .handle_local_listener_modify(&url, ConfigPatchAction::Add)
++                    .await?
+             }
++            LocalListenerSubCommand::LocalRemove { url } => {
++                handler
++                    .handle_local_listener_modify(&url, ConfigPatchAction::Remove)
++                    .await?
++            }
++            LocalListenerSubCommand::LocalList => handler.handle_local_listener_list().await?,
+         },
+         SubCommand::MappedListener(mapped_listener_args) => {
+             match mapped_listener_args.sub_command {
+diff --git a/easytier/src/instance/instance.rs b/easytier/src/instance/instance.rs
+--- a/easytier/src/instance/instance.rs
++++ b/easytier/src/instance/instance.rs
+@@ -254,6 +254,7 @@
+     socks5_server: Weak<Socks5Server>,
+     peer_manager: Weak<PeerManager>,
+     conn_manager: Weak<ManualConnectorManager>,
++    listener_manager: Weak<Mutex<ListenerManager<PeerManager>>>,
+ }
+ 
+ impl InstanceConfigPatcher {
+@@ -312,6 +313,20 @@
+         &self,
+         patch: crate::proto::api::config::InstanceConfigPatch,
+     ) -> Result<(), anyhow::Error> {
++        if crate::managed_network::enabled()
++            && (patch.ipv4.is_some()
++                || patch.ipv6.is_some()
++                || !patch.proxy_networks.is_empty()
++                || !patch.routes.is_empty()
++                || !patch.exit_nodes.is_empty()
++                || patch.ipv6_public_addr_auto.is_some()
++                || patch.ipv6_public_addr_provider.is_some()
++                || patch.ipv6_public_addr_prefix.is_some())
++        {
++            anyhow::bail!(
++                "managed interface configuration belongs to the root-approved helper scope"
++            );
++        }
+         let patch_for_event = patch.clone();
+         let global_ctx = weak_upgrade(&self.global_ctx)?;
+         let parsed_ipv6_public_addr_prefix = Self::validate_public_ipv6_patch(&global_ctx, &patch)?;
+@@ -323,6 +338,7 @@
+         self.patch_exit_nodes(patch.exit_nodes).await?;
+         self.patch_mapped_listeners(patch.mapped_listeners).await?;
+         self.patch_connector(patch.connectors).await?;
++        self.patch_local_listeners(patch.local_listeners).await?;
+ 
+         let provider_reconcile_was_running = should_run_public_ipv6_provider_reconcile(&global_ctx);
+         let mut provider_config_changed = false;
+@@ -549,6 +565,33 @@
+         global_ctx.config.set_exit_nodes(current_exit_nodes);
+         peer_manager.update_exit_nodes().await;
+ 
++        Ok(())
++    }
++
++    async fn patch_local_listeners(
++        &self,
++        listeners: Vec<crate::proto::api::config::UrlPatch>,
++    ) -> Result<(), anyhow::Error> {
++        if listeners.is_empty() {
++            return Ok(());
++        }
++        let manager = weak_upgrade(&self.listener_manager)?;
++        let mut manager = manager.lock().await;
++        for patch in listeners {
++            let action = ConfigPatchAction::try_from(patch.action)
++                .map_err(|_| anyhow::anyhow!("invalid local listener action"))?;
++            let url = patch
++                .url
++                .ok_or_else(|| anyhow::anyhow!("local listener URL is required"))?;
++            let url: url::Url = url.into();
++            match action {
++                ConfigPatchAction::Add => manager.add_local_listener(url).await?,
++                ConfigPatchAction::Remove => manager.remove_local_listener(&url).await?,
++                ConfigPatchAction::Clear => {
++                    anyhow::bail!("local listeners require explicit removal")
++                }
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -1338,6 +1381,7 @@
+             socks5_server: Arc::downgrade(&self.socks5_server),
+             peer_manager: Arc::downgrade(&self.peer_manager),
+             conn_manager: Arc::downgrade(&self.conn_manager),
++            listener_manager: Arc::downgrade(&self.listener_manager),
+         }
+     }
+ 
+diff --git a/easytier/src/instance/listeners.rs b/easytier/src/instance/listeners.rs
+--- a/easytier/src/instance/listeners.rs
++++ b/easytier/src/instance/listeners.rs
+@@ -100,6 +100,7 @@
+     peer_manager: Weak<H>,
+ 
+     tasks: JoinSet<()>,
++    local_listeners: std::collections::BTreeMap<String, tokio::task::JoinHandle<()>>,
+ }
+ 
+ impl<H: TunnelHandlerForListener + Send + Sync + 'static + Debug> ListenerManager<H> {
+@@ -110,6 +111,7 @@
+             listeners: Vec::new(),
+             peer_manager: Arc::downgrade(&peer_manager),
+             tasks: JoinSet::new(),
++            local_listeners: std::collections::BTreeMap::new(),
+         }
+     }
+ 
+@@ -249,10 +251,77 @@
+                             e.to_string(),
+                         ));
+                         tracing::error!(error = ?e, "handle conn error");
++                    }
++                });
++            }
++        }
++    }
++
++    pub async fn add_local_listener(&mut self, url: url::Url) -> Result<(), Error> {
++        if (!cfg!(target_os = "android") && std::env::var_os("AVIAN_RPC_TOKEN_FILE").is_none())
++            || !matches!(url.scheme(), "tcp" | "udp")
++            || url.port().is_none_or(|port| port < 1024)
++        {
++            return Err(Error::InvalidUrl(
++                "local listener management requires authenticated private RPC".into(),
++            ));
++        }
++        let binding = crate::connector::parse_underlay_binding(&url)?.ok_or_else(|| {
++            Error::InvalidUrl("local listener requires an explicit source and interface".into())
++        })?;
++        let host = url
++            .host_str()
++            .unwrap_or("")
++            .trim_matches(['[', ']'])
++            .parse::<IpAddr>()
++            .map_err(|_| {
++                Error::InvalidUrl("local listener host must be its source address".into())
++            })?;
++        if host != binding.source {
++            return Err(Error::InvalidUrl(
++                "local listener host differs from its source".into(),
++            ));
++        }
++        if self
++            .local_listeners
++            .get(url.as_str())
++            .is_some_and(|task| !task.is_finished())
++        {
++            return Ok(());
++        }
++        let mut listener = create_listener_by_url(&url, Arc::clone(&self.global_ctx))?;
++        listener.listen().await?;
++        let running = listener.local_url();
++        self.global_ctx.add_running_listener(running.clone());
++        self.global_ctx
++            .issue_event(GlobalCtxEvent::ListenerAdded(running.clone()));
++        let peer_manager = self.peer_manager.clone();
++        let context = Arc::clone(&self.global_ctx);
++        let task = tokio::spawn(async move {
++            loop {
++                let tunnel = match listener.accept().await {
++                    Ok(tunnel) => tunnel,
++                    Err(_) => break,
++                };
++                let manager = peer_manager.clone();
++                tokio::spawn(async move {
++                    if let Some(manager) = manager.upgrade() {
++                        let _ = manager.handle_tunnel(tunnel).await;
+                     }
+                 });
+             }
++            context.remove_running_listener(&running);
++        });
++        self.local_listeners.insert(url.to_string(), task);
++        Ok(())
++    }
++    pub async fn remove_local_listener(&mut self, url: &url::Url) -> Result<(), Error> {
++        if let Some(task) = self.local_listeners.remove(url.as_str()) {
++            task.abort();
++            let _ = task.await;
+         }
++        self.global_ctx.remove_running_listener(url);
++        Ok(())
+     }
+ 
+     pub async fn run(&mut self) -> Result<(), Error> {
+@@ -277,6 +346,17 @@
+     }
+ }
+ 
++impl<H> Drop for ListenerManager<H> {
++    fn drop(&mut self) {
++        for (url, task) in &self.local_listeners {
++            task.abort();
++            if let Ok(url) = url::Url::parse(url) {
++                self.global_ctx.remove_running_listener(&url);
++            }
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::sync::atomic::{AtomicI32, Ordering};
+diff --git a/easytier/src/instance/virtual_nic.rs b/easytier/src/instance/virtual_nic.rs
+--- a/easytier/src/instance/virtual_nic.rs
++++ b/easytier/src/instance/virtual_nic.rs
+@@ -495,6 +495,16 @@
+     async fn create_tun(&self) -> Result<tun::platform::Device, Error> {
+         let mut config = Configuration::default();
+         config.layer(Layer::L3);
++        #[cfg(target_os = "linux")]
++        if crate::managed_network::enabled() {
++            let status = crate::managed_network::validate_scope(&self.global_ctx).await?;
++            config.tun_name(&status.tun_name).mtu(status.mtu);
++            config.platform_config(|platform| {
++                platform.ensure_root_privileges(false);
++            });
++            let _guard = self.global_ctx.net_ns.guard();
++            return Ok(tun::create(&config)?);
++        }
+ 
+         // FreeBSD specific: Check and restore TUN interfaces before creating new one
+         #[cfg(target_os = "freebsd")]
+@@ -669,12 +679,27 @@
+         let dev = AsyncDevice::new(dev)?;
+ 
+         let flags = self.global_ctx.config.get_flags();
+-        let authenticated_hops = self.global_ctx.config.get_secure_mode()
++        let authenticated_hops = self
++            .global_ctx
++            .config
++            .get_secure_mode()
+             .is_some_and(|configuration| configuration.enabled);
+         let mtu_in_config = forwarding_interface_mtu(
+-            flags.mtu, flags.enable_encryption, authenticated_hops, flags.enable_ipv6,
++            flags.mtu,
++            flags.enable_encryption,
++            authenticated_hops,
++            flags.enable_ipv6,
+         )?;
+-        {
++        #[cfg(target_os = "linux")]
++        if crate::managed_network::enabled() {
++            let status = crate::managed_network::validate_scope(&self.global_ctx).await?;
++            if u32::from(status.mtu) != mtu_in_config {
++                return Err(
++                    anyhow::anyhow!("managed MTU differs from the fixed helper scope").into(),
++                );
++            }
++        }
++        if !crate::managed_network::enabled() {
+             // set mtu by ourselves, rust-tun does not handle it correctly on windows
+             let _g = self.global_ctx.net_ns.guard();
+             self.ifcfg.set_mtu(ifname.as_str(), mtu_in_config).await?;
+@@ -724,12 +749,24 @@
+     }
+ 
+     pub async fn link_up(&self) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg.set_link_status(self.ifname(), true).await?;
+         Ok(())
+     }
+ 
+     pub async fn add_route(&self, address: Ipv4Addr, cidr: u8) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg
+             .add_ipv4_route(self.ifname(), address, cidr, None)
+@@ -747,6 +784,12 @@
+         cidr: u8,
+         cost: Option<i32>,
+     ) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg
+             .add_ipv6_route(self.ifname(), address, cidr, cost)
+@@ -755,6 +798,12 @@
+     }
+ 
+     pub async fn remove_ipv6_route(&self, address: Ipv6Addr, cidr: u8) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg
+             .remove_ipv6_route(self.ifname(), address, cidr)
+@@ -763,18 +812,36 @@
+     }
+ 
+     pub async fn remove_ip(&self, ip: Option<Ipv4Inet>) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg.remove_ip(self.ifname(), ip).await?;
+         Ok(())
+     }
+ 
+     pub async fn remove_ipv6(&self, ip: Option<Ipv6Inet>) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg.remove_ipv6(self.ifname(), ip).await?;
+         Ok(())
+     }
+ 
+     pub async fn add_ip(&self, ip: Ipv4Addr, cidr: i32) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg
+             .add_ipv4_ip(self.ifname(), ip, cidr as u8)
+@@ -783,6 +850,12 @@
+     }
+ 
+     pub async fn add_ipv6(&self, ip: Ipv6Addr, cidr: i32) -> Result<(), Error> {
++        if crate::managed_network::enabled() {
++            return Err(anyhow::anyhow!(
++                "managed network configuration belongs to the scoped helper"
++            )
++            .into());
++        }
+         let _g = self.global_ctx.net_ns.guard();
+         self.ifcfg
+             .add_ipv6_ip(self.ifname(), ip, cidr as u8)
+@@ -1377,6 +1450,12 @@
+ 
+         self.do_forward_nic_to_peers_task(stream)?;
+         self.do_forward_peers_to_nic(sink);
++
++        #[cfg(target_os = "linux")]
++        if crate::managed_network::enabled() {
++            crate::managed_network::validate_scope(&self.global_ctx).await?;
++            return Ok(());
++        }
+ 
+         // Assign IPv4 address if provided
+         if let Some(ipv4_addr) = ipv4_addr {
+@@ -1463,15 +1542,22 @@
+     }
+ }
+ 
+-
+ /// Preserve the configured packet budget after end-to-end and hop encryption.
+-fn forwarding_interface_mtu(configured: u32, payload_encryption: bool, authenticated_hops: bool, ipv6: bool) -> Result<u32, Error> {
+-    let overhead = if payload_encryption { 20 } else { 0 }
+-        + if authenticated_hops { 40 } else { 0 };
+-    let effective = configured.checked_sub(overhead)
+-        .ok_or_else(|| Error::AnyhowError(anyhow::anyhow!("MTU is smaller than encryption overhead")))?;
++fn forwarding_interface_mtu(
++    configured: u32,
++    payload_encryption: bool,
++    authenticated_hops: bool,
++    ipv6: bool,
++) -> Result<u32, Error> {
++    let overhead =
++        if payload_encryption { 20 } else { 0 } + if authenticated_hops { 40 } else { 0 };
++    let effective = configured.checked_sub(overhead).ok_or_else(|| {
++        Error::AnyhowError(anyhow::anyhow!("MTU is smaller than encryption overhead"))
++    })?;
+     if effective == 0 || (ipv6 && effective < 1280) {
+-        return Err(Error::AnyhowError(anyhow::anyhow!("effective forwarding MTU is too small for the enabled IP version")));
++        return Err(Error::AnyhowError(anyhow::anyhow!(
++            "effective forwarding MTU is too small for the enabled IP version"
++        )));
+     }
+     Ok(effective)
+ }
+@@ -1482,11 +1568,23 @@
+ 
+     #[test]
+     fn avian_hop_mtu_accounts_for_envelopes_and_ipv6_minimum() {
+-        assert_eq!(forwarding_interface_mtu(1380, true, true, true).unwrap(), 1320);
+-        assert_eq!(forwarding_interface_mtu(1380, true, false, true).unwrap(), 1360);
+-        assert_eq!(forwarding_interface_mtu(1380, false, true, true).unwrap(), 1340);
++        assert_eq!(
++            forwarding_interface_mtu(1380, true, true, true).unwrap(),
++            1320
++        );
++        assert_eq!(
++            forwarding_interface_mtu(1380, true, false, true).unwrap(),
++            1360
++        );
++        assert_eq!(
++            forwarding_interface_mtu(1380, false, true, true).unwrap(),
++            1340
++        );
+         assert!(forwarding_interface_mtu(40, true, true, false).is_err());
+         assert!(forwarding_interface_mtu(1339, true, true, true).is_err());
+-        assert_eq!(forwarding_interface_mtu(1340, true, true, true).unwrap(), 1280);
++        assert_eq!(
++            forwarding_interface_mtu(1340, true, true, true).unwrap(),
++            1280
++        );
+     }
+ }
+diff --git a/easytier/src/lib.rs b/easytier/src/lib.rs
+--- a/easytier/src/lib.rs
++++ b/easytier/src/lib.rs
+@@ -16,6 +16,7 @@
+ pub mod core;
+ pub mod instance_manager;
+ pub mod launcher;
++pub mod managed_network;
+ pub mod peers;
+ pub mod proto;
+ pub mod rpc_service;
+diff --git a/easytier/src/proto/api_config.proto b/easytier/src/proto/api_config.proto
+--- a/easytier/src/proto/api_config.proto
++++ b/easytier/src/proto/api_config.proto
+@@ -28,6 +28,7 @@
+   optional bool ipv6_public_addr_auto = 12;
+   optional string ipv6_public_addr_prefix = 13;
+   optional bool disable_relay_data = 14;
++  repeated UrlPatch local_listeners = 15;
+ }
+ 
+ message PortForwardPatch {
+diff --git a/easytier/src/tunnel/tcp.rs b/easytier/src/tunnel/tcp.rs
+--- a/easytier/src/tunnel/tcp.rs
++++ b/easytier/src/tunnel/tcp.rs
+@@ -64,6 +64,22 @@
+         self.listener = None;
+ 
+         let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
++        #[cfg(target_os = "linux")]
++        let listener = if crate::managed_network::enabled() {
++            if addr.ip().is_loopback() {
++                TcpListener::bind(addr).await?
++            } else {
++                let descriptor = crate::managed_network::open_listener(
++                    &self.addr,
++                    avian_network_helper::SocketTransport::Tcp,
++                )
++                .await?;
++                TcpListener::from_std(std::net::TcpListener::from(descriptor))?
++            }
++        } else {
++            bind::<TcpListener>().addr(addr).only_v6(true).call()?
++        };
++        #[cfg(not(target_os = "linux"))]
+         let listener = bind::<TcpListener>().addr(addr).only_v6(true).call()?;
+ 
+         self.addr
+@@ -170,6 +186,24 @@
+ 
+         for bind_addr in self.bind_addrs.iter() {
+             tracing::info!(?bind_addr, ?addr, "bind addr");
++            #[cfg(target_os = "linux")]
++            if crate::managed_network::enabled() {
++                let interface = self.underlay_interface.as_ref().ok_or_else(|| {
++                    TunnelError::InvalidAddr(
++                        "managed connections require an explicit interface".into(),
++                    )
++                })?;
++                let descriptor = crate::managed_network::open_socket(
++                    avian_network_helper::SocketTransport::Tcp,
++                    interface.clone(),
++                    bind_addr.ip(),
++                    addr,
++                )
++                .await?;
++                let socket = TcpSocket::from_std_stream(std::net::TcpStream::from(descriptor));
++                futures.push(socket.connect(addr));
++                continue;
++            }
+             match bind::<TcpSocket>().addr(*bind_addr).only_v6(true).call() {
+                 Ok(socket) => {
+                     if socket.local_addr()?.ip() != bind_addr.ip() {
+@@ -204,6 +238,14 @@
+             Some(addr) => addr,
+             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
+         };
++        if crate::managed_network::enabled()
++            && !addr.ip().is_loopback()
++            && self.bind_addrs.is_empty()
++        {
++            return Err(TunnelError::InvalidAddr(
++                "managed connections cannot use an unbound physical socket".into(),
++            ));
++        }
+         if self.bind_addrs.is_empty() {
+             if self.underlay_interface.is_some() {
+                 return Err(TunnelError::InvalidAddr(
+diff --git a/easytier/src/tunnel/udp.rs b/easytier/src/tunnel/udp.rs
+--- a/easytier/src/tunnel/udp.rs
++++ b/easytier/src/tunnel/udp.rs
+@@ -600,13 +600,32 @@
+         if self.socket.is_none() {
+             let addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
+             let tunnel_url: TunnelUrl = self.addr.clone().into();
+-            self.socket = Some(Arc::new(
++            #[cfg(target_os = "linux")]
++            let socket = if crate::managed_network::enabled() {
++                if addr.ip().is_loopback() {
++                    UdpSocket::bind(addr).await?
++                } else {
++                    let descriptor = crate::managed_network::open_listener(
++                        &self.addr,
++                        avian_network_helper::SocketTransport::Udp,
++                    )
++                    .await?;
++                    UdpSocket::from_std(std::net::UdpSocket::from(descriptor))?
++                }
++            } else {
+                 bind()
+                     .addr(addr)
+                     .only_v6(true)
+                     .maybe_dev(tunnel_url.bind_dev())
+-                    .call()?,
+-            ));
++                    .call()?
++            };
++            #[cfg(not(target_os = "linux"))]
++            let socket = bind()
++                .addr(addr)
++                .only_v6(true)
++                .maybe_dev(tunnel_url.bind_dev())
++                .call()?;
++            self.socket = Some(Arc::new(socket));
+         }
+         self.data.socket = self.socket.clone();
+ 
+@@ -899,6 +918,24 @@
+ 
+         for bind_addr in self.bind_addrs.iter() {
+             tracing::info!(?bind_addr, ?addr, "bind addr");
++            #[cfg(target_os = "linux")]
++            if crate::managed_network::enabled() {
++                let interface = self.underlay_interface.as_ref().ok_or_else(|| {
++                    TunnelError::InvalidAddr(
++                        "managed connections require an explicit interface".into(),
++                    )
++                })?;
++                let descriptor = crate::managed_network::open_socket(
++                    avian_network_helper::SocketTransport::Udp,
++                    interface.clone(),
++                    bind_addr.ip(),
++                    addr,
++                )
++                .await?;
++                let socket = UdpSocket::from_std(std::net::UdpSocket::from(descriptor))?;
++                futures.push(self.try_connect_with_socket(Arc::new(socket), addr));
++                continue;
++            }
+             match bind::<UdpSocket>().addr(*bind_addr).only_v6(true).call() {
+                 Ok(socket) => {
+                     if socket.local_addr()?.ip() != bind_addr.ip() {
+@@ -931,6 +968,14 @@
+             Some(addr) => addr,
+             None => SocketAddr::from_url(self.addr.clone(), self.ip_version).await?,
+         };
++        if crate::managed_network::enabled()
++            && !addr.ip().is_loopback()
++            && self.bind_addrs.is_empty()
++        {
++            return Err(TunnelError::InvalidAddr(
++                "managed connections cannot use an unbound physical socket".into(),
++            ));
++        }
+         if self.bind_addrs.is_empty() {
+             if self.underlay_interface.is_some() {
+                 return Err(TunnelError::InvalidAddr(
+diff --git a/easytier/src/managed_network.rs b/easytier/src/managed_network.rs
+new file mode 100644
+--- /dev/null
++++ b/easytier/src/managed_network.rs
+@@ -0,0 +1,127 @@
++//! Scoped helper access for an unprivileged Linux engine. No host configuration is performed here.
++pub fn enabled() -> bool {
++    cfg!(target_os = "linux") && std::env::var_os("AVIAN_NETWORK_HELPER_SOCKET").is_some()
++}
++
++#[cfg(target_os = "linux")]
++mod linux {
++    use super::enabled;
++    use crate::{common::global_ctx::ArcGlobalCtx, tunnel::TunnelError};
++    use avian_network_helper::{NetworkStatus, SocketTransport, client::HelperClient};
++    use std::{
++        net::{IpAddr, SocketAddr},
++        os::fd::OwnedFd,
++        sync::{Arc, OnceLock},
++        time::Duration,
++    };
++    use tokio::sync::Semaphore;
++    fn failure() -> TunnelError {
++        TunnelError::InvalidAddr("managed network request rejected".into())
++    }
++    fn helper_failure(error: avian_network_helper::HelperError) -> TunnelError {
++        TunnelError::InvalidAddr(format!("managed network request rejected: {error}"))
++    }
++    fn client() -> Result<HelperClient, TunnelError> {
++        let path = std::env::var_os("AVIAN_NETWORK_HELPER_SOCKET").ok_or_else(failure)?;
++        HelperClient::new(std::path::Path::new(&path)).map_err(helper_failure)
++    }
++    async fn blocking<T: Send + 'static>(
++        operation: impl FnOnce() -> Result<T, TunnelError> + Send + 'static,
++    ) -> Result<T, TunnelError> {
++        static LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
++        let limit = Arc::clone(LIMIT.get_or_init(|| Arc::new(Semaphore::new(16))));
++        tokio::time::timeout(Duration::from_secs(4), async move {
++            let permit = limit.acquire_owned().await.map_err(|_| failure())?;
++            tokio::task::spawn_blocking(move || {
++                let _permit = permit;
++                operation()
++            })
++            .await
++            .map_err(|_| failure())?
++        })
++        .await
++        .map_err(|_| failure())?
++    }
++    pub async fn status() -> Result<NetworkStatus, TunnelError> {
++        blocking(|| client()?.status().map_err(helper_failure)).await
++    }
++    pub async fn validate_scope(global_ctx: &ArcGlobalCtx) -> Result<NetworkStatus, TunnelError> {
++        if !enabled()
++            || nix::unistd::geteuid().as_raw() == 0
++            || std::env::var_os("AVIAN_RPC_TOKEN_FILE").is_none()
++            || std::env::var("ET_REQUIRE_VERIFIED_MEMBERSHIP").as_deref() != Ok("1")
++        {
++            return Err(failure());
++        }
++        let status = status().await?;
++        let ipv4 = global_ctx.get_ipv4().ok_or_else(failure)?;
++        let flags = global_ctx.get_flags();
++        if !status.active
++            || status.node_id != global_ctx.config.get_inst_name()
++            || flags.dev_name != status.tun_name
++            || ipv4.address() != status.overlay_address
++            || ipv4.network_length() != status.overlay_network.prefix_len()
++            || ipv4.first_address() != status.overlay_network.network()
++            || global_ctx.get_ipv6().is_some()
++            || global_ctx.config.get_dhcp()
++            || global_ctx.config.get_netns().is_some()
++            || flags.no_tun
++            || flags.enable_exit_node
++            || !global_ctx.config.get_proxy_cidrs().is_empty()
++            || !global_ctx.config.get_exit_nodes().is_empty()
++            || global_ctx
++                .config
++                .get_routes()
++                .is_some_and(|routes| !routes.is_empty())
++            || global_ctx.config.get_ipv6_public_addr_auto()
++            || global_ctx.config.get_ipv6_public_addr_provider()
++        {
++            return Err(failure());
++        }
++        Ok(status)
++    }
++    pub async fn open_socket(
++        protocol: SocketTransport,
++        interface_name: String,
++        source_address: IpAddr,
++        destination: SocketAddr,
++    ) -> Result<OwnedFd, TunnelError> {
++        blocking(move || {
++            client()?
++                .open_socket(protocol, &interface_name, source_address, destination)
++                .map_err(helper_failure)
++        })
++        .await
++    }
++    pub async fn open_listener(
++        url: &url::Url,
++        protocol: SocketTransport,
++    ) -> Result<OwnedFd, TunnelError> {
++        let binding = crate::connector::parse_underlay_binding(url)
++            .map_err(|_| failure())?
++            .ok_or_else(failure)?;
++        let address = url
++            .host_str()
++            .unwrap_or("")
++            .trim_matches(['[', ']'])
++            .parse::<IpAddr>()
++            .map_err(|_| failure())?;
++        if address != binding.source {
++            return Err(failure());
++        }
++        let port = url.port().ok_or_else(failure)?;
++        blocking(move || {
++            let client = client()?;
++            let status = client.status().map_err(helper_failure)?;
++            if !status.active || status.listen_port != port {
++                return Err(failure());
++            }
++            client
++                .open_listener(protocol, &binding.interface_name, binding.source)
++                .map_err(helper_failure)
++        })
++        .await
++    }
++}
++#[cfg(target_os = "linux")]
++pub use linux::*;
