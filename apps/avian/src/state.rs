@@ -21,6 +21,7 @@ pub struct ApplicationState {
     pub events: broadcast::Sender<StateEvent>,
     pub reload_error: RwLock<Option<String>>,
     pub preview_slots: Arc<Semaphore>,
+    pub runtime: Option<Arc<avian_runtime::RuntimeSupervisor>>,
 }
 
 impl ApplicationState {
@@ -45,6 +46,11 @@ impl ApplicationState {
             events,
             reload_error: RwLock::new(None),
             preview_slots: Arc::new(Semaphore::new(local_workers)),
+            runtime: configuration
+                .runtime
+                .clone()
+                .map(avian_runtime::RuntimeSupervisor::new)
+                .map(Arc::new),
         }))
     }
 

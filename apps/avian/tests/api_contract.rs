@@ -57,6 +57,7 @@ impl Fixture {
             membership_file: directory.path().join("membership.json"),
             trust_root_file: directory.path().join("root.json"),
             chud: None,
+            runtime: None,
         };
         create_private_file(&configuration.token_file, LOCAL_TOKEN.as_bytes()).unwrap();
         fs::write(
@@ -398,4 +399,73 @@ async fn membership_watcher_keeps_verified_revocations_when_an_old_file_returns(
     );
     watcher.abort();
     assert!(watcher.await.unwrap_err().is_cancelled());
+}
+
+fn isolated_runtime_configuration(fixture: &Fixture) -> avian_runtime::RuntimeConfiguration {
+    serde_json::from_value(json!({
+        "isolation_required": true,
+        "namespace_name": "isolated-contract-test",
+        "engine_directory": fixture.directory.path().join("engine"),
+        "runtime_directory": fixture.directory.path().join("runtime"),
+        "membership_file": fixture.configuration.membership_file,
+        "trust_root_file": fixture.configuration.trust_root_file,
+        "credential_file": fixture.directory.path().join("transport.key"),
+        "node_id": "a".repeat(64),
+        "overlay_address": "10.201.0.1",
+        "listen": "172.30.0.1:11010",
+        "rpc_listen": "127.0.0.1:15888"
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn configured_runtime_stays_stopped_and_rejects_untyped_commands() {
+    let mut fixture = Fixture::new(0);
+    fixture.configuration.runtime = Some(isolated_runtime_configuration(&fixture));
+    let router = api::router(ApplicationState::load(&fixture.configuration).unwrap());
+    let (status, body) = request(router.clone(), "GET", "/v1/status", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["mode"], "isolated_runtime");
+    assert_eq!(body["network_control_enabled"], false);
+    assert_eq!(body["runtime"]["state"], "stopped");
+    assert!(body["runtime"]["process_id"].is_null());
+    let (status, _) = request(router.clone(), "GET", "/v1/paths", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    for command in [
+        json!({"action": "run"}),
+        json!({"action": "start", "arguments": ["--unsafe"]}),
+        json!({}),
+    ] {
+        let (status, body) =
+            request(router.clone(), "POST", "/v1/network-control", Some(command)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_runtime_command");
+    }
+    let (status, body) = request(
+        router,
+        "POST",
+        "/v1/network-control",
+        Some(json!({"action": "stop"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["runtime"]["state"], "stopped");
+}
+
+#[test]
+fn runtime_cannot_use_a_different_membership_store_from_the_local_api() {
+    let mut fixture = Fixture::new(0);
+    let mut runtime = isolated_runtime_configuration(&fixture);
+    let different_store = fixture.directory.path().join("different-membership.json");
+    fs::copy(&fixture.configuration.membership_file, &different_store).unwrap();
+    runtime.membership_file = different_store;
+    fixture.configuration.runtime = Some(runtime);
+    let configuration_path = fixture.directory.path().join("runtime.toml");
+    fs::write(
+        &configuration_path,
+        toml::to_string(&fixture.configuration).unwrap(),
+    )
+    .unwrap();
+    let problem = Configuration::load(&configuration_path).unwrap_err();
+    assert!(problem.to_string().contains("same membership store"));
 }

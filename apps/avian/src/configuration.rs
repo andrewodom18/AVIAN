@@ -16,6 +16,8 @@ pub struct Configuration {
     pub trust_root_file: PathBuf,
     #[serde(default)]
     pub chud: Option<ChudConfiguration>,
+    #[serde(default)]
+    pub runtime: Option<avian_runtime::RuntimeConfiguration>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -51,6 +53,16 @@ impl Configuration {
                 && certificate.is_relative()
             {
                 *certificate = directory.join(&*certificate);
+            }
+        }
+        if let Some(runtime) = &mut configuration.runtime {
+            runtime.resolve_paths(directory);
+            if fs::canonicalize(&runtime.membership_file)?
+                != fs::canonicalize(&configuration.membership_file)?
+                || fs::canonicalize(&runtime.trust_root_file)?
+                    != fs::canonicalize(&configuration.trust_root_file)?
+            {
+                bail!("runtime and local API must use the same membership store and trust root");
             }
         }
         Ok(configuration)

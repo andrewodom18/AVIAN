@@ -3,6 +3,7 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 use avian_routing::{NetworkSnapshot, RoutePlanner, RoutingPolicy, TrafficClass};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, Query, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
@@ -30,6 +31,7 @@ pub fn router(state: Arc<ApplicationState>) -> Router {
         .route("/v1/qualification", get(qualification))
         .route("/v1/route-preview", post(route_preview))
         .route("/v1/network-control", post(network_control))
+        .route("/v1/runtime", get(runtime_status))
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
@@ -69,6 +71,11 @@ async fn authenticate(
 }
 
 async fn status(State(state): State<Arc<ApplicationState>>) -> Json<Value> {
+    let runtime = match &state.runtime {
+        Some(runtime) => Some(runtime.status().await),
+        None => None,
+    };
+    let engine_ready = runtime.as_ref().is_some_and(|runtime| runtime.engine_ready);
     let membership = state.membership.read().await;
     Json(json!({
         "api_version": 1,
@@ -76,13 +83,14 @@ async fn status(State(state): State<Arc<ApplicationState>>) -> Json<Value> {
         "release": crate::version::RELEASE_TAG,
         "git_sha": crate::version::GIT_SHA,
         "git_dirty": crate::version::GIT_DIRTY,
-        "mode": "observation_only",
+        "mode": if runtime.is_some() { "isolated_runtime" } else { "observation_only" },
         "network_id": membership.trust_root().network_id,
         "revocation_revision": membership.revocation_revision(),
-        "network_control_enabled": false,
+        "network_control_enabled": engine_ready,
+        "runtime": runtime,
         "chud_configured": state.chud.is_some(),
         "membership_reload_error": state.reload_error.read().await.clone(),
-        "data_plane": "not_integrated"
+        "data_plane": if engine_ready { "isolated_namespace" } else { "not_integrated" }
     }))
 }
 
@@ -142,14 +150,22 @@ async fn services() -> Json<Value> {
     Json(json!({"items": [], "next_cursor": null, "availability": "not_integrated"}))
 }
 
-async fn paths() -> Json<Value> {
-    Json(
-        json!({"items": [], "availability": "not_integrated", "reason": "The route planner is not connected to an admitted packet-forwarding engine."}),
-    )
+async fn paths(State(state): State<Arc<ApplicationState>>) -> Response {
+    let Some(runtime) = &state.runtime else {
+        return Json(json!({"items": [], "availability": "not_integrated", "reason": "No isolated runtime is configured."})).into_response();
+    };
+    match runtime.inspect_routes().await {
+        Ok(routes) => Json(json!({"items": routes, "availability": "observed", "kind": "engine_generic_routes", "per_class_route_observation": "unavailable"})).into_response(),
+        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "runtime_routes_unavailable", "Engine routes are unavailable; cached routes are not presented as fresh."),
+    }
 }
 
-async fn qualification() -> Json<QualificationStatus> {
-    Json(QualificationStatus::default())
+async fn qualification(State(state): State<Arc<ApplicationState>>) -> Json<QualificationStatus> {
+    let mut qualification = QualificationStatus::default();
+    if let Some(runtime) = &state.runtime {
+        qualification.network_control_enabled = runtime.status().await.engine_ready;
+    }
+    Json(qualification)
 }
 
 async fn radios(State(state): State<Arc<ApplicationState>>) -> Response {
@@ -229,12 +245,53 @@ async fn route_preview(
     }
 }
 
-async fn network_control() -> Response {
-    error(
-        StatusCode::CONFLICT,
-        "qualification_required",
-        "Network control is unavailable until the engine qualification gates pass. Existing connection owners remain authoritative.",
-    )
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCommand {
+    action: RuntimeAction,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeAction {
+    Start,
+    Stop,
+}
+
+async fn network_control(State(state): State<Arc<ApplicationState>>, body: Bytes) -> Response {
+    let Some(runtime) = &state.runtime else {
+        return error(
+            StatusCode::CONFLICT,
+            "qualification_required",
+            "Network control requires an explicitly configured isolated runtime.",
+        );
+    };
+    let Ok(command) = serde_json::from_slice::<RuntimeCommand>(&body) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_runtime_command",
+            "Expected an action of start or stop; additional fields are rejected.",
+        );
+    };
+    let result = match command.action {
+        RuntimeAction::Start => runtime.start().await,
+        RuntimeAction::Stop => runtime.stop().await,
+    };
+    match result {
+        Ok(status) => Json(json!({"runtime": status})).into_response(),
+        Err(problem) => error(
+            StatusCode::CONFLICT,
+            "runtime_control_rejected",
+            &problem.to_string(),
+        ),
+    }
+}
+
+async fn runtime_status(State(state): State<Arc<ApplicationState>>) -> Response {
+    match &state.runtime {
+        Some(runtime) => Json(json!({"runtime": runtime.status().await})).into_response(),
+        None => Json(json!({"runtime": null, "availability": "not_configured"})).into_response(),
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -246,10 +303,15 @@ pub struct StateEvent {
 async fn events(State(state): State<Arc<ApplicationState>>) -> impl IntoResponse {
     let receiver = state.events.subscribe();
     let revision = state.membership.read().await.revocation_revision();
+    let mode = if state.runtime.is_some() {
+        "isolated_runtime"
+    } else {
+        "observation_only"
+    };
     let initial = tokio_stream::iter([Ok::<_, Infallible>(
         Event::default()
             .event("snapshot")
-            .data(json!({"revocation_revision": revision, "mode": "observation_only"}).to_string()),
+            .data(json!({"revocation_revision": revision, "mode": mode}).to_string()),
     )]);
     let updates = BroadcastStream::new(receiver).map(|update| {
         let event = match update {

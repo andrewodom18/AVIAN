@@ -102,6 +102,11 @@ enum Command {
     Members,
     /// Read the authenticated local daemon status.
     Status,
+    /// Inspect or control the explicitly configured isolated runtime.
+    Runtime {
+        #[arg(value_enum)]
+        action: RuntimeAction,
+    },
     /// Read supported-radio inventory through the configured CHUD adapter.
     Radios,
     /// Show required engine gates; this command never claims runtime qualification.
@@ -123,6 +128,13 @@ enum Command {
         #[arg(long)]
         allow_metered_bulk: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RuntimeAction {
+    Status,
+    Start,
+    Stop,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -197,6 +209,20 @@ async fn main() -> Result<()> {
                     "radios"
                 };
                 return inspect_daemon(&configuration, endpoint).await;
+            }
+            if let Command::Runtime { action } = &command {
+                let (endpoint, body) = match action {
+                    RuntimeAction::Status => ("runtime", None),
+                    RuntimeAction::Start => (
+                        "network-control",
+                        Some(serde_json::json!({"action": "start"})),
+                    ),
+                    RuntimeAction::Stop => (
+                        "network-control",
+                        Some(serde_json::json!({"action": "stop"})),
+                    ),
+                };
+                return request_daemon(&configuration, endpoint, body).await;
             }
             let _operation_lock = lock_operations(&configuration.membership_file)?;
             let root: TrustRoot =
@@ -340,6 +366,7 @@ fn initialize(directory: &Path, network: &str, listen: SocketAddr) -> Result<()>
         membership_file: "membership.json".into(),
         trust_root_file: "trust-root.json".into(),
         chud: None,
+        runtime: None,
     };
     create_private_file(
         &directory.join("avian.toml"),
@@ -384,9 +411,21 @@ fn lock_operations(membership_file: &Path) -> Result<fs::File> {
         options.mode(0o600);
     }
     let file = options.open(parent.join("membership-operation.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&file)
-        .context("another local membership operation is in progress")?;
-    Ok(file)
+    // Lease publication and administrator updates share this lock. Wait briefly
+    // for a healthy writer instead of failing routine commands during publication.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(file),
+            Err(problem) if problem.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    bail!("another local membership operation is in progress; retry shortly");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(problem) => return Err(problem).context("lock membership operations"),
+        }
+    }
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {
@@ -395,11 +434,24 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 }
 
 async fn inspect_daemon(configuration: &Configuration, endpoint: &str) -> Result<()> {
-    let response = reqwest::Client::builder()
+    request_daemon(configuration, endpoint, None).await
+}
+
+async fn request_daemon(
+    configuration: &Configuration,
+    endpoint: &str,
+    body: Option<serde_json::Value>,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?
-        .get(format!("http://{}/v1/{endpoint}", configuration.listen))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let url = format!("http://{}/v1/{endpoint}", configuration.listen);
+    let request = match body {
+        Some(body) => client.post(url).json(&body),
+        None => client.get(url),
+    };
+    let response = request
         .bearer_auth(read_secret(&configuration.token_file)?)
         .send()
         .await?;
@@ -410,4 +462,34 @@ async fn inspect_daemon(configuration: &Configuration, endpoint: &str) -> Result
         bail!("local API returned HTTP {}", status.as_u16());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lock_operations;
+
+    #[test]
+    fn membership_commands_wait_for_a_brief_concurrent_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let membership_path = directory.path().join("membership.json");
+        let active_publication = lock_operations(&membership_path).unwrap();
+        let contender_path = membership_path.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            let lock = lock_operations(&contender_path).unwrap();
+            sender.send(()).unwrap();
+            lock
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        drop(active_publication);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        drop(contender.join().unwrap());
+        lock_operations(&membership_path).unwrap();
+    }
 }

@@ -1,0 +1,38 @@
+{
+  "source_commit": "8428a89d2dabc94c97d370ec607c6ca142473626",
+  "extension": "overlay-address-claims-v1",
+  "patch_sha256": "c770d4c146dc188a986b271789831e1b04e73c000755ae3dcc45881c6237a077",
+  "patches": [
+    {
+      "name": "verified-membership.patch",
+      "sha256": "c770d4c146dc188a986b271789831e1b04e73c000755ae3dcc45881c6237a077"
+    },
+    {
+      "name": "authenticated-forwarding.patch",
+      "sha256": "492fe4748a10721b7743c88e26f411cb1c967ab7110bde7e47ac72cea92092ac"
+    },
+    {
+      "name": "traffic-policy.patch",
+      "sha256": "7535cb49ad05201208c94c36c720442cf4caab434d9ca153c83e4e73a4c53ced"
+    },
+    {
+      "name": "live-revocation.patch",
+      "sha256": "9226d7de6fa969ca1f147fc6fe49acd9f5abce8b2a1ce55d8b6fc4d5e88c188f"
+    },
+    {
+      "name": "failover.patch",
+      "sha256": "35b98f0cbae59d69169def105d2c59c15938292fb85e2be526bf71ee24143b48"
+    },
+    {
+      "name": "topology-policy.patch",
+      "sha256": "0d26b33a228613b07aae0f8eacc8dd171339337fe23eec14778ffe473cb0cac4"
+    }
+  ],
+  "authenticated_forwarding": true,
+  "traffic_policy": true,
+  "live_revocation": true,
+  "failover": true,
+  "topology_policy": true,
+  "qualified_for_cutover": false,
+  "binary_sha256": {}
+}

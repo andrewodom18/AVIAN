@@ -21,7 +21,7 @@ impl Default for QualificationStatus {
             commit: ENGINE_COMMIT,
             network_control_enabled: false,
             blocking_findings: &[
-                "Authenticated forwarding is an isolated candidate; traffic policy, live revocation, recovery, and platform qualification are still required before runtime adoption.",
+                "Runtime control is restricted to disposable Linux namespaces. Native platform forwarding and physical multi-network operation are not qualified for deployment.",
             ],
             required_checks: &[
                 "authenticated_hop_forwarding_and_replay_protection",
