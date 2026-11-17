@@ -104,6 +104,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "avian-connectivity"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "avian-engine"
 version = "0.1.0"
 dependencies = [
@@ -1803,6 +1815,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/avian-storage", "crates/avian-membership", "crates/avian-routing", "crates/avian-engine", "crates/avian-revocations", "crates/avian-runtime", "apps/avian"]
+members = ["crates/avian-storage", "crates/avian-connectivity", "crates/avian-membership", "crates/avian-routing", "crates/avian-engine", "crates/avian-revocations", "crates/avian-runtime", "apps/avian"]
 
 [workspace.package]
 version = "0.1.0"
