@@ -21,6 +21,8 @@ A failed, missing, or duplicated gate returns a nonzero exit status.
 
 Add `--priority-forwarding` when using an engine build that includes that patch.
 The flag enables the runtime setting and is recorded in the report and provenance.
+Add `--services` to run four additional gates for authenticated local publication,
+signed owner announcements exchanged across the overlay, and removal on revocation.
 The revocation check issues a signed administrator update, atomically replaces
 both peer membership files with mode `0600`, waits for both supervisors to publish
 the remaining active credential, and verifies repeated overlay pings are blocked.

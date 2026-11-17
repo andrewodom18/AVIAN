@@ -92,3 +92,32 @@ python3 qualification/authenticated-forwarding/check.py --priority-forwarding \
 
 See [runtime control](runtime-control/README.md), [load tests](load/README.md), and
 [platform checks](platforms/README.md) for commands, prerequisites, and measured scope.
+
+## Managed connection profile
+
+```sh
+python3 qualification/build.py --managed-network --output .local/managed-engine
+python3 qualification/measured-routing/run.py \
+  --engine-directory .local/managed-engine \
+  --output qualification/results/measured
+python3 qualification/network-helper/check.py \
+  --output qualification/results/network-helper.json
+python3 qualification/native-runtime/run.py \
+  --engine-directory .local/managed-engine \
+  --service-directory /path/to/linux-service-binaries \
+  --priority-forwarding --services \
+  --output qualification/results/native-runtime
+```
+
+The managed profile includes measured routing, bound underlays, private RPC, and
+scoped Linux network resources. `build.json` binds the shared routing and helper
+client sources as well as every binary. Peers must use the same protocol profile.
+Helper tests exercise unprivileged packet forwarding inside disposable namespaces;
+they do not qualify an installed native service or authorize hardware integration.
+
+The native-runtime runner requires Linux `aviand`, `avianctl`, and
+`avian-revocationd` binaries matching the current sources. It runs unprivileged
+managers and engines with a root helper inside disposable namespaces, including
+helper-crash continuity, observed class routes, automatic capacity evidence,
+signed services, revocation, and cleanup. Installed-service and hardware checks
+remain separate qualification gates.

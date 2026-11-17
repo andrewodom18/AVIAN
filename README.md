@@ -1,11 +1,10 @@
 # AVIAN
 
-AVIAN provides network membership and routing policy for ground stations, drones,
-and gateways. CHUD manages supported radios; ARC owns fleet and flight procedures.
+AVIAN provides authenticated connectivity, relay forwarding, and traffic policy
+for ground stations, drones, and gateways. CHUD configures supported radios; ARC
+owns fleet and aircraft procedures. The first release supports IP connections.
 
 ## Build and run
-
-Requires Rust 1.88 or newer. Private-key file storage currently supports Unix.
 
 ```sh
 cargo build --workspace --locked
@@ -16,45 +15,85 @@ target/debug/avianctl init --state-dir .local/ground --network field-network
 target/debug/aviand --config .local/ground/avian.toml
 ```
 
-From another terminal:
+Requires Rust 1.88 or newer. Android builds require Rust 1.95 and the dependencies
+in [Android setup](platforms/android/README.md). Initialization creates protected
+state and a loopback API token. The daemon starts in observation-only mode.
 
 ```sh
 target/debug/avianctl --config .local/ground/avian.toml status
-target/debug/avianctl --help
+target/debug/avianctl --config .local/ground/avian.toml --help
 ```
 
-The daemon defaults to observation-only operation. An explicit `[runtime]`
-configuration enables start/stop control inside an existing disposable Linux
-network namespace; it cannot use the manager's namespace. Its loopback API requires
-the generated bearer token. Keep the state directory private and
-out of version control. Membership changes reload automatically; rejected reloads
-retain the last verified state and appear in `/v1/status`.
+Keep state directories private and out of version control. Unix storage rejects
+unsafe ownership, writable directories, links, and identity replacement. Windows
+secret storage uses CurrentUser DPAPI and owner ACLs; native Windows qualification
+has not passed. Android wraps secrets through Android Keystore.
+
+## Runtime and policy
+
+An explicit `[runtime]` configuration enables owned engine start/stop. Disposable
+Linux namespace mode requires an existing namespace different from the manager's.
+Native Linux mode requires the scoped network helper and an unprivileged manager;
+see [Linux service setup](packaging/linux/README.md). macOS and Windows native
+runtime adapters remain unavailable. The Android runtime is a library component.
+
+The supervisor checks pinned engine sources, ordered patches, binary hashes,
+shared policy code, signed membership, and transport identity before startup.
+Native administration uses a private authenticated RPC channel. Runtime startup
+files are removed after readiness; persistent identities remain protected.
+
+Each traffic class selects an eligible topology-wide path and physical connection.
+Control and telemetry prioritize reliability and latency. Video uses a fresh,
+authenticated delivered-rate lower bound; unknown-capacity unmetered fallback is
+reported as degraded. Probe evidence does not measure spare bandwidth. Stale
+measurements expire. Healthy improvements wait five seconds; failed or revoked
+paths are removed immediately. Video and bulk on metered connections require
+explicit permission. Unknown metering restricts both classes.
+
+Owned bootstrap endpoints and local discovery provide connection hints, never
+membership authority. No public discovery fallback is enabled in the managed
+profile. Local interface changes reconcile bound TCP/UDP connectors and listeners.
+Discovery advertises only confirmed listeners. Connection, page, and probe budgets
+bound local resource use without imposing a mesh membership ceiling.
 
 ## Local API
 
-- `/v1/status`, `/v1/qualification`, `/v1/runtime`: status and qualification scope.
-- `POST /v1/network-control`: authenticated `{"action":"start"}` or `{"action":"stop"}`
-  for the configured isolated runtime; no arbitrary arguments are accepted.
-  CLI equivalents are `avianctl --config <path> runtime start`, `runtime stop`,
-  and `runtime status`.
-- `/v1/nodes`: paginated verified membership; unmeasured reachability is unknown.
-- `/v1/route-preview`: evaluates supplied observations without applying routes.
-- `/v1/events`: change notifications; slow readers receive a resync indication.
-- `/v1/radios`: read-only CHUD inventory when configured.
+All administration endpoints require the generated bearer token. Browser-origin
+requests are rejected. The loopback API is intended for the local ARC bridge.
 
-`/v1/services` reports unavailable service integration. `/v1/paths` reports live
-generic engine routes only while the isolated runtime is ready; it does not claim
-per-class route observation. Enrollment does not grant aircraft-control permission.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /v1/status`, `/v1/qualification`, `/v1/runtime` | Runtime identity and qualification scope |
+| `POST /v1/network-control` | Typed `{"action":"start"}` or `{"action":"stop"}` |
+| `GET /v1/nodes` | Verified membership; enrollment alone does not establish reachability |
+| `GET /v1/connections` | Observed local interfaces and metering |
+| `GET /v1/paths`, `/v1/links` | Paged live class routes and connection evidence |
+| `POST /v1/link-probes` | Bounded, authenticated measurement request |
+| `POST /v1/route-preview` | Evaluate supplied observations without applying routes |
+| `GET /v1/events` | Change notifications with resynchronization for slow readers |
+| `GET`, `POST /v1/services` | Read owner-signed services or publish local endpoints |
+| `GET /v1/radios` | CHUD inventory when configured |
 
-CHUD credentials come from an owner-only file. HTTPS certificate verification is
-enabled; a configured certificate file supports private certificate authorities.
-Plain HTTP is accepted only for a loopback CHUD instance.
+Path and link pages accept `after` and `limit`; paths also accept `traffic_class`.
+CLI commands include `runtime`, `connections`, `paths`, `links`, `probe`, and
+`services`; use `--help` for their arguments. Service announcements expire, retain
+owner signatures through relays, and accept only the owner's enrolled overlay
+addresses. An advertised endpoint does not establish application reachability or
+aircraft-control permission.
+
+Configure `[services]` with a private `state_file` and optional owner
+`identity_key_file`. `[service_exchange]` binds a read-only announcement endpoint
+to the local overlay address and accepts explicit enrolled peers. Its TCP port
+must be listed in `runtime.control_tcp_ports` when exchange crosses metered links.
+
+CHUD credentials use a protected file. HTTPS verifies certificates; a private CA
+file is supported. Plain HTTP is limited to loopback. Radio configuration is off
+by default. With `chud.allow_configuration = true`, `/v1/radios/apply` requires
+explicit disruption acknowledgement and always defers persistence;
+`/v1/radios/confirm` requires a separate persistence acknowledgement. Ambiguous
+writes are not retried automatically.
 
 ## Signed revocation exchange
-
-`avian-revocationd` exchanges administrator-signed updates over an explicitly
-bound private-network address. It verifies and saves updates before publishing
-the engine trust cache. Use a separate enrolled state directory on each peer.
 
 ```sh
 target/debug/avian-revocationd \
@@ -65,46 +104,25 @@ target/debug/avian-revocationd \
   --peer http://10.201.0.2:9180
 ```
 
-Bind the service to the overlay address. Its read-only endpoint serves public
-signed records; it does not expose administration or private keys. Configure
-`control_tcp_ports: [9180]` in the experimental engine's startup traffic policy
-when signed updates must cross metered links. Ordinary HTTP remains bulk traffic.
-The service renews engine leases from verified durable membership independently
-of peer availability. Unreachable peers leave the last accepted revision intact.
+Bind to the assigned overlay address and add `9180` to `runtime.control_tcp_ports`.
+The service verifies and durably saves administrator-signed updates before
+publishing engine leases. Unreachable peers retain the last verified revision;
+rollback is rejected. Read-only exchange exposes no administration or private keys.
 
-## Engine tests
+## Qualification and releases
 
-See [qualification commands](qualification/README.md) for isolated EasyTier tests.
-The [runtime-control harness](qualification/runtime-control/README.md) exercises
-real supervised engines without changing host networking. The supervisor checks
-pinned patch and binary hashes, signed membership, transport identity, and private
-file permissions before startup. Stop and graceful daemon shutdown reap owned processes.
+[Qualification commands](qualification/README.md) run inside disposable Linux
+namespaces. [Android checks](platforms/android/README.md) distinguish actual native
+engine tests from compiler and platform API probes. No test command deploys to ARC
+or Tank. Native macOS, native Windows, physical Android Wi-Fi/cellular operation,
+and cross-platform hardware integration remain unqualified.
 
-[Load tests](qualification/load/README.md) use resource and time budgets without a
-node ceiling. [Platform checks](qualification/platforms/README.md) distinguish API
-probes and compiler checks from native forwarding. Android physical multi-network
-operation, Windows native runtime/storage, and native macOS tunnel operation remain
-unqualified. The experimental engine is not deployed to hardware.
-
-## Releases and licensing
+The shared workspace version uses ARC's prefixed semantic tags. The first release
+is `avian-v0.1.0`. Only pushes or manual runs targeting GitLab `main` run CI.
+Publication requires all four platforms' exact installed artifacts and passing
+native and hardware evidence; missing evidence prevents tag creation. See
+[release commands](tools/RELEASE.md). Local builds report the source commit and
+dirty marker; qualified release builds use `AVIAN_RELEASE=avian-v0.1.0`.
 
 AVIAN uses the [Rownd license](LICENSE.md) and preserves
 [third-party notices](THIRD_PARTY_NOTICES.md).
-
-The workspace version in `Cargo.toml` is shared by all AVIAN packages. Release
-tags follow ARC's prefixed semantic-version format: `avian-v0.1.0`, with optional
-prerelease identifiers such as `avian-v0.1.0-rc.1`. The first release is `avian-v0.1.0`.
-
-A push to GitLab `main` runs verification, builds with `AVIAN_RELEASE`, and creates
-an immutable tag and GitLab release for that commit. Manual pipelines are accepted
-only on `main`; other branches, tag pushes, and scheduled pipelines do not run.
-Retries reuse an existing release only when its commit matches. Change the workspace
-version on `dev` before promoting a subsequent release; tags are never moved.
-
-```sh
-AVIAN_RELEASE=avian-v0.1.0 cargo build --workspace --release --locked
-target/release/avianctl --version
-```
-
-Local builds without `AVIAN_RELEASE` report a development version with the source
-commit and dirty-state marker. The local API exposes the same identity in `/v1/status`.
