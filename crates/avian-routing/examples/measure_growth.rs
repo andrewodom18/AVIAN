@@ -52,6 +52,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loss_fraction: Some(0.001),
                 jitter_ms: None,
                 available_capacity_bps: Some(1_000_000),
+                topology_valid_until_ms: None,
+                capacity_valid_until_ms: None,
+                capacity_source: None,
             });
         }
         let measured = Instant::now();
