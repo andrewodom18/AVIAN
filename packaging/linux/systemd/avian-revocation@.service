@@ -1,0 +1,30 @@
+[Unit]
+Description=AVIAN signed revocation exchange (%i)
+Requires=avian@%i.service
+After=avian@%i.service
+PartOf=avian@%i.service
+
+[Service]
+Type=simple
+User=@AVIAN_UID@
+Group=@AVIAN_GID@
+EnvironmentFile=/etc/avian/%i/revocation.env
+ExecStart=/usr/lib/avian/bin/avian-revocationd --trust-root /etc/avian/%i/trust-root.json --membership /var/lib/avian/%i/membership.json --engine-trust /var/lib/avian/%i/runtime/engine-trust.json --listen ${AVIAN_REVOCATION_LISTEN} --peer ${AVIAN_REVOCATION_PEER}
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+StateDirectory=avian/%i
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

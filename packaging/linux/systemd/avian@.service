@@ -1,0 +1,28 @@
+[Unit]
+Description=AVIAN local connectivity manager (%i)
+Requires=avian-network-helper@%i.service
+After=avian-network-helper@%i.service
+
+[Service]
+Type=simple
+User=@AVIAN_UID@
+Group=@AVIAN_GID@
+ExecStart=/usr/lib/avian/bin/aviand --config /etc/avian/%i/avian.toml
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+StateDirectory=avian/%i
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

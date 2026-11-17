@@ -1,0 +1,29 @@
+[Unit]
+Description=AVIAN scoped network helper (%i)
+Before=avian@%i.service
+Requires=avian-network-helper@%i.socket
+After=avian-network-helper@%i.socket
+
+[Service]
+Type=simple
+Sockets=avian-network-helper@%i.socket
+StandardInput=socket
+User=root
+Group=root
+ExecStart=/usr/lib/avian/bin/avian-network-helper --config /etc/avian/%i/network.json
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+ProtectSystem=strict
+ReadWritePaths=/run/avian/%i
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictSUIDSGID=yes
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw

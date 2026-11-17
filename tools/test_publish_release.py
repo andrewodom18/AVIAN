@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import unittest
+import hashlib
 from unittest.mock import patch
 
 import publish_release
@@ -22,11 +23,56 @@ class PublishReleaseTests(unittest.TestCase):
             "CI_API_V4_URL": "https://repo.bespin.cce.af.mil/api/v4",
             "CI_PROJECT_ID": "4099",
             "CI_JOB_TOKEN": "test-token-never-sent",
+            "AVIAN_RELEASE_ARTIFACTS": "unused-qualified-artifacts",
         }
 
+        body = b"qualified fixture payload"
+        digest = hashlib.sha256(body).hexdigest()
+        self.files = [
+            {
+                "name": "native package",
+                "path": None,
+                "body": body,
+                "sha256": digest,
+                "size": len(body),
+                "url": "https://repo.bespin.cce.af.mil/api/v4/projects/4099/packages/generic/avian/0.1.0-commit/"
+                + digest
+                + ".tar",
+            }
+        ]
+        self.remote_files = {self.files[0]["url"]: digest}
+        self.package_requests = []
+
     def publish(self, transport):
-        with patch.object(publish_release, "release_identity", return_value=self.identity):
-            return publish_release.publish(Path("unused"), self.environment, transport)
+        def requests(method, url, body=None):
+            result = transport(method, url, body)
+            if (
+                method == "GET"
+                and result
+                and result.get("commit", {}).get("id") == self.identity["commit"]
+            ):
+                result.setdefault(
+                    "assets",
+                    {"links": publish_release.release_uploads.asset_links(self.files)},
+                )
+            return result
+
+        def packages(method, file):
+            self.package_requests.append(method)
+            if method == "PUT":
+                self.remote_files[file["url"]] = file["sha256"]
+            return self.remote_files.get(file["url"])
+
+        with patch.object(
+            publish_release, "release_identity", return_value=self.identity
+        ), patch.object(
+            publish_release, "verify_release_set", return_value={"artifacts": []}
+        ), patch.object(
+            publish_release.release_uploads, "prepare_files", return_value=self.files
+        ):
+            return publish_release.publish(
+                Path("unused"), self.environment, requests, packages
+            )
 
     def test_first_release_creates_tag_at_the_verified_commit(self):
         requests = []
@@ -104,13 +150,62 @@ class PublishReleaseTests(unittest.TestCase):
     def test_manual_main_pipeline_is_supported(self):
         self.environment["CI_PIPELINE_SOURCE"] = "web"
         self.assertEqual(
-            self.publish(lambda *arguments: {"commit": {"id": self.identity["commit"]}}),
+            self.publish(
+                lambda *arguments: {"commit": {"id": self.identity["commit"]}}
+            ),
             self.identity,
         )
 
+    def test_packages_are_uploaded_and_verified_before_tag_creation(self):
+        self.remote_files.clear()
+
+        def transport(method, url, body=None):
+            if method == "GET":
+                return None
+            self.assertEqual(self.package_requests, ["GET", "PUT", "GET"])
+            self.assertEqual(
+                body["assets"]["links"],
+                publish_release.release_uploads.asset_links(self.files),
+            )
+            return {"commit": {"id": self.identity["commit"]}}
+
+        self.publish(transport)
+
+    def test_missing_native_artifacts_cannot_create_a_tag(self):
+        environment = self.environment.copy()
+        environment.pop("AVIAN_RELEASE_ARTIFACTS")
+        with patch.object(
+            publish_release, "release_identity", return_value=self.identity
+        ):
+            with self.assertRaisesRegex(ValueError, "qualified native platform"):
+                publish_release.publish(
+                    Path("unused"),
+                    environment,
+                    lambda *args: self.fail("unexpected release API request"),
+                )
+
+    def test_failed_platform_gate_cannot_create_a_tag(self):
+        with patch.object(
+            publish_release, "release_identity", return_value=self.identity
+        ), patch.object(
+            publish_release,
+            "verify_release_set",
+            side_effect=ValueError("native gate is not_run"),
+        ):
+            with self.assertRaisesRegex(ValueError, "not_run"):
+                publish_release.publish(
+                    Path("unused"),
+                    self.environment,
+                    lambda *args: self.fail("unexpected release API request"),
+                )
+
     def test_redirects_are_not_followed(self):
         handler = publish_release.NoRedirect()
-        self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://untrusted.example"))
+        self.assertIsNone(
+            handler.redirect_request(
+                None, None, 302, "Found", {}, "https://untrusted.example"
+            )
+        )
 
 
 if __name__ == "__main__":

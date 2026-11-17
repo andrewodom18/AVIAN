@@ -1,0 +1,16 @@
+[Unit]
+Description=AVIAN scoped helper admission socket (%i)
+Before=avian-network-helper@%i.service
+
+[Socket]
+ListenSequentialPacket=/run/avian/%i/network.sock
+SocketUser=@AVIAN_UID@
+SocketGroup=@AVIAN_GID@
+SocketMode=0600
+DirectoryMode=0711
+Service=avian-network-helper@%i.service
+RemoveOnStop=yes
+Accept=no
+
+[Install]
+WantedBy=sockets.target

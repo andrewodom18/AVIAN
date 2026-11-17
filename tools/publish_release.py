@@ -9,6 +9,8 @@ import urllib.parse
 import urllib.request
 
 from release_version import release_identity
+from release_artifacts import verify_release_set
+import release_uploads
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -16,10 +18,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def publish(repository, environment=None, request_json=None):
+def publish(repository, environment=None, request_json=None, package_transfer=None):
     environment = os.environ if environment is None else environment
-    if environment.get("CI_COMMIT_BRANCH") != "main" or environment.get("CI_PIPELINE_SOURCE") not in {"push", "web"} or environment.get("CI_COMMIT_TAG"):
-        raise ValueError("Release publication requires a main push or manual main pipeline")
+    if (
+        environment.get("CI_COMMIT_BRANCH") != "main"
+        or environment.get("CI_PIPELINE_SOURCE") not in {"push", "web"}
+        or environment.get("CI_COMMIT_TAG")
+    ):
+        raise ValueError(
+            "Release publication requires a main push or manual main pipeline"
+        )
     identity = release_identity(repository, remote="origin", environment=environment)
     if environment.get("CI_COMMIT_SHA") != identity["commit"]:
         raise ValueError("Pipeline commit differs from the checked-out main commit")
@@ -30,13 +38,42 @@ def publish(repository, environment=None, request_json=None):
     token = environment.get("CI_JOB_TOKEN", "")
     if not project.isdigit() or not token:
         raise ValueError("Missing project identity or CI job token")
+    artifact_directory = environment.get("AVIAN_RELEASE_ARTIFACTS")
+    if not artifact_directory:
+        raise ValueError(
+            "Release publication requires qualified native platform artifacts"
+        )
+    verified = verify_release_set(
+        Path(artifact_directory),
+        repository=repository,
+        source_commit=identity["commit"],
+        version=identity["version"],
+    )
+    package_version = urllib.parse.quote(
+        identity["version"] + "-" + identity["commit"], safe=""
+    )
+    package_base = (
+        f"{api_url}/projects/{project}/packages/generic/avian/{package_version}"
+    )
+    files = release_uploads.prepare_files(
+        Path(artifact_directory), verified, package_base
+    )
     base = f"{api_url}/projects/{project}/releases"
 
     def send(method, url, body=None):
-        request = urllib.request.Request(url, method=method, headers={"JOB-TOKEN": token, "Content-Type": "application/json"}, data=None if body is None else json.dumps(body).encode())
+        request = urllib.request.Request(
+            url,
+            method=method,
+            headers={"JOB-TOKEN": token, "Content-Type": "application/json"},
+            data=None if body is None else json.dumps(body).encode(),
+        )
         try:
-            context = ssl.create_default_context(cafile=environment.get("CI_SERVER_TLS_CA_FILE") or None)
-            with urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=context)).open(request, timeout=30) as response:
+            context = ssl.create_default_context(
+                cafile=environment.get("CI_SERVER_TLS_CA_FILE") or None
+            )
+            with urllib.request.build_opener(
+                NoRedirect, urllib.request.HTTPSHandler(context=context)
+            ).open(request, timeout=30) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
             if method == "GET" and error.code == 404:
@@ -48,13 +85,32 @@ def publish(repository, environment=None, request_json=None):
     if existing is not None:
         if existing.get("commit", {}).get("id") != identity["commit"]:
             raise ValueError("Existing release belongs to a different commit")
+        release_uploads.check_existing_links(existing, files)
+        release_uploads.synchronize(
+            files,
+            token,
+            cafile=environment.get("CI_SERVER_TLS_CA_FILE"),
+            transfer=package_transfer,
+            allow_upload=False,
+        )
         return identity
-    release = send("POST", base, {
-        "name": f"AVIAN {identity['version']}",
-        "tag_name": identity["tag"],
-        "ref": identity["commit"],
-        "description": f"AVIAN {identity['version']}\n\nSource commit: `{identity['commit']}`.",
-    })
+    release_uploads.synchronize(
+        files,
+        token,
+        cafile=environment.get("CI_SERVER_TLS_CA_FILE"),
+        transfer=package_transfer,
+    )
+    release = send(
+        "POST",
+        base,
+        {
+            "name": f"AVIAN {identity['version']}",
+            "tag_name": identity["tag"],
+            "ref": identity["commit"],
+            "description": f"AVIAN {identity['version']}\n\nSource commit: `{identity['commit']}`.",
+            "assets": {"links": release_uploads.asset_links(files)},
+        },
+    )
     if release.get("commit", {}).get("id") != identity["commit"]:
         raise ValueError("Published release commit did not match the verified commit")
     return identity

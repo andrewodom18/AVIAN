@@ -35,4 +35,6 @@ release:
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
   script:
+    - python3 tools/release_bundle.py fetch .local/release-artifacts
+    - export AVIAN_RELEASE_ARTIFACTS="$CI_PROJECT_DIR/.local/release-artifacts"
     - python3 tools/publish_release.py
