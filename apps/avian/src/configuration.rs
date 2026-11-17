@@ -18,11 +18,19 @@ pub struct Configuration {
     pub chud: Option<ChudConfiguration>,
     #[serde(default)]
     pub runtime: Option<avian_runtime::RuntimeConfiguration>,
+    #[serde(default)]
+    pub services: Option<crate::services::ServiceConfiguration>,
+    #[serde(default)]
+    pub service_exchange: Option<crate::service_exchange::ServiceExchangeConfiguration>,
+    #[serde(default)]
+    pub service_limits: Option<avian_services::Limits>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChudConfiguration {
+    #[serde(default)]
+    pub allow_configuration: bool,
     pub url: String,
     pub api_key_file: PathBuf,
     pub certificate_file: Option<PathBuf>,
@@ -55,6 +63,27 @@ impl Configuration {
                 *certificate = directory.join(&*certificate);
             }
         }
+        if let Some(exchange) = &configuration.service_exchange {
+            exchange.validate()?;
+            if configuration.services.is_none() {
+                bail!("service exchange requires a service registry");
+            }
+            if let Some(runtime) = &configuration.runtime
+                && exchange.listen.ip() != std::net::IpAddr::V4(runtime.overlay_address)
+            {
+                bail!("service exchange must bind the configured overlay address");
+            }
+        }
+        if let Some(services) = &mut configuration.services {
+            if services.state_file.is_relative() {
+                services.state_file = directory.join(&services.state_file);
+            }
+            if let Some(identity) = &mut services.identity_key_file
+                && identity.is_relative()
+            {
+                *identity = directory.join(&*identity);
+            }
+        }
         if let Some(runtime) = &mut configuration.runtime {
             runtime.resolve_paths(directory);
             if fs::canonicalize(&runtime.membership_file)?
@@ -70,18 +99,9 @@ impl Configuration {
 }
 
 pub fn read_secret(path: &Path) -> Result<String> {
-    let metadata = fs::symlink_metadata(path).context("inspect credential file")?;
-    if !metadata.file_type().is_file() {
-        bail!("credential path must be a regular file, not a symbolic link");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            bail!("credential file must be accessible only by its owner");
-        }
-    }
-    let secret = fs::read_to_string(path).context("read credential file")?;
+    let encoded =
+        avian_storage::read_secret_file(path, 64 * 1024).context("read protected credential")?;
+    let secret = std::str::from_utf8(&encoded).context("credential is not UTF-8")?;
     let secret = secret.trim();
     if secret.len() < 32 || secret.chars().any(char::is_control) {
         bail!("credential must contain at least 32 characters and no control characters");
@@ -90,18 +110,9 @@ pub fn read_secret(path: &Path) -> Result<String> {
 }
 
 pub fn create_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .context("create private file without overwriting")?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
+    avian_storage::create_private_file(path, bytes).context("create protected private file")
+}
+
+pub fn create_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    avian_storage::create_secret_file(path, bytes).context("create protected credential")
 }

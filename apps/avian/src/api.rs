@@ -24,9 +24,16 @@ pub fn router(state: Arc<ApplicationState>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/nodes", get(nodes))
-        .route("/v1/services", get(services))
+        .route("/v1/services", get(services).post(publish_services))
+        .route("/v1/connections", get(connections))
         .route("/v1/paths", get(paths))
+        .route("/v1/link-probes", post(probe_link))
+        .route("/v1/links", get(links))
         .route("/v1/radios", get(radios))
+        .route("/v1/radios/apply", post(apply_radio))
+        .route("/v1/radios/confirm", post(confirm_radio))
+        .route("/v1/radios/operations", get(radio_operations))
+        .route("/v1/radios/snapshot", get(radio_snapshot))
         .route("/v1/events", get(events))
         .route("/v1/qualification", get(qualification))
         .route("/v1/route-preview", post(route_preview))
@@ -83,14 +90,15 @@ async fn status(State(state): State<Arc<ApplicationState>>) -> Json<Value> {
         "release": crate::version::RELEASE_TAG,
         "git_sha": crate::version::GIT_SHA,
         "git_dirty": crate::version::GIT_DIRTY,
-        "mode": if runtime.is_some() { "isolated_runtime" } else { "observation_only" },
+        "mode": runtime.as_ref().map_or("observation_only", |runtime| match runtime.execution { avian_runtime::ExecutionMode::IsolatedNamespace=>"isolated_runtime", avian_runtime::ExecutionMode::Native=>"native_runtime" }),
         "network_id": membership.trust_root().network_id,
         "revocation_revision": membership.revocation_revision(),
         "network_control_enabled": engine_ready,
         "runtime": runtime,
         "chud_configured": state.chud.is_some(),
         "membership_reload_error": state.reload_error.read().await.clone(),
-        "data_plane": if engine_ready { "isolated_namespace" } else { "not_integrated" }
+        "data_plane": if engine_ready { runtime.as_ref().map_or("not_integrated", |runtime| if runtime.isolated { "isolated_namespace" } else { "native" }) } else { "not_integrated" },
+        "service_discovery_configured": state.services.is_some()
     }))
 }
 
@@ -146,14 +154,122 @@ async fn nodes(
     Json(json!({ "items": page, "next_cursor": next_cursor, "revocation_revision": membership.revocation_revision() })).into_response()
 }
 
-async fn services() -> Json<Value> {
-    Json(json!({"items": [], "next_cursor": null, "availability": "not_integrated"}))
+async fn services(
+    State(state): State<Arc<ApplicationState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    let Some(directory) = &state.services else {
+        return Json(json!({"items": [], "next_cursor": null, "availability": "not_integrated"}))
+            .into_response();
+    };
+    let Ok(now) = crate::service_exchange::now_unix() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clock_unavailable",
+            "The service clock is unavailable.",
+        );
+    };
+    let membership = state.membership.read().await;
+    match directory.page(
+        &membership,
+        query.after.as_deref(),
+        query.limit.unwrap_or(100),
+        now,
+    ) {
+        Ok(page) => Json(page).into_response(),
+        Err(_) => error(
+            StatusCode::BAD_REQUEST,
+            "invalid_service_page",
+            "Invalid service page or unavailable registry.",
+        ),
+    }
 }
 
-async fn paths(State(state): State<Arc<ApplicationState>>) -> Response {
+async fn publish_services(
+    State(state): State<Arc<ApplicationState>>,
+    Json(publication): Json<crate::services::LocalPublication>,
+) -> Response {
+    let Some(directory) = state.services.clone() else {
+        return error(
+            StatusCode::CONFLICT,
+            "services_not_configured",
+            "No service registry is configured.",
+        );
+    };
+    let Ok(now) = crate::service_exchange::now_unix() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "clock_unavailable",
+            "The service clock is unavailable.",
+        );
+    };
+    let membership = state.membership.read().await.clone();
+    match tokio::task::spawn_blocking(move || directory.publish(&membership, publication, now))
+        .await
+    {
+        Ok(Ok(announcement)) => {
+            let revision = state.membership.read().await.revocation_revision();
+            let _ = state.events.send(StateEvent {
+                kind: "services_updated".into(),
+                revocation_revision: revision,
+            });
+            Json(json!({"announcement":announcement,"availability":"advertised"})).into_response()
+        }
+        _ => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "service_publication_rejected",
+            "Service publication failed verification or protected persistence.",
+        ),
+    }
+}
+
+async fn connections(State(state): State<Arc<ApplicationState>>) -> Response {
+    let Some(runtime) = &state.runtime else {
+        return Json(json!({"availability":"not_configured","items":[]})).into_response();
+    };
+    match runtime.inspect_underlays().await {
+        Ok(interfaces)=>Json(json!({"availability":"observed","items":interfaces,"local_discovery_authenticates_membership":false})).into_response(),
+        Err(_)=>error(StatusCode::SERVICE_UNAVAILABLE,"interfaces_unavailable","No fresh interface inventory is available."),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PathQuery {
+    after: Option<String>,
+    limit: Option<usize>,
+    #[serde(alias = "class")]
+    traffic_class: Option<TrafficClass>,
+}
+async fn paths(
+    State(state): State<Arc<ApplicationState>>,
+    Query(query): Query<PathQuery>,
+) -> Response {
     let Some(runtime) = &state.runtime else {
         return Json(json!({"items": [], "availability": "not_integrated", "reason": "No isolated runtime is configured."})).into_response();
     };
+    if runtime.configuration().measured_routing {
+        return match runtime
+            .inspect_class_routes_page(
+                query.after.as_deref(),
+                query.limit.unwrap_or(100),
+                query.traffic_class,
+            )
+            .await
+        {
+            Ok(mut page) if page.is_object() => {
+                page["availability"] = json!("observed");
+                page["kind"] = json!("per_class_routes");
+                page["per_class_route_observation"] = json!("observed");
+                Json(page).into_response()
+            }
+            _ => error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "runtime_routes_unavailable",
+                "No fresh per-class forwarding decisions are available.",
+            ),
+        };
+    }
     match runtime.inspect_routes().await {
         Ok(routes) => Json(json!({"items": routes, "availability": "observed", "kind": "engine_generic_routes", "per_class_route_observation": "unavailable"})).into_response(),
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "runtime_routes_unavailable", "Engine routes are unavailable; cached routes are not presented as fresh."),
@@ -178,7 +294,7 @@ async fn radios(State(state): State<Arc<ApplicationState>>) -> Response {
     };
     match chud.inventory().await {
         Ok(inventory) => Json(
-            json!({"source": "chud", "devices": inventory.devices, "configuration_enabled": false}),
+            json!({"source": "chud", "devices": inventory.devices, "configuration_enabled": chud.configuration_allowed()}),
         )
         .into_response(),
         Err(error_details) => {
@@ -303,11 +419,15 @@ pub struct StateEvent {
 async fn events(State(state): State<Arc<ApplicationState>>) -> impl IntoResponse {
     let receiver = state.events.subscribe();
     let revision = state.membership.read().await.revocation_revision();
-    let mode = if state.runtime.is_some() {
-        "isolated_runtime"
-    } else {
-        "observation_only"
-    };
+    let mode = state
+        .runtime
+        .as_ref()
+        .map_or("observation_only", |runtime| {
+            match runtime.configuration().execution {
+                avian_runtime::ExecutionMode::IsolatedNamespace => "isolated_runtime",
+                avian_runtime::ExecutionMode::Native => "native_runtime",
+            }
+        });
     let initial = tokio_stream::iter([Ok::<_, Infallible>(
         Event::default()
             .event("snapshot")
@@ -331,4 +451,146 @@ fn error(status: StatusCode, code: &str, message: &str) -> Response {
         Json(json!({"error": {"code": code, "message": message}})),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RadioQuery {
+    mac: Option<String>,
+}
+async fn apply_radio(
+    State(state): State<Arc<ApplicationState>>,
+    Json(request): Json<crate::chud::RadioApply>,
+) -> Response {
+    let Some(chud) = &state.chud else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chud_not_configured",
+            "CHUD is not configured.",
+        );
+    };
+    match chud.apply(request).await {
+        Ok(result) => (StatusCode::ACCEPTED, Json(result)).into_response(),
+        Err(_) => error(
+            StatusCode::CONFLICT,
+            "radio_apply_rejected",
+            "Radio changes were refused or have an uncertain outcome. Inspect CHUD operations before trying again.",
+        ),
+    }
+}
+async fn confirm_radio(
+    State(state): State<Arc<ApplicationState>>,
+    Json(request): Json<crate::chud::RadioConfirm>,
+) -> Response {
+    let Some(chud) = &state.chud else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chud_not_configured",
+            "CHUD is not configured.",
+        );
+    };
+    match chud.confirm(request).await {
+        Ok(result) => Json(result).into_response(),
+        Err(_) => error(
+            StatusCode::CONFLICT,
+            "radio_confirmation_rejected",
+            "CHUD did not confirm the radio transaction.",
+        ),
+    }
+}
+async fn radio_operations(
+    State(state): State<Arc<ApplicationState>>,
+    Query(query): Query<RadioQuery>,
+) -> Response {
+    let Some(chud) = &state.chud else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chud_not_configured",
+            "CHUD is not configured.",
+        );
+    };
+    match chud.operations(query.mac.as_deref()).await {
+        Ok(result) => Json(result).into_response(),
+        Err(_) => error(
+            StatusCode::BAD_GATEWAY,
+            "radio_operations_unavailable",
+            "CHUD operations are unavailable.",
+        ),
+    }
+}
+async fn radio_snapshot(
+    State(state): State<Arc<ApplicationState>>,
+    Query(query): Query<RadioQuery>,
+) -> Response {
+    let Some(chud) = &state.chud else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "chud_not_configured",
+            "CHUD is not configured.",
+        );
+    };
+    let Some(mac) = query.mac else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "radio_required",
+            "A radio MAC address is required.",
+        );
+    };
+    match chud.snapshot(&mac).await {
+        Ok(result) => Json(result).into_response(),
+        Err(_) => error(
+            StatusCode::BAD_GATEWAY,
+            "radio_snapshot_unavailable",
+            "CHUD radio status is unavailable.",
+        ),
+    }
+}
+
+async fn probe_link(
+    State(state): State<Arc<ApplicationState>>,
+    Json(request): Json<avian_runtime::LinkProbeRequest>,
+) -> Response {
+    let Some(runtime) = &state.runtime else {
+        return error(
+            StatusCode::CONFLICT,
+            "runtime_not_configured",
+            "No runtime is configured.",
+        );
+    };
+    match runtime.probe_link(request).await {
+        Ok(result) => Json(result).into_response(),
+        Err(_) => error(
+            StatusCode::CONFLICT,
+            "probe_rejected",
+            "Capacity probe was refused by lifecycle, link policy, or resource budgets.",
+        ),
+    }
+}
+
+async fn links(
+    State(state): State<Arc<ApplicationState>>,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    let Some(runtime) = &state.runtime else {
+        return error(
+            StatusCode::CONFLICT,
+            "runtime_not_configured",
+            "No runtime is configured.",
+        );
+    };
+    match runtime
+        .inspect_links_page(query.after.as_deref(), query.limit.unwrap_or(100))
+        .await
+    {
+        Ok(mut page) if page.is_object() => {
+            page["availability"] = json!("observed");
+            page["capacity_is_spare_bandwidth"] = json!(false);
+            Json(page).into_response()
+        }
+        _ => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "links_unavailable",
+            "No fresh direct-link observations are available.",
+        ),
+    }
 }

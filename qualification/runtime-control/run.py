@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--service-directory", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--priority-forwarding", action="store_true")
+    parser.add_argument("--services", action="store_true")
     arguments = parser.parse_args()
     qualification_directory = Path(__file__).resolve().parents[1]
     engine_directory = arguments.engine_directory.resolve()
@@ -33,7 +34,8 @@ def main():
         for binary_name in ["aviand", "avianctl"]
     }
     provenance["runtime_configuration"] = {
-        "priority_forwarding": arguments.priority_forwarding
+        "priority_forwarding": arguments.priority_forwarding,
+        "services": arguments.services,
     }
     (output_directory / "provenance.json").write_text(
         json.dumps(provenance, indent=2) + "\n"
@@ -51,6 +53,8 @@ def main():
     runtime_arguments = (
         ["--priority-forwarding"] if arguments.priority_forwarding else []
     )
+    if arguments.services:
+        runtime_arguments.append("--services")
     return subprocess.run(
         [
             "docker",

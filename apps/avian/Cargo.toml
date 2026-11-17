@@ -18,6 +18,9 @@ name = "avian-revocationd"
 path = "src/bin/avian-revocationd.rs"
 
 [dependencies]
+avian-storage = { path = "../../crates/avian-storage" }
+avian-services = { path = "../../crates/avian-services" }
+avian-connectivity = { path = "../../crates/avian-connectivity" }
 anyhow = "1"
 avian-engine = { path = "../../crates/avian-engine" }
 avian-membership = { path = "../../crates/avian-membership" }

@@ -96,11 +96,14 @@ name = "avian"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "avian-connectivity",
  "avian-engine",
  "avian-membership",
  "avian-revocations",
  "avian-routing",
  "avian-runtime",
+ "avian-services",
+ "avian-storage",
  "axum",
  "clap",
  "ed25519-dalek",

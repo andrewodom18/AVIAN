@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use avian::{
-    configuration::{Configuration, create_private_file, read_secret},
+    configuration::{Configuration, create_private_file, create_secret_file, read_secret},
     qualification::QualificationStatus,
 };
 use avian_membership::{
@@ -106,6 +106,46 @@ enum Command {
     Runtime {
         #[arg(value_enum)]
         action: RuntimeAction,
+    },
+    /// Inspect signed service advertisements or replace this node's advertised endpoints.
+    Services {
+        #[arg(long,conflicts_with_all=["after","limit"])]
+        publish: Option<PathBuf>,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Read fresh operating-system underlay observations.
+    Connections,
+    /// Read a bounded page of authenticated direct-link observations.
+    Links {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Read actual per-class forwarding decisions.
+    Paths {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, value_enum)]
+        class: Option<ClassArgument>,
+    },
+    /// Request an explicit bounded capacity probe; process and link budgets still apply.
+    Probe {
+        #[arg(long)]
+        peer_id: u32,
+        #[arg(long)]
+        connection_id: Option<String>,
+        #[arg(long, default_value_t = 500)]
+        duration_ms: u16,
+        #[arg(long, default_value_t = 8_000_000)]
+        offered_bps: u64,
+        #[arg(long)]
+        allow_metered: bool,
     },
     /// Read supported-radio inventory through the configured CHUD adapter.
     Radios,
@@ -224,6 +264,69 @@ async fn main() -> Result<()> {
                 };
                 return request_daemon(&configuration, endpoint, body).await;
             }
+            match &command {
+                Command::Services {
+                    publish: Some(path),
+                    ..
+                } => {
+                    let input = fs::read(path).context("read local endpoint publication")?;
+                    let publication: avian::services::LocalPublication =
+                        serde_json::from_slice(&input)
+                            .context("parse local endpoint publication")?;
+                    return request_daemon(
+                        &configuration,
+                        "services",
+                        Some(serde_json::to_value(publication)?),
+                    )
+                    .await;
+                }
+                Command::Services { after, limit, .. } | Command::Links { after, limit } => {
+                    let name = if matches!(command, Command::Services { .. }) {
+                        "services"
+                    } else {
+                        "links"
+                    };
+                    return request_page(&configuration, name, after.as_deref(), *limit, None)
+                        .await;
+                }
+                Command::Connections => return inspect_daemon(&configuration, "connections").await,
+                Command::Paths {
+                    after,
+                    limit,
+                    class,
+                } => {
+                    return request_page(
+                        &configuration,
+                        "paths",
+                        after.as_deref(),
+                        *limit,
+                        class.map(TrafficClass::from),
+                    )
+                    .await;
+                }
+                Command::Probe {
+                    peer_id,
+                    connection_id,
+                    duration_ms,
+                    offered_bps,
+                    allow_metered,
+                } => {
+                    let probe = avian_runtime::LinkProbeRequest {
+                        peer_id: *peer_id,
+                        connection_id: connection_id.clone(),
+                        duration_ms: *duration_ms,
+                        offered_bps: *offered_bps,
+                        allow_metered: *allow_metered,
+                    };
+                    return request_daemon(
+                        &configuration,
+                        "link-probes",
+                        Some(serde_json::to_value(probe)?),
+                    )
+                    .await;
+                }
+                _ => {}
+            }
             let _operation_lock = lock_operations(&configuration.membership_file)?;
             let root: TrustRoot =
                 serde_json::from_slice(&fs::read(&configuration.trust_root_file)?)?;
@@ -339,14 +442,11 @@ fn initialize(directory: &Path, network: &str, listen: SocketAddr) -> Result<()>
     let administrator = generate_signing_key()?;
     let root = TrustRoot::new(network, &administrator.verifying_key())?;
     // Initialization never merges with or replaces existing identity material.
-    fs::create_dir(directory).context(
-        "create a new state directory; parent must exist and destination must not exist",
-    )?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+    if fs::symlink_metadata(directory).is_ok() {
+        bail!("state directory already exists");
     }
+    avian_storage::create_private_directory(directory)
+        .context("create a new private state directory")?;
     write_signing_key(directory.join("administrator.key"), &administrator)?;
     create_private_file(
         &directory.join("trust-root.json"),
@@ -356,7 +456,7 @@ fn initialize(directory: &Path, network: &str, listen: SocketAddr) -> Result<()>
     let mut token_bytes = [0u8; 32];
     getrandom::fill(&mut token_bytes)
         .map_err(|error| anyhow::anyhow!("generate API token: {error}"))?;
-    create_private_file(
+    create_secret_file(
         &directory.join("api-token"),
         hex::encode(token_bytes).as_bytes(),
     )?;
@@ -367,6 +467,9 @@ fn initialize(directory: &Path, network: &str, listen: SocketAddr) -> Result<()>
         trust_root_file: "trust-root.json".into(),
         chud: None,
         runtime: None,
+        services: None,
+        service_exchange: None,
+        service_limits: None,
     };
     create_private_file(
         &directory.join("avian.toml"),
@@ -437,12 +540,42 @@ async fn inspect_daemon(configuration: &Configuration, endpoint: &str) -> Result
     request_daemon(configuration, endpoint, None).await
 }
 
+async fn request_page(
+    configuration: &Configuration,
+    endpoint: &str,
+    after: Option<&str>,
+    limit: Option<usize>,
+    class: Option<TrafficClass>,
+) -> Result<()> {
+    let mut url = reqwest::Url::parse(&format!("http://{}/v1/{endpoint}", configuration.listen))?;
+    {
+        let mut query = url.query_pairs_mut();
+        if let Some(cursor) = after {
+            query.append_pair("after", cursor);
+        }
+        if let Some(limit) = limit {
+            query.append_pair("limit", &limit.to_string());
+        }
+        if let Some(class) = class {
+            query.append_pair(
+                "traffic_class",
+                serde_json::to_value(class)?
+                    .as_str()
+                    .context("traffic class is invalid")?,
+            );
+        }
+    }
+    let endpoint = format!("{endpoint}?{}", url.query().unwrap_or(""));
+    request_daemon(configuration, &endpoint, None).await
+}
+
 async fn request_daemon(
     configuration: &Configuration,
     endpoint: &str,
     body: Option<serde_json::Value>,
 ) -> Result<()> {
     let client = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .build()?;

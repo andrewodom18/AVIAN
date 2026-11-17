@@ -13,6 +13,7 @@ use crate::configuration::{ChudConfiguration, read_secret};
 pub struct ChudClient {
     client: Client,
     inventory_url: Url,
+    configuration_allowed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,6 +62,7 @@ impl ChudClient {
         credential.set_sensitive(true);
         headers.insert("X-API-Key", credential);
         let mut builder = Client::builder()
+            .no_proxy()
             .default_headers(headers)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5));
@@ -72,6 +74,7 @@ impl ChudClient {
         Ok(Self {
             client: builder.build()?,
             inventory_url: base_url,
+            configuration_allowed: configuration.allow_configuration,
         })
     }
 
@@ -99,4 +102,143 @@ impl ChudClient {
         }
         serde_json::from_slice(&body).context("invalid CHUD inventory response")
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioParameter {
+    pub value: serde_json::Value,
+    pub block: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioApply {
+    pub mac: String,
+    pub desired: std::collections::BTreeMap<String, RadioParameter>,
+    pub acknowledge_disruption: bool,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RadioConfirm {
+    pub operation_id: String,
+    pub acknowledge_persistence: bool,
+}
+impl ChudClient {
+    pub fn configuration_allowed(&self) -> bool {
+        self.configuration_allowed
+    }
+    fn endpoint(&self, path: &str) -> Url {
+        let mut endpoint = self.inventory_url.clone();
+        endpoint.set_path(path);
+        endpoint
+    }
+    pub async fn apply(&self, request: RadioApply) -> Result<serde_json::Value> {
+        if !self.configuration_allowed || !request.acknowledge_disruption {
+            bail!(
+                "radio changes require enabled configuration and explicit disruption acknowledgement"
+            );
+        }
+        validate_mac(&request.mac)?;
+        if request.desired.is_empty()
+            || request.desired.len() > 128
+            || request.desired.iter().any(|(name, parameter)| {
+                name.is_empty()
+                    || name.len() > 128
+                    || name.chars().any(char::is_control)
+                    || parameter.block.len() > 128
+                    || parameter.block.chars().any(char::is_control)
+            })
+        {
+            bail!("invalid radio parameters");
+        }
+        let body =
+            serde_json::json!({"mac":request.mac,"desired":request.desired,"defer_persist":true});
+        if serde_json::to_vec(&body)?.len() > 64 * 1024 {
+            bail!("radio request exceeded the local byte budget");
+        }
+        // An ambiguous timeout is never retried: CHUD may already have started the
+        // transaction. The caller can inspect retained operations to recover its ID.
+        read_response(
+            self.client
+                .post(self.endpoint("/api/radio/apply"))
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await
+    }
+    pub async fn confirm(&self, request: RadioConfirm) -> Result<serde_json::Value> {
+        if !self.configuration_allowed
+            || !request.acknowledge_persistence
+            || request.operation_id.is_empty()
+            || request.operation_id.len() > 128
+            || request.operation_id.chars().any(char::is_control)
+        {
+            bail!("radio persistence requires explicit confirmation");
+        }
+        read_response(
+            self.client
+                .post(self.endpoint("/api/radio/confirm"))
+                .json(&serde_json::json!({"operation_id":request.operation_id}))
+                .send()
+                .await?,
+        )
+        .await
+    }
+    pub async fn operations(&self, mac: Option<&str>) -> Result<serde_json::Value> {
+        let mut endpoint = self.endpoint("/api/radio/operations");
+        if let Some(mac) = mac {
+            validate_mac(mac)?;
+            endpoint.query_pairs_mut().append_pair("mac", mac);
+        }
+        read_response(self.client.get(endpoint).send().await?).await
+    }
+    pub async fn snapshot(&self, mac: &str) -> Result<serde_json::Value> {
+        validate_mac(mac)?;
+        let mut endpoint = self.endpoint("/api/radio/snapshot");
+        endpoint.query_pairs_mut().append_pair("mac", mac);
+        let mut snapshot = read_response(self.client.get(endpoint).send().await?).await?;
+        if let Some(parameters) = snapshot
+            .get_mut("config")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for parameter in parameters.values_mut() {
+                if parameter
+                    .pointer("/meta/sensitive")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    parameter["value"] = serde_json::json!("<redacted>");
+                }
+            }
+        }
+        Ok(snapshot)
+    }
+}
+fn validate_mac(mac: &str) -> Result<()> {
+    let octets: Vec<_> = mac.split(':').collect();
+    if octets.len() != 6
+        || octets
+            .iter()
+            .any(|octet| octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        bail!("invalid radio MAC address");
+    }
+    Ok(())
+}
+async fn read_response(mut response: reqwest::Response) -> Result<serde_json::Value> {
+    if !response.status().is_success() {
+        bail!(
+            "CHUD operation returned HTTP {}",
+            response.status().as_u16()
+        );
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
+            bail!("CHUD response exceeded the local byte budget");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).context("invalid CHUD operation response")
 }

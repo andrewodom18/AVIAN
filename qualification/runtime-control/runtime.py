@@ -35,8 +35,10 @@ def run_cli(*arguments):
     return json.loads(result.stdout)
 
 
-def request_api(port, token, route_path, action=None):
-    response_body = None if action is None else json.dumps({"action": action}).encode()
+def request_api(port, token, route_path, action=None, json_body=None):
+    if json_body is None and action is not None:
+        json_body = {"action": action}
+    response_body = None if json_body is None else json.dumps(json_body).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{route_path}",
         data=response_body,
@@ -103,6 +105,7 @@ def publish_membership(source, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--priority-forwarding", action="store_true")
+    parser.add_argument("--services", action="store_true")
     arguments = parser.parse_args()
     expected_gates = {
         f"{name}_{port}"
@@ -124,6 +127,15 @@ def main():
         "runtime_revocation_blocks_overlay",
         "manager_shutdown_reaps_engine",
     }
+    if arguments.services:
+        expected_gates.update(
+            {
+                "unauthorized_service_publication_rejected",
+                "signed_services_cross_overlay",
+                "services_remain_unobserved",
+                "service_owner_revocation_removes_advertisement",
+            }
+        )
     report = {
         "scope": "isolated namespace runtime control; no host connection ownership",
         "gates": [],
@@ -209,6 +221,7 @@ trust_root_file = "{node_directory}/trust-root.json"
 [runtime]
 isolation_required = true
 priority_forwarding = {str(arguments.priority_forwarding).lower()}
+control_tcp_ports = [9183]
 namespace_name = "{node.name}"
 engine_directory = "/engine"
 runtime_directory = "{node_directory}/runtime"
@@ -220,6 +233,22 @@ overlay_address = "{node.address}"
 listen = "{node.physical_address}:11010"
 rpc_listen = "127.0.0.1:15888"
 peers = ["{peer.physical_address}:11010"]
+"""
+            if arguments.services:
+                peer_identity = next(
+                    identity
+                    for candidate, _, identity in node_records
+                    if candidate.name == peer.name
+                )
+                configuration += f"""
+[services]
+state_file = "{node_directory}/services.json"
+identity_key_file = "{node_directory}/identity.key"
+[service_exchange]
+listen = "{node.address}:9183"
+[[service_exchange.peers]]
+node_id = "{peer_identity}"
+address = "{peer.address}:9183"
 """
             configuration_path = node_directory / "avian.toml"
             configuration_path.write_text(configuration)
@@ -319,6 +348,50 @@ peers = ["{peer.physical_address}:11010"]
             "delivery_after_restart",
             network_helpers.wait_until(lambda: nodes[0].ping(nodes[1]), 15),
         )
+        if arguments.services:
+            publication = {
+                "ttl_seconds": 120,
+                "endpoints": [
+                    {
+                        "kind": "arc_telemetry",
+                        "address": nodes[1].address,
+                        "protocol": "udp",
+                        "port": 18001,
+                    }
+                ],
+            }
+            record(
+                "unauthorized_service_publication_rejected",
+                request_api(
+                    managers[1][1], "wrong-token", "/v1/services", json_body=publication
+                )[0]
+                == 401,
+            )
+            status, _ = request_api(
+                managers[1][1], managers[1][2], "/v1/services", json_body=publication
+            )
+            if status != 200:
+                raise RuntimeError("service publication failed")
+
+            def learned_service():
+                code, page = request_api(managers[0][1], managers[0][2], "/v1/services")
+                return code == 200 and any(
+                    item["announcement"]["claims"]["owner_node_id"]
+                    == node_records[1][2]
+                    for item in page["items"]
+                )
+
+            record(
+                "signed_services_cross_overlay",
+                network_helpers.wait_until(learned_service, 12),
+            )
+            if not learned_service():
+                raise RuntimeError("service announcement did not cross overlay")
+            _, page = request_api(managers[0][1], managers[0][2], "/v1/services")
+            record(
+                "services_remain_unobserved",
+                all(item["reachability"] == "unobserved" for item in page["items"]),
+            )
         revoked_node_id = node_records[1][2]
         for _, node_directory, _ in node_records:
             trust = json.loads(
@@ -372,6 +445,16 @@ peers = ["{peer.physical_address}:11010"]
                 for _ in range(3)
             )
         record("runtime_revocation_blocks_overlay", blocked)
+        if arguments.services:
+
+            def removed_service():
+                code, page = request_api(managers[0][1], managers[0][2], "/v1/services")
+                return code == 200 and not page["items"]
+
+            record(
+                "service_owner_revocation_removes_advertisement",
+                network_helpers.wait_until(removed_service, 5),
+            )
         _, runtime = request_api(port, token, "/v1/runtime")
         engine_process_id = runtime["runtime"]["process_id"]
         engine_was_running = (

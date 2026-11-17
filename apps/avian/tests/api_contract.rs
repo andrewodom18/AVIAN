@@ -58,6 +58,9 @@ impl Fixture {
             trust_root_file: directory.path().join("root.json"),
             chud: None,
             runtime: None,
+            services: None,
+            service_exchange: None,
+            service_limits: None,
         };
         create_private_file(&configuration.token_file, LOCAL_TOKEN.as_bytes()).unwrap();
         fs::write(
@@ -307,6 +310,7 @@ async fn unavailable_chud_does_not_make_local_status_unavailable() {
     let key_file = fixture.directory.path().join("chud-key");
     create_private_file(&key_file, LOCAL_TOKEN.as_bytes()).unwrap();
     fixture.configuration.chud = Some(ChudConfiguration {
+        allow_configuration: false,
         url: format!("http://{address}"),
         api_key_file: key_file,
         certificate_file: None,
@@ -468,4 +472,52 @@ fn runtime_cannot_use_a_different_membership_store_from_the_local_api() {
     .unwrap();
     let problem = Configuration::load(&configuration_path).unwrap_err();
     assert!(problem.to_string().contains("same membership store"));
+}
+
+#[tokio::test]
+async fn services_are_owner_signed_advertisements_and_revocation_removes_them() {
+    let mut fixture = Fixture::new(1);
+    let mut identity_seed = [17; 32];
+    identity_seed[..8].copy_from_slice(&1u64.to_be_bytes());
+    let identity = SigningKey::from_bytes(&identity_seed);
+    let key_file = fixture.directory.path().join("service-owner.key");
+    avian_membership::write_signing_key(&key_file, &identity).unwrap();
+    let service_directory = fixture.directory.path().join("service-state");
+    avian_storage::create_private_directory(&service_directory).unwrap();
+    fixture.configuration.services = Some(avian::services::ServiceConfiguration {
+        state_file: service_directory.join("services.json"),
+        identity_key_file: Some(key_file),
+    });
+    let state = ApplicationState::load(&fixture.configuration).unwrap();
+    let router = api::router(state.clone());
+    let publication = json!({"ttl_seconds":30,"endpoints":[{"kind":"arc_telemetry","address":"fd42::1","protocol":"udp","port":9001}]});
+    let (status, body) = request(
+        router.clone(),
+        "POST",
+        "/v1/services",
+        Some(publication.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["availability"], "advertised");
+    let (_, body) = request(router.clone(), "GET", "/v1/services", None).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["items"][0]["reachability"], "unobserved");
+    let mut invalid = publication;
+    invalid["endpoints"][0]["address"] = json!("fd42::2");
+    let (status, _) = request(router.clone(), "POST", "/v1/services", Some(invalid)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let administrator = SigningKey::from_bytes(&[91; 32]);
+    let mut membership = state.membership.write().await;
+    let update = issue_revocations(
+        membership.trust_root(),
+        &administrator,
+        0,
+        vec![avian_membership::node_id_for_key(&identity.verifying_key())],
+    )
+    .unwrap();
+    membership.apply_revocations(update).unwrap();
+    drop(membership);
+    let (_, body) = request(router, "GET", "/v1/services", None).await;
+    assert!(body["items"].as_array().unwrap().is_empty());
 }

@@ -22,6 +22,8 @@ pub struct ApplicationState {
     pub reload_error: RwLock<Option<String>>,
     pub preview_slots: Arc<Semaphore>,
     pub runtime: Option<Arc<avian_runtime::RuntimeSupervisor>>,
+    pub services: Option<Arc<crate::services::ServiceDirectory>>,
+    pub service_limits: avian_services::Limits,
 }
 
 impl ApplicationState {
@@ -31,12 +33,28 @@ impl ApplicationState {
         )
         .context("parse trust root")?;
         let membership = MembershipStore::load(&configuration.membership_file, trust_root)?;
+        let service_limits = configuration.service_limits.clone().unwrap_or_default();
+        let services = configuration
+            .services
+            .clone()
+            .map(|configuration| {
+                crate::services::ServiceDirectory::load(
+                    configuration,
+                    &membership,
+                    service_limits.clone(),
+                    crate::service_exchange::now_unix()?,
+                )
+                .map(Arc::new)
+            })
+            .transpose()?;
         let (events, _) = broadcast::channel(128);
         let local_workers = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
         Ok(Arc::new(Self {
             api_token: read_secret(&configuration.token_file)?,
+            services,
+            service_limits,
             membership: RwLock::new(membership),
             chud: configuration
                 .chud
@@ -57,6 +75,7 @@ impl ApplicationState {
     pub async fn watch_membership(self: Arc<Self>, configuration: Configuration) {
         let mut last_change: Option<(SystemTime, u64)> = None;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let metadata = match tokio::fs::metadata(&configuration.membership_file).await {
@@ -104,6 +123,57 @@ impl ApplicationState {
                 }
             }
             last_change = change;
+        }
+    }
+}
+
+impl ApplicationState {
+    pub async fn watch_connectivity(self: Arc<Self>) {
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        let mut previous_runtime = None;
+        let mut previous_underlays = None;
+        let mut previous_routes = None;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let status = runtime.status().await;
+            let fingerprint = serde_json::json!({"state":status.state,"process_id":status.process_id,"engine_ready":status.engine_ready,"last_error":status.last_error});
+            if previous_runtime.as_ref() != Some(&fingerprint) {
+                previous_runtime = Some(fingerprint);
+                let _ = self.events.send(StateEvent {
+                    kind: "runtime_updated".into(),
+                    revocation_revision: self.membership.read().await.revocation_revision(),
+                });
+            }
+            if runtime.configuration().measured_routing {
+                let revision = if status.engine_ready {
+                    runtime
+                        .inspect_class_routes_page(None, 1, None)
+                        .await
+                        .ok()
+                        .and_then(|page| page.get("revision").cloned())
+                } else {
+                    None
+                };
+                if previous_routes != revision {
+                    previous_routes = revision;
+                    let _ = self.events.send(StateEvent {
+                        kind: "paths_updated".into(),
+                        revocation_revision: self.membership.read().await.revocation_revision(),
+                    });
+                }
+            }
+            let interfaces = runtime.inspect_underlays().await.ok();
+            if previous_underlays.as_ref() != Some(&interfaces) {
+                previous_underlays = Some(interfaces);
+                let _ = self.events.send(StateEvent {
+                    kind: "connections_updated".into(),
+                    revocation_revision: self.membership.read().await.revocation_revision(),
+                });
+            }
         }
     }
 }
