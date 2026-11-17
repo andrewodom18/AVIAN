@@ -1,8 +1,7 @@
 //! Signed offline network membership. Transport admission must consume these decisions explicitly.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
 use std::net::IpAddr;
 use std::path::Path;
 
@@ -483,14 +482,7 @@ impl MembershipStore {
             .file_name()
             .ok_or(MembershipError::InvalidField("store path"))?;
         let lock_path = parent.join(format!("{}.lock", filename.to_string_lossy()));
-        let mut lock_options = OpenOptions::new();
-        lock_options
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false);
-        owner_only(&mut lock_options);
-        let lock = lock_options.open(lock_path)?;
+        let lock = avian_storage::open_private_lock(lock_path).map_err(storage_error)?;
         fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| MembershipError::StoreBusy)?;
 
         if path.exists() {
@@ -503,31 +495,9 @@ impl MembershipStore {
             memberships: self.memberships.values().cloned().collect(),
             revocations: self.revocations.clone(),
         };
-        let mut suffix = [0u8; 16];
-        getrandom::fill(&mut suffix)
-            .map_err(|error| MembershipError::Randomness(error.to_string()))?;
-        let temporary_path = parent.join(format!(
-            ".{}.{}.tmp",
-            filename.to_string_lossy(),
-            hex::encode(suffix)
-        ));
-        let result = (|| -> Result<()> {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            owner_only(&mut options);
-            let mut file = options.open(&temporary_path)?;
-            serde_json::to_writer_pretty(&mut file, &stored)?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-            fs::rename(&temporary_path, path)?;
-            #[cfg(unix)]
-            File::open(parent)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temporary_path);
-        }
-        result
+        let mut encoded = serde_json::to_vec_pretty(&stored)?;
+        encoded.push(b'\n');
+        avian_storage::atomic_write_private_file(path, &encoded).map_err(storage_error)
     }
 
     pub fn validate_successor(&self, previous: &Self) -> Result<()> {
@@ -554,62 +524,54 @@ impl MembershipStore {
 
 /// Creates a new private key file without overwriting an existing identity.
 pub fn write_signing_key(path: impl AsRef<Path>, key: &SigningKey) -> Result<()> {
-    #[cfg(not(unix))]
-    {
-        let _ = (path, key);
-        Err(MembershipError::CredentialStoreRequired)
-    }
-    #[cfg(unix)]
-    {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        owner_only(&mut options);
-        let mut file = options.open(path)?;
-        let encoded = Zeroizing::new(hex::encode(key.to_bytes()));
-        file.write_all(encoded.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        Ok(())
-    }
+    let mut encoded = Zeroizing::new(hex::encode(key.to_bytes()));
+    encoded.push('\n');
+    avian_storage::create_secret_file(path, encoded.as_bytes()).map_err(storage_error)
+}
+
+/// Uses a host-provided wrapping adapter, including Android protected storage.
+pub fn write_signing_key_with_protector(
+    path: impl AsRef<Path>,
+    key: &SigningKey,
+    protector: &dyn avian_storage::SecretProtector,
+) -> Result<()> {
+    let mut encoded = Zeroizing::new(hex::encode(key.to_bytes()));
+    encoded.push('\n');
+    avian_storage::create_secret_file_with_protector(path, encoded.as_bytes(), protector)
+        .map_err(storage_error)
 }
 
 pub fn read_signing_key(path: impl AsRef<Path>) -> Result<SigningKey> {
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err(MembershipError::CredentialStoreRequired)
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::symlink_metadata(path.as_ref())?;
-        if !metadata.file_type().is_file() {
-            return Err(MembershipError::InsecurePermissions);
-        }
-        let mut file = File::open(path)?;
-        if file.metadata()?.permissions().mode() & 0o077 != 0 {
-            return Err(MembershipError::InsecurePermissions);
-        }
-        let mut encoded = Zeroizing::new(String::new());
-        Read::by_ref(&mut file)
-            .take(66)
-            .read_to_string(&mut encoded)?;
-        if encoded.len() > 65 {
-            return Err(MembershipError::InvalidField("private key"));
-        }
-        let seed = Zeroizing::new(decode_hex::<32>(encoded.trim(), "private key")?);
-        Ok(SigningKey::from_bytes(&seed))
-    }
+    decode_signing_key(avian_storage::read_secret_file(path, 65))
 }
 
-fn owner_only(options: &mut OpenOptions) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+pub fn read_signing_key_with_protector(
+    path: impl AsRef<Path>,
+    protector: &dyn avian_storage::SecretProtector,
+) -> Result<SigningKey> {
+    decode_signing_key(avian_storage::read_secret_file_with_protector(
+        path, 65, protector,
+    ))
+}
+
+fn decode_signing_key(encoded: avian_storage::Result<Zeroizing<Vec<u8>>>) -> Result<SigningKey> {
+    let encoded = encoded.map_err(|error| match error {
+        avian_storage::StorageError::TooLarge => MembershipError::InvalidField("private key"),
+        error => storage_error(error),
+    })?;
+    let text =
+        std::str::from_utf8(&encoded).map_err(|_| MembershipError::InvalidField("private key"))?;
+    let seed = Zeroizing::new(decode_hex::<32>(text.trim(), "private key")?);
+    Ok(SigningKey::from_bytes(&seed))
+}
+
+fn storage_error(error: avian_storage::StorageError) -> MembershipError {
+    match error {
+        avian_storage::StorageError::InsecurePermissions => MembershipError::InsecurePermissions,
+        avian_storage::StorageError::BackendUnavailable => MembershipError::CredentialStoreRequired,
+        avian_storage::StorageError::Io(error) => MembershipError::Io(error),
+        error => MembershipError::Io(std::io::Error::other(error)),
     }
-    #[cfg(not(unix))]
-    let _ = options;
 }
 
 fn check_administrator(root: &TrustRoot, administrator: &SigningKey) -> Result<()> {

@@ -108,6 +108,7 @@ name = "avian-engine"
 version = "0.1.0"
 dependencies = [
  "avian-membership",
+ "avian-storage",
  "base64 0.22.1",
  "ed25519-dalek",
  "getrandom 0.3.4",
@@ -122,6 +123,7 @@ dependencies = [
 name = "avian-membership"
 version = "0.1.0"
 dependencies = [
+ "avian-storage",
  "ed25519-dalek",
  "fs2",
  "getrandom 0.3.4",
@@ -175,6 +177,20 @@ dependencies = [
  "tokio",
  "toml",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "avian-storage"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "zeroize",
 ]
 

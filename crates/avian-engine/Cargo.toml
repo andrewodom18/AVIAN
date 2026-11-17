@@ -6,6 +6,7 @@ edition = "2024"
 license-file.workspace = true
 
 [dependencies]
+avian-storage = { path = "../avian-storage" }
 avian-membership = { path = "../avian-membership" }
 base64 = "0.22"
 getrandom = "0.3"

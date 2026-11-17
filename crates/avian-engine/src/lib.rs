@@ -1,10 +1,6 @@
 //! Native trust-file export for the pinned engine. Export does not qualify runtime admission.
 
 use std::collections::BTreeMap;
-#[cfg(unix)]
-use std::fs::{self, File, OpenOptions};
-#[cfg(unix)]
-use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -151,58 +147,20 @@ impl TrustFileExport {
     /// The unpatched upstream engine cannot consume this format. Runtime reload and session
     /// revocation must be qualified separately from writing the file successfully.
     pub fn write_startup_file(&self, path: impl AsRef<Path>) -> Result<()> {
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            Err(ExportError::ProtectedStorageRequired)
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let path = path.as_ref();
-            match fs::symlink_metadata(path) {
-                Ok(metadata) if !metadata.file_type().is_file() => {
-                    return Err(ExportError::InvalidDestination);
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+        let document = NativeTrustFileView {
+            format: TrustFileFormat::VerifiedMembershipV1,
+            credentials: &self.credentials,
+        };
+        let mut encoded = serde_json::to_vec_pretty(&document)?;
+        encoded.push(b'\n');
+        avian_storage::atomic_write_private_file(path, &encoded).map_err(|error| match error {
+            avian_storage::StorageError::InsecurePermissions => ExportError::InvalidDestination,
+            avian_storage::StorageError::BackendUnavailable => {
+                ExportError::ProtectedStorageRequired
             }
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            let filename = path.file_name().ok_or(ExportError::InvalidDestination)?;
-            let mut suffix = [0u8; 16];
-            getrandom::fill(&mut suffix)
-                .map_err(|error| ExportError::Randomness(error.to_string()))?;
-            let temporary_path = parent.join(format!(
-                ".{}.{}.tmp",
-                filename.to_string_lossy(),
-                hex::encode(suffix)
-            ));
-            let result = (|| -> Result<()> {
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&temporary_path)?;
-                let document = NativeTrustFileView {
-                    format: TrustFileFormat::VerifiedMembershipV1,
-                    credentials: &self.credentials,
-                };
-                serde_json::to_writer_pretty(&mut file, &document)?;
-                file.write_all(b"\n")?;
-                file.sync_all()?;
-                fs::rename(&temporary_path, path)?;
-                File::open(parent)?.sync_all()?;
-                Ok(())
-            })();
-            if result.is_err() {
-                let _ = fs::remove_file(temporary_path);
-            }
-            result
-        }
+            avian_storage::StorageError::Io(error) => ExportError::Io(error),
+            error => ExportError::Io(std::io::Error::other(error)),
+        })
     }
 }
 

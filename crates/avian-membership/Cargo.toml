@@ -6,6 +6,7 @@ edition = "2024"
 license-file.workspace = true
 
 [dependencies]
+avian-storage = { path = "../avian-storage" }
 ed25519-dalek = "2.2"
 fs2 = "0.4"
 getrandom = "0.3"
