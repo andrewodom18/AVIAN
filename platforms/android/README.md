@@ -22,12 +22,34 @@ socket protection, and Network binding belong to this component. The native
 engine uses the mobile `InstanceManager.set_tun_fd` API. It exposes no external
 administration listener. Browser access remains through the ARC bridge.
 
-Storage lives under `AvianRuntime.storageDirectory(context)`. Store signed
-`trust-root.json` and `membership.json` with owner-only permissions. Use
-`ProtectedSecretStore(new KeystoreSecretProtector())` to create `transport.key`
-from the canonical base64 transport credential; plaintext envelopes are rejected.
-The wrapping key remains in Android Keystore. Native startup independently
-verifies enrollment, transport-key ownership, and the assigned overlay address.
+Storage lives under `AvianRuntime.storageDirectory(context)`. The host can export
+a signed public enrollment request, import the administrator bundle after checking
+its fingerprint independently, and install an explicit runtime profile:
+
+```java
+String request = AvianProvisioning.createRequest(context);
+// Save the public request using the host's document export flow.
+AvianProvisioning.importBundle(context, bundleJson, administratorFingerprint);
+AvianProvisioning.configureRuntime(context, profileJson);
+```
+
+Issue the bundle with `avianctl provision` on the offline administrator machine.
+The device creates its own Ed25519 and transport seeds locally and wraps both
+through Android Keystore before storage. Repeating setup preserves complete
+credentials; incomplete credential state is refused. Private keys never appear in
+the request or bundle. Import verifies the entire signed snapshot, local key
+ownership, issuer fingerprint, revocations, and persisted rollback floors.
+
+The profile is JSON containing `overlay_address`, `overlay_network`, and `peers`.
+Set `control_tcp_ports: [7447]` for ARC Zenoh control transport. This explicit
+priority remains in effect when physical links change. Optional `exchange_port` defaults to `4192`, `exchange_peers` defaults to an empty
+list, and `automatic_capacity_probes` defaults to `true`. Each exchange peer has
+`node_id`, `service_endpoint`, and `revocation_endpoint`; endpoints must belong to
+that enrolled node. Identity, credential, trust, and state paths come from the
+private device directory and cannot be supplied in the profile. Stop AVIAN before
+setup or profile updates. Provisioning neither starts the VPN nor grants consent.
+Native startup independently verifies enrollment, key ownership, and the assigned
+address again.
 
 `runtime.json` contains `version: 1`, `node_id`, `overlay_address`,
 `overlay_network`, absolute `trust_root_file`, `membership_file`, `credential_file`,
@@ -92,3 +114,19 @@ protected socket callbacks, Keystore behavior, and descriptor cleanup. Disposabl
 fixture keys, APK, emulator, and container are removed afterward. Physical
 Wi-Fi/cellular coexistence and system-driven consent withdrawal remain separate
 from emulator evidence; reports never authorize hardware integration.
+
+For an ARC debug APK containing the matching AAR and native bridge, use a booted,
+disposable emulator with the default Android debug signing key:
+
+```sh
+python3 platforms/android/tests/host_provisioning.py \
+  --host-apk /path/to/app-debug.apk --avianctl /path/to/avianctl \
+  --serial emulator-5584 --runtime --output ~/arc-scratch/avian-host.json
+```
+
+The runner clears the debug wrapper's data, checks local Keystore enrollment and
+fingerprint rejection, then verifies signed discovery, aircraft authorization,
+withdrawal, and bridge continuity across activity recreation. It grants VPN consent
+through an emulator app-op; this does not qualify physical consent withdrawal or
+Wi-Fi/cellular behavior. Physical devices are rejected, and test packages are
+removed afterward.

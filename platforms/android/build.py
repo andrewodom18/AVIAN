@@ -117,6 +117,9 @@ def prepare_source(checkout, source, lock):
     shutil.copyfile(
         DIRECTORY / "native/probes.rs", ffi / "src/avian_verified_host/probes.rs"
     )
+    shutil.copyfile(DIRECTORY / "native/provisioning_ffi.rs", ffi / "src/avian_provisioning_ffi.rs")
+    ffi_library = ffi / "src/lib.rs"
+    ffi_library.write_text(ffi_library.read_text() + '\ninclude!("avian_provisioning_ffi.rs");\n')
     manifest = ffi / "Cargo.toml"
     text = manifest.read_text().replace(
         'easytier = { path = "../../easytier" }',

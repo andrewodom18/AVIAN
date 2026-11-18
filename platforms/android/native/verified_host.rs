@@ -42,6 +42,8 @@ struct Configuration {
     policy_file: PathBuf,
     working_directory: PathBuf,
     peers: Vec<String>,
+    #[serde(default)]
+    control_tcp_ports: Vec<u16>,
     #[serde(default = "default_exchange_port")]
     exchange_port: u16,
     #[serde(default)]
@@ -81,12 +83,29 @@ pub fn set_policy(document: &str) -> Result<()> {
 }
 
 impl Configuration {
+    fn control_ports(&self) -> std::collections::BTreeSet<u16> {
+        avian::android_provisioning::control_ports(
+            &self.control_tcp_ports,
+            self.exchange_port,
+            self.exchange_peers.iter().map(|peer| {
+                (
+                    peer.service_endpoint.port(),
+                    peer.revocation_endpoint.port(),
+                )
+            }),
+        )
+    }
+
     fn trust_file(&self) -> PathBuf {
         self.working_directory.join("engine-trust.json")
     }
 
     fn validate(&self) -> Result<()> {
-        if self.version != 1 || !self.overlay_address.is_private() || self.exchange_port == 0 {
+        if self.version != 1
+            || !self.overlay_address.is_private()
+            || self.exchange_port == 0
+            || self.control_tcp_ports.contains(&0)
+        {
             bail!("invalid Android engine configuration");
         }
         let network: ipnet::Ipv4Net = self.overlay_network.parse()?;
@@ -159,11 +178,7 @@ pub fn start(configuration_json: &str, credential_bytes: &[u8]) -> Result<()> {
         .as_ref()
         .context("Android underlay metering has not been supplied")?;
     let mut owned_policy: serde_json::Value = serde_json::from_slice(policy)?;
-    let mut control_ports = std::collections::BTreeSet::from([configuration.exchange_port]);
-    for peer in &configuration.exchange_peers {
-        control_ports.insert(peer.service_endpoint.port());
-        control_ports.insert(peer.revocation_endpoint.port());
-    }
+    let control_ports = configuration.control_ports();
     owned_policy["control_tcp_ports"] = serde_json::to_value(control_ports)?;
     avian_storage::atomic_write_private_file(
         &configuration.policy_file,
@@ -392,11 +407,7 @@ pub fn update_underlays(document: &str) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("Android runtime lock failed"))?;
     let state = running.as_mut().context("Android engine is not running")?;
     let configuration = &state.overlay.configuration;
-    let mut ports = std::collections::BTreeSet::from([configuration.exchange_port]);
-    for peer in &configuration.exchange_peers {
-        ports.insert(peer.service_endpoint.port());
-        ports.insert(peer.revocation_endpoint.port());
-    }
+    let ports = configuration.control_ports();
     let path = configuration.working_directory.join(format!(
         "policy-live-{}.json",
         SystemTime::now()
@@ -521,4 +532,29 @@ pub fn wait_instance_ready() -> Result<()> {
         .context("control runtime unavailable")?
         .block_on(instance_service())?;
     Ok(())
+}
+
+/// The same lock used by startup prevents provisioning a running identity.
+pub fn provision(
+    operation: u8,
+    directory: &str,
+    document: &str,
+    fingerprint: &str,
+    identity: &[u8],
+    transport: &[u8],
+) -> Result<String> {
+    let running = VERIFIED_STATE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Android runtime lock failed"))?;
+    if running.is_some() {
+        bail!("stop AVIAN before changing provisioning state");
+    }
+    avian::android_provisioning::provision(
+        operation,
+        std::path::Path::new(directory),
+        document,
+        fingerprint,
+        identity,
+        transport,
+    )
 }

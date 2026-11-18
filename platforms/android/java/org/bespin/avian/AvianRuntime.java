@@ -70,6 +70,13 @@ public final class AvianRuntime {
     return new JSONObject(page);
   }
 
+  /** Current native runtime evidence; absence is reported as unavailable. */
+  public static JSONObject status() throws Exception {
+    String status = NativeEngine.status();
+    if (status == null) throw new IllegalStateException("Runtime status is unavailable");
+    return new JSONObject(status);
+  }
+
   public static EventPage events(long after, int limit) throws Exception {
     String page = NativeEngine.eventPage(after, limit);
     if (page == null) throw new IllegalStateException("Runtime events are unavailable");

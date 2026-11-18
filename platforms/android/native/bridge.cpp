@@ -23,6 +23,7 @@ const char *avian_android_publish_services(const char *document, const unsigned 
 const char *avian_android_service_page(const char *after, size_t limit);
 const char *avian_android_event_page(uint64_t after, size_t limit);
 const char *avian_android_status();
+const char *avian_android_provision(uint8_t operation, const char *directory, const char *document, const char *fingerprint, const unsigned char *identity, size_t identity_length, const unsigned char *transport, size_t transport_length);
 void free_string(const char *value);
 }
 
@@ -283,4 +284,32 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_org_bespin_avian_NativeEngine_status(JNIEnv *environment, jclass) {
     std::lock_guard<std::mutex> lifecycle(lifecycle_lock);
     return owned_string(environment, avian_android_status());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_bespin_avian_AvianProvisioning_provision(JNIEnv *environment, jclass, jint operation, jstring directory, jstring document, jstring fingerprint, jbyteArray identity_bytes, jbyteArray transport_bytes) {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_lock);
+    if (active_session != 0 || operation < 0 || operation > 2 || directory == nullptr || document == nullptr || fingerprint == nullptr || identity_bytes == nullptr || transport_bytes == nullptr) return nullptr;
+    if (environment->GetStringUTFLength(document) > 16 * 1024 * 1024 || environment->GetStringUTFLength(directory) > 4096 || environment->GetStringUTFLength(fingerprint) > 128) return nullptr;
+    jsize identity_length = environment->GetArrayLength(identity_bytes);
+    jsize transport_length = environment->GetArrayLength(transport_bytes);
+    if (identity_length <= 0 || identity_length > 65 || transport_length <= 0 || transport_length > 65) return nullptr;
+    std::vector<unsigned char> identity(static_cast<size_t>(identity_length));
+    std::vector<unsigned char> transport(static_cast<size_t>(transport_length));
+    WipeMemory identity_guard{identity.data(), identity.size()};
+    WipeMemory transport_guard{transport.data(), transport.size()};
+    environment->GetByteArrayRegion(identity_bytes, 0, identity_length, reinterpret_cast<jbyte *>(identity.data()));
+    environment->GetByteArrayRegion(transport_bytes, 0, transport_length, reinterpret_cast<jbyte *>(transport.data()));
+    if (environment->ExceptionCheck()) return nullptr;
+    const char *directory_text = environment->GetStringUTFChars(directory, nullptr);
+    const char *document_text = environment->GetStringUTFChars(document, nullptr);
+    const char *fingerprint_text = environment->GetStringUTFChars(fingerprint, nullptr);
+    const char *result = nullptr;
+    if (directory_text != nullptr && document_text != nullptr && fingerprint_text != nullptr) {
+        result = avian_android_provision(static_cast<uint8_t>(operation), directory_text, document_text, fingerprint_text, identity.data(), identity.size(), transport.data(), transport.size());
+    }
+    if (directory_text != nullptr) environment->ReleaseStringUTFChars(directory, directory_text);
+    if (document_text != nullptr) environment->ReleaseStringUTFChars(document, document_text);
+    if (fingerprint_text != nullptr) environment->ReleaseStringUTFChars(fingerprint, fingerprint_text);
+    return owned_string(environment, result);
 }
