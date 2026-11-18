@@ -11,23 +11,90 @@ cargo build --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 mkdir -p .local
-target/debug/avianctl init --state-dir .local/ground --network field-network
-target/debug/aviand --config .local/ground/avian.toml
+target/debug/avianctl init --state-dir .local/network-admin --network field-network
+target/debug/aviand --config .local/network-admin/avian.toml
 ```
 
 Requires Rust 1.88 or newer. Android builds require Rust 1.95 and the dependencies
 in [Android setup](platforms/android/README.md). Initialization creates protected
-state and a loopback API token. The daemon starts in observation-only mode.
+offline administrator state and a loopback API token. The daemon starts in
+observation-only mode.
 
 ```sh
-target/debug/avianctl --config .local/ground/avian.toml status
-target/debug/avianctl --config .local/ground/avian.toml --help
+target/debug/avianctl --config .local/network-admin/avian.toml status
+target/debug/avianctl --config .local/network-admin/avian.toml --help
 ```
 
 Keep state directories private and out of version control. Unix storage rejects
 unsafe ownership, writable directories, links, and identity replacement. Windows
 secret storage uses CurrentUser DPAPI and owner ACLs; native Windows qualification
 has not passed. Android wraps secrets through Android Keystore.
+
+## Device provisioning
+
+Keep the network administrator on an offline enrollment machine. Each device
+creates its own identity and transport credential; only its signed public request
+leaves the device. Review the device identity fingerprint through a separate
+trusted channel before issuing membership.
+
+```sh
+# On the device; repeating this command preserves existing complete credentials.
+avianctl device-init --state-dir /private/device-state --output /private/request.json
+
+# On the administrator, after copying and reviewing the public request.
+avianctl --config /private/network-admin/avian.toml provision \
+  --request /private/request.json --address 10.77.0.2 --relay \
+  --output /private/device-bundle.json
+
+# On the device, after copying the bundle. Verify this fingerprint independently.
+avianctl device-import --state-dir /private/device-state \
+  --bundle /private/device-bundle.json \
+  --administrator-fingerprint 'FINGERPRINT_FROM_ADMINISTRATOR'
+```
+
+The bundle contains public trust, signed memberships, and the complete signed
+revocation chain. Import checks both local keys, issuer fingerprint, target,
+signatures, and existing rollback floors. Reimport preserves credentials, API
+token, and configuration. Keep administrator keys off devices. Enrollment does
+not start networking, and `--relay` is an explicit forwarding authorization.
+
+An operator-supplied runtime template contains the fields normally placed under
+`[runtime]`, without that table header. Use the Linux setup below for execution
+and helper settings. The configure command replaces template identity and trust
+paths with this device's enrollment files, checks its assigned overlay address,
+and saves the configuration without starting it. For native Linux, use the
+actual underlay address, approved engine directory, and installed helper scope:
+
+```toml
+execution = "native"
+isolation_required = false
+network_helper_socket = "/run/avian/mesh/network.sock"
+interface_name = "avian0"
+overlay_prefix_length = 24
+engine_directory = "/opt/avian-engine"
+runtime_directory = "/run/avian/mesh"
+overlay_address = "10.77.0.2"
+listen = "192.168.10.2:11010"
+rpc_listen = "127.0.0.1:15888"
+peers = ["192.168.10.1:11010"]
+measured_routing = true
+private_rpc = true
+underlay_binding = true
+priority_forwarding = true
+control_tcp_ports = [7447, 4192, 9180]
+```
+
+```sh
+avianctl device-configure --state-dir /private/device-state \
+  --runtime-template /private/runtime.toml
+aviand --config /private/device-state/avian.toml
+avianctl --config /private/device-state/avian.toml runtime start
+```
+
+Set service-exchange peers in `avian.toml` when distributing signed ARC service
+advertisements. Runtime and helper installation remain separate host operations.
+Partial credential initialization is refused; restore the complete device state
+or create a new private state directory rather than replacing identity files.
 
 ## Runtime and policy
 
@@ -97,11 +164,11 @@ writes are not retried automatically.
 
 ```sh
 target/debug/avian-revocationd \
-  --trust-root .local/ground/trust-root.json \
-  --membership .local/ground/membership.json \
-  --engine-trust .local/ground/engine-trust.json \
-  --listen 10.201.0.1:9180 \
-  --peer http://10.201.0.2:9180
+  --trust-root /private/device-state/trust-root.json \
+  --membership /private/device-state/membership.json \
+  --engine-trust /private/device-state/engine-trust.json \
+  --listen 10.77.0.2:9180 \
+  --peer http://10.77.0.3:9180
 ```
 
 Bind to the assigned overlay address and add `9180` to `runtime.control_tcp_ports`.

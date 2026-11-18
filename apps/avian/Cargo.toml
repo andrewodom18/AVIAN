@@ -22,6 +22,9 @@ avian-storage = { path = "../../crates/avian-storage" }
 avian-services = { path = "../../crates/avian-services" }
 avian-connectivity = { path = "../../crates/avian-connectivity" }
 anyhow = "1"
+base64 = "0.22"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+zeroize = "1"
 avian-engine = { path = "../../crates/avian-engine" }
 avian-membership = { path = "../../crates/avian-membership" }
 avian-routing = { path = "../../crates/avian-routing" }
@@ -33,6 +36,7 @@ ed25519-dalek = "2.2"
 fs2 = "0.4"
 getrandom = "0.3"
 hex = "0.4"
+ipnet = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -331,6 +331,12 @@ impl MembershipStore {
             .filter(|record| !self.revoked_nodes.contains(&record.claims.node_id))
     }
 
+    /// Includes revoked records for complete offline snapshots and rollback checks.
+    /// Admission and discovery must use `memberships` or `authorize` instead.
+    pub fn membership_history(&self) -> impl Iterator<Item = &SignedMembership> {
+        self.memberships.values()
+    }
+
     pub fn revocations_after(&self, revision: u64) -> impl Iterator<Item = &SignedRevocations> {
         self.revocations
             .iter()
@@ -450,12 +456,22 @@ impl MembershipStore {
         if stored.network_id != expected_root.network_id {
             return Err(MembershipError::WrongNetwork);
         }
+        Self::from_records(expected_root, stored.memberships, stored.revocations)
+    }
+
+    /// Verify a complete signed snapshot, retaining revoked history without reserving
+    /// addresses or transport keys that may have been reassigned after revocation.
+    pub fn from_records(
+        expected_root: TrustRoot,
+        memberships: Vec<SignedMembership>,
+        revocations: Vec<SignedRevocations>,
+    ) -> Result<Self> {
         let mut store = Self::new(expected_root)?;
         // Verify the revocation chain first so old address assignments can be reused safely.
-        for record in stored.revocations {
+        for record in revocations {
             store.apply_revocations(record)?;
         }
-        for record in stored.memberships {
+        for record in memberships {
             record.verify(&store.root)?;
             if store.memberships.contains_key(&record.claims.node_id) {
                 return Err(MembershipError::InvalidField("duplicate stored membership"));

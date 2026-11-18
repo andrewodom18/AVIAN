@@ -40,6 +40,44 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1:4179")]
         listen: SocketAddr,
     },
+    /// Generate local device credentials and export a signed public enrollment request.
+    DeviceInit {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Issue an offline bundle from an independently reviewed device request.
+    Provision {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long, required = true)]
+        address: Vec<IpAddr>,
+        #[arg(long)]
+        relay: bool,
+        #[arg(long, default_value_t = 1)]
+        revision: u64,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Verify and install an offline bundle using an independently checked issuer fingerprint.
+    DeviceImport {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        administrator_fingerprint: String,
+        #[arg(long, default_value = "127.0.0.1:4179")]
+        listen: SocketAddr,
+    },
+    /// Bind an explicit runtime template to this enrolled device without starting it.
+    DeviceConfigure {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        runtime_template: PathBuf,
+    },
     /// Generate a device identity; private material is written only to the requested file.
     Keygen {
         #[arg(long)]
@@ -205,6 +243,44 @@ async fn main() -> Result<()> {
             network,
             listen,
         } => initialize(&state_dir, &network, listen),
+        Command::DeviceInit { state_dir, output } => {
+            require_new_output(&output)?;
+            let request = avian::provisioning::initialize_device(&state_dir)?;
+            avian::provisioning::write_public_export(&output, &request)?;
+            print_json(
+                &serde_json::json!({"request": output, "identity_fingerprint": fingerprint(&request.verify()?)}),
+            )
+        }
+        Command::DeviceImport {
+            state_dir,
+            bundle,
+            administrator_fingerprint,
+            listen,
+        } => {
+            let bundle: avian::provisioning::DeviceBundle =
+                serde_json::from_slice(&fs::read(bundle)?)?;
+            avian::provisioning::import_bundle(
+                &state_dir,
+                &bundle,
+                &administrator_fingerprint,
+                listen,
+            )?;
+            print_json(
+                &serde_json::json!({"node_id": bundle.claims.node_id, "config": state_dir.join("avian.toml"), "network_started": false}),
+            )
+        }
+        Command::DeviceConfigure {
+            state_dir,
+            runtime_template,
+        } => {
+            let runtime = avian::provisioning::parse_runtime_template(&fs::read_to_string(
+                runtime_template,
+            )?)?;
+            avian::provisioning::configure_runtime(&state_dir, runtime)?;
+            print_json(
+                &serde_json::json!({"config": state_dir.join("avian.toml"), "network_started": false}),
+            )
+        }
         Command::Keygen { output } => {
             let key = generate_signing_key()?;
             write_signing_key(&output, &key)?;
@@ -332,6 +408,34 @@ async fn main() -> Result<()> {
                 serde_json::from_slice(&fs::read(&configuration.trust_root_file)?)?;
             let mut store = MembershipStore::load(&configuration.membership_file, root.clone())?;
             match command {
+                Command::Provision {
+                    request,
+                    address,
+                    relay,
+                    revision,
+                    output,
+                } => {
+                    require_new_output(&output)?;
+                    let request: avian::provisioning::DeviceRequest =
+                        serde_json::from_slice(&fs::read(request)?)?;
+                    let administrator = read_signing_key(administrator_path(&config_path))?;
+                    let bundle = avian::provisioning::issue_bundle(
+                        &request,
+                        &mut store,
+                        &administrator,
+                        address,
+                        Permissions {
+                            relay,
+                            administer: false,
+                        },
+                        revision,
+                    )?;
+                    store.save(&configuration.membership_file)?;
+                    avian::provisioning::write_public_export(&output, &bundle).context("membership saved; rerun provision with the same request and revision to retry export")?;
+                    print_json(
+                        &serde_json::json!({"node_id": bundle.claims.node_id, "bundle": output, "administrator_fingerprint": fingerprint(&administrator.verifying_key())}),
+                    )
+                }
                 Command::Enroll {
                     identity_public_key,
                     transport_public_key,

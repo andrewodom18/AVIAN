@@ -105,12 +105,14 @@ dependencies = [
  "avian-services",
  "avian-storage",
  "axum",
+ "base64 0.22.1",
  "clap",
  "ed25519-dalek",
  "fs2",
  "getrandom 0.3.4",
  "hex",
  "http-body-util",
+ "ipnet",
  "reqwest",
  "serde",
  "serde_json",
@@ -122,6 +124,8 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

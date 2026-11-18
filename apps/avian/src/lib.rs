@@ -1,6 +1,8 @@
+pub mod android_provisioning;
 pub mod api;
 pub mod chud;
 pub mod configuration;
+pub mod provisioning;
 pub mod qualification;
 pub mod service_exchange;
 pub mod services;
